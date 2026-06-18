@@ -1,0 +1,1 @@
+timestamp_utc,match_id,home,away,kickoff_utc,market_id,question,market_type,model_side,polymarket_side,model_probability,fair_price_cents,polymarket_price_cents,alpha_gap_cents,alpha_ev,signal_strength,home_xg,away_xg,model_config_name,mapping_confidence,liquidity,volume

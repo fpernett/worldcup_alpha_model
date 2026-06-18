@@ -1,0 +1,8 @@
+venue,city,country,date_utc,time_utc,altitude_m,temp_c,humidity_pct,wind_kmh,precipitation_mm,roof_expected_closed,indoor_adjusted_temp_c,effective_temp_c,effective_humidity_pct,effective_wind_kmh,effective_precipitation_mm,weather_impact_multiplier,environment_source,last_updated
+Dallas Stadium,Arlington,USA,2026-06-17,00:00,190.0,22.0,45.0,0.0,0.0,1,22.0,22.0,53.5,0.0,0.0,0.15,venues_csv,2026-06-17T06:35:57+00:00
+Mercedes-Benz Stadium,Atlanta,USA,2026-06-17,00:00,320.0,22.0,50.0,0.0,0.0,1,22.0,22.0,54.2,0.0,0.0,0.15,venues_csv,2026-06-17T06:35:57+00:00
+NRG Stadium,Houston,USA,2026-06-17,00:00,15.0,23.0,55.0,0.0,0.0,1,22.1,22.1,55.0,0.0,0.0,0.15,venues_csv,2026-06-17T06:35:57+00:00
+Arrowhead Stadium,Kansas City,USA,2026-06-17,00:00,265.0,28.0,58.0,12.0,0.0,0,28.0,28.0,58.0,12.0,0.0,1.0,venues_csv,2026-06-17T06:35:57+00:00
+Levi's Stadium,Santa Clara,USA,2026-06-17,00:00,3.0,24.0,55.0,14.0,0.0,0,24.0,24.0,55.0,14.0,0.0,1.0,venues_csv,2026-06-17T06:35:57+00:00
+BMO Field,Toronto,Canada,2026-06-17,00:00,76.0,23.0,60.0,10.0,0.0,0,23.0,23.0,60.0,10.0,0.0,1.0,venues_csv,2026-06-17T06:35:57+00:00
+Estadio Azteca,Mexico City,Mexico,2026-06-17,00:00,2240.0,20.0,45.0,8.0,0.0,0,20.0,20.0,45.0,8.0,0.0,1.0,venues_csv,2026-06-17T06:35:57+00:00

@@ -1,0 +1,10 @@
+match_id,market,selection,odds,source,last_updated
+66457042,1X2,England,1.78,manual_csv,2026-06-17
+66457042,1X2,Draw,3.80,manual_csv,2026-06-17
+66457042,1X2,Croatia,5.50,manual_csv,2026-06-17
+66457042,Total,Under 2.5,1.95,manual_csv,2026-06-17
+66457042,Total,Over 2.5,1.92,manual_csv,2026-06-17
+66457042,BTTS,Yes,2.10,manual_csv,2026-06-17
+66457042,BTTS,No,1.80,manual_csv,2026-06-17
+66457042,Handicap,Croatia +1.5,1.48,manual_csv,2026-06-17
+66457042,Handicap,England -1.5,2.75,manual_csv,2026-06-17

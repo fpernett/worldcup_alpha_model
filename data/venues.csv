@@ -1,0 +1,8 @@
+venue,city,country,latitude,longitude,altitude_m,temp_c,humidity_pct,wind_kmh,precipitation_mm,roof_expected_closed,neutral_site
+Dallas Stadium,Arlington,USA,32.7473,-97.0945,190,22,45,0,0,1,1
+Mercedes-Benz Stadium,Atlanta,USA,33.7554,-84.4008,320,22,50,0,0,1,1
+NRG Stadium,Houston,USA,29.6847,-95.4107,15,23,55,0,0,1,1
+Arrowhead Stadium,Kansas City,USA,39.0489,-94.4839,265,28,58,12,0,0,1
+Levi's Stadium,Santa Clara,USA,37.4030,-121.9700,3,24,55,14,0,0,1
+BMO Field,Toronto,Canada,43.6332,-79.4186,76,23,60,10,0,0,0
+Estadio Azteca,Mexico City,Mexico,19.3029,-99.1505,2240,20,45,8,0,0,0

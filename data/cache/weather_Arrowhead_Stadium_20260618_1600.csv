@@ -1,0 +1,2 @@
+venue,city,country,latitude,longitude,date_utc,time_utc,altitude_m,temp_c,humidity_pct,wind_kmh,precipitation_mm,roof_expected_closed,indoor_adjusted_temp_c,effective_temp_c,effective_humidity_pct,effective_wind_kmh,effective_precipitation_mm,weather_impact_multiplier,environment_source,source_label,last_updated,neutral_site
+Arrowhead Stadium,Kansas City,USA,39.0489,-94.4839,2026-06-18,16:00,265.0,22.1,46.0,8.2,0.0,0,22.1,22.1,46.0,8.2,0.0,1.0,Open-Meteo API,API,2026-06-17T06:14:51+00:00,1
