@@ -20,7 +20,9 @@ data/cache/
 
 # Optional large or generated files
 exports/
-reports/
+reports/*
+!reports/semantic_audits/
+!reports/semantic_audits/*.md
 htmlcov/
 .coverage
 build/

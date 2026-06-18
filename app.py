@@ -11,12 +11,31 @@ from src.backtesting import evaluate_predictions, load_prediction_log, load_resu
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
 from src.config import api_summary
 from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
+from src.feature_engineering import load_recent_matches
 from src.market_mapping import map_match_to_polymarket_markets, mapping_status
+from src.market_tables import group_market_alpha
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.odds import load_market_odds
 from src.polymarket import get_polymarket_markets, update_polymarket_markets
 from src.ratings import get_team_ratings
+from src.report_charts import (
+    create_compact_score_matrix,
+    create_expected_goals_chart,
+    create_goal_distribution_chart,
+    create_match_outcome_donut,
+    create_score_timeline_chart,
+    create_team_ratings_chart,
+)
+from src.report_metrics import (
+    build_climate_factor_table,
+    build_data_support,
+    build_expected_goals_df,
+    calculate_goal_distribution,
+    calculate_league_context,
+    calculate_team_rating_percentiles,
+)
 from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
+from src.timeline import calculate_score_timeline
 
 
 st.set_page_config(page_title="World Cup Alpha Model", layout="wide")
@@ -54,6 +73,44 @@ def polymarket_alpha_display(df: pd.DataFrame) -> pd.DataFrame:
     if "alpha_ev" in out.columns:
         out["alpha_ev"] = out["alpha_ev"].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
     return out
+
+
+def league_context_display(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    def fmt(row, col):
+        value = row[col]
+        if pd.isna(value):
+            return ""
+        if row.get("unit") == "probability":
+            return f"{100 * float(value):.1f}%"
+        return f"{float(value):.2f}"
+
+    def fmt_delta(row):
+        value = row["Delta"]
+        if pd.isna(value):
+            return ""
+        if row.get("unit") == "probability":
+            return f"{100 * float(value):+.1f} pp"
+        return f"{float(value):+.2f}"
+
+    for col in ["League", "This match"]:
+        out[col] = out.apply(lambda row: fmt(row, col), axis=1)
+    out["Delta"] = out.apply(fmt_delta, axis=1)
+    return out[["Metric", "League", "This match", "Delta"]]
+
+
+def climate_factor_display(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty:
+        return out
+    out["value"] = out.apply(
+        lambda row: "" if pd.isna(row["value"]) else f"{float(row['value']):.1f} {row['unit']}",
+        axis=1,
+    )
+    out["multiplier"] = out["multiplier"].map(lambda x: "" if pd.isna(x) else f"x{float(x):.3f}")
+    return out[["factor", "value", "category", "favours", "multiplier"]]
+
 
 def build_source_status(fixtures, teams, venues, odds) -> pd.DataFrame:
     apis = api_summary()
@@ -197,8 +254,9 @@ def load_inputs(start_date: date, end_date: date, refresh_counter: int, now_utc_
     teams = get_team_ratings()
     venues = load_venues()
     odds = load_market_odds()
+    historical_matches = load_recent_matches()
     status = build_source_status(fixtures, teams, venues, odds)
-    return fixtures, teams, venues, odds, status
+    return fixtures, teams, venues, odds, historical_matches, status
 
 
 @st.cache_data(ttl=600)
@@ -304,7 +362,7 @@ with st.sidebar:
     form_weight = st.slider("Recent form weight", 0.00, 0.40, 0.20, 0.02)
     env_weight = st.slider("Environment weight", 0.000, 0.030, 0.010, 0.001)
 
-fixtures, teams, venues, market_odds, source_status = load_inputs(
+fixtures, teams, venues, market_odds, historical_matches, source_status = load_inputs(
     start_date,
     end_date,
     st.session_state["refresh_counter"],
@@ -414,6 +472,16 @@ for label in selected_labels:
             pd.to_numeric(filtered_polymarket_alpha["alpha_gap_cents"], errors="coerce").fillna(-999) >= min_alpha_gap
         ]
 
+    venue_env = result.get("environment", {})
+    data_support = build_data_support(match, historical_matches)
+    goal_distribution = calculate_goal_distribution(result.get("score_matrix"), max_goals=14)
+    league_context = calculate_league_context(historical_matches, result)
+    score_timeline = calculate_score_timeline(result["hxg"], result["axg"])
+    expected_goals_df = build_expected_goals_df(result)
+    rating_percentiles = calculate_team_rating_percentiles(teams, result["home"], result["away"])
+    climate_factors = build_climate_factor_table(result, venue_env)
+    market_groups = group_market_alpha(alpha, polymarket_alpha)
+
     st.divider()
     st.header(f"{result['home']} vs {result['away']}")
     st.caption(
@@ -424,6 +492,7 @@ for label in selected_labels:
     tabs = st.tabs(
         [
             "Summary",
+            "Full report",
             "Score matrix",
             "Markets",
             "Polymarket alpha",
@@ -458,6 +527,117 @@ for label in selected_labels:
         st.caption("Alpha EV = model_probability x market_decimal_odds - 1. This is a statistical estimate, not a staking instruction.")
 
     with tabs[1]:
+        st.subheader("Alpha Read")
+        top_alpha_rows = alpha.loc[alpha["alpha_ev"].notna()].sort_values("alpha_ev", ascending=False)
+        top_pm_rows = polymarket_alpha.loc[polymarket_alpha["alpha_gap_cents"].notna()].sort_values(
+            "alpha_gap_cents", ascending=False
+        ) if not polymarket_alpha.empty else pd.DataFrame()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Model confidence", confidence["label"])
+        c2.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
+        c3.metric(
+            "Best local EV",
+            "n/a" if top_alpha_rows.empty or pd.isna(top_alpha_rows.iloc[0]["alpha_ev"]) else f"{100 * top_alpha_rows.iloc[0]['alpha_ev']:.1f}%",
+        )
+        c4.metric(
+            "Best Polymarket gap",
+            "n/a" if top_pm_rows.empty else f"{float(top_pm_rows.iloc[0]['alpha_gap_cents']):.1f}c",
+        )
+        st.caption(
+            "Alpha Read is a statistical screen from the model and loaded market data. "
+            "It is not staking advice, trade execution, or an investment recommendation."
+        )
+
+        st.subheader("Data Support")
+        if data_support.get("warnings"):
+            for warning in data_support["warnings"]:
+                st.warning(warning)
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric(f"{result['home'].lower()} matches", f"{data_support['home_team_match_count']:,}")
+        d2.metric(f"{result['away'].lower()} matches", f"{data_support['away_team_match_count']:,}")
+        d3.metric("H2H matches", f"{data_support['h2h_match_count']:,}")
+        d4.metric("Training matches", f"{data_support['training_match_count']:,}")
+        st.caption(
+            f"{data_support['h2h_note']}. Training data range: "
+            f"{data_support['training_data_start'] or 'n/a'} to {data_support['training_data_end'] or 'n/a'}."
+        )
+
+        st.subheader("Goal Distribution And Outcome")
+        g1, g2 = st.columns(2)
+        with g1:
+            st.plotly_chart(
+                create_goal_distribution_chart(goal_distribution, result["home"], result["away"]),
+                width="stretch",
+            )
+        with g2:
+            st.plotly_chart(create_match_outcome_donut(probs, result["home"], result["away"]), width="stretch")
+
+        st.subheader("League Context")
+        st.dataframe(league_context_display(league_context), hide_index=True, width="stretch")
+        context_source = league_context["source"].iloc[0] if "source" in league_context.columns and not league_context.empty else ""
+        st.caption(f"League context source: {context_source}.")
+
+        st.subheader("Score Timeline")
+        st.plotly_chart(create_score_timeline_chart(score_timeline), width="stretch")
+
+        st.subheader("Scoreline Matrix")
+        st.plotly_chart(create_compact_score_matrix(result["score_matrix"], result["home"], result["away"], max_goal=4), width="stretch")
+        with st.expander("Full scoreline matrix"):
+            st.plotly_chart(
+                create_compact_score_matrix(result["score_matrix"], result["home"], result["away"], max_goal=cfg.max_goals),
+                width="stretch",
+            )
+
+        st.subheader("Expected Goals And Team Ratings")
+        x1, x2 = st.columns(2)
+        with x1:
+            st.plotly_chart(create_expected_goals_chart(expected_goals_df), width="stretch")
+            st.caption(expected_goals_df.attrs.get("note", ""))
+        with x2:
+            st.plotly_chart(create_team_ratings_chart(rating_percentiles), width="stretch")
+            st.dataframe(
+                rating_percentiles[
+                    ["team", "attack", "defense", "attack_label", "defense_label"]
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+
+        st.subheader("Climate Factors And Model Information")
+        m1, m2 = st.columns(2)
+        with m1:
+            st.dataframe(climate_factor_display(climate_factors), hide_index=True, width="stretch")
+            if climate_factors.attrs.get("team_factor_note"):
+                st.caption(climate_factors.attrs["team_factor_note"])
+            if climate_factors.attrs.get("roof_note"):
+                st.caption(climate_factors.attrs["roof_note"])
+        with m2:
+            source_summary = ", ".join(
+                f"{row['input']}: {row['source']}" for _, row in source_status.iterrows() if row.get("input")
+            )
+            model_info = pd.DataFrame(
+                [
+                    {"Item": "Model version", "Value": "Match report v1 / transparent Poisson xG model"},
+                    {"Item": "Training data match count", "Value": f"{data_support['training_match_count']:,}"},
+                    {
+                        "Item": "Training data date range",
+                        "Value": f"{data_support['training_data_start'] or 'n/a'} to {data_support['training_data_end'] or 'n/a'}",
+                    },
+                    {"Item": "RPS", "Value": "RPS placeholder / not yet backtested"},
+                    {"Item": "Data source status", "Value": source_summary},
+                ]
+            )
+            st.dataframe(model_info, hide_index=True, width="stretch")
+
+        st.subheader("Market Value Tables")
+        for group_name, group_df in market_groups.items():
+            st.markdown(f"**{group_name}**")
+            if group_df.empty:
+                st.caption("No rows available for this group.")
+            else:
+                st.dataframe(group_df, hide_index=True, width="stretch")
+
+    with tabs[2]:
         mat = result["score_matrix"].copy()
         pivot = mat.pivot(index="home_goals", columns="away_goals", values="prob") * 100
         fig = px.imshow(
@@ -473,7 +653,7 @@ for label in selected_labels:
         scores["probability"] = scores["prob"].map(pct)
         st.dataframe(scores[["label", "probability"]], hide_index=True, width="stretch")
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
         st.dataframe(
             alpha_display(alpha)[
@@ -483,7 +663,7 @@ for label in selected_labels:
             width="stretch",
         )
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Candidate Matched Markets")
         pm_source = polymarket_markets.attrs.get("source_label", "unknown source")
         pm_warning = polymarket_markets.attrs.get("warning", "")
@@ -597,7 +777,7 @@ for label in selected_labels:
             save_prediction_snapshot(match, result, polymarket_alpha)
             st.success(f"Saved {len(polymarket_alpha)} prediction row(s) to data/prediction_log.csv.")
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Sensitivity Analysis")
         sens_display = sensitivity_df.copy()
         for col in ["home_win", "draw", "away_win", "over_2_5", "under_2_5", "btts_yes", "btts_no"]:
@@ -628,7 +808,7 @@ for label in selected_labels:
             st.dataframe(robustness_display, hide_index=True, width="stretch")
             st.caption("A signal is robust when the same Polymarket side remains positive alpha in at least 2 of 3 scenarios.")
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("Backtesting")
         prediction_log = load_prediction_log()
         results_log = load_results_log()
@@ -644,7 +824,7 @@ for label in selected_labels:
         if results_log.empty:
             st.info("Add completed match rows to `data/results_log.csv` to evaluate saved predictions.")
 
-    with tabs[6]:
+    with tabs[7]:
         st.subheader("Team Inputs")
         team_inputs = pd.DataFrame([result["home_inputs"], result["away_inputs"]])
         st.dataframe(
@@ -676,9 +856,9 @@ for label in selected_labels:
         )
         st.dataframe(climates, hide_index=True, width="stretch")
 
-    with tabs[7]:
+    with tabs[8]:
         st.subheader("Venue And Environment")
-        env = get_venue_environment(match["venue"], match["date_utc"], match["time_utc"])
+        env = venue_env
         env_df = pd.DataFrame([env])
         st.dataframe(
             env_df[
@@ -716,7 +896,7 @@ for label in selected_labels:
             "Wind and precipitation mostly reduce total-goals quality, while heat/humidity mismatch affects each team slightly."
         )
 
-    with tabs[8]:
+    with tabs[9]:
         st.markdown(
             """
             **Assumptions**

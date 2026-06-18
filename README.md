@@ -27,6 +27,8 @@ streamlit run app.py
 
 The dashboard opens in your browser. Select a date window, then select one or more matches to model. The app does not model every fixture unless you select those fixtures.
 
+For each selected match, open the **Full report** tab for a report-style view with Alpha Read, data support, goal distribution, outcome donut, league context, score timeline, scoreline matrix, expected goals, team ratings, climate factors, model information, and grouped market value tables.
+
 ## 3. Update Data
 
 The app runs without API keys and falls back to CSV files. The sidebar button **Update API data** refreshes only the sources that are configured. Each refresh step reports `success`, `skipped`, `partial`, or `failed`.
@@ -222,7 +224,38 @@ The score matrix uses an independent Poisson model. Probabilities are normalized
 
 Environmental effects are deliberately conservative. Roof-closed venues reduce outdoor weather impact by 85%. Altitude mostly matters above about 1,200 meters. Wind and precipitation mainly reduce total-goals quality rather than heavily favoring one team.
 
-## 7. Alpha EV
+## 7. Full Match Report
+
+The **Full report** tab is built from local model outputs and local/API data already loaded by the app. It does not scrape AlphaMetri or any login-protected page.
+
+Report sections:
+
+- **Alpha Read**: model confidence, expected goals, best local EV, and best Polymarket alpha gap when market data is available.
+- **Data support**: historical match counts for each team, H2H count, training data range, and fallback warnings.
+- **Goal distribution**: marginal home and away goal probabilities from the score matrix.
+- **Match outcome donut**: home win, draw, and away win probabilities.
+- **League context**: historical or fallback baseline comparison for goals, result rates, BTTS, and over 2.5.
+- **Score timeline**: cumulative goal probabilities from a simple xG hazard curve.
+- **Scoreline matrix**: compact 0-4 heatmap plus expandable full matrix.
+- **Expected goals chart**: adjusted xG with simple uncertainty bands.
+- **Team ratings**: attack and defense inputs with percentile labels.
+- **Climate factors**: altitude, temperature, humidity, precipitation, and wind categories with conservative multipliers.
+- **Model information**: model version, training data count/range, source status, and backtest placeholder.
+- **Market value tables**: grouped decimal-odds alpha and Polymarket alpha screens.
+
+Real metrics in v1:
+
+- model probabilities, expected goals, scoreline probabilities, fair odds, alpha EV, and Polymarket alpha gaps;
+- historical support counts when `data/recent_matches.csv` or cached football results exist;
+- climate factors derived from the same venue/environment inputs used by the model.
+
+Placeholders or approximations in v1:
+
+- RPS is explicitly shown as `RPS placeholder / not yet backtested`;
+- base xG is not separately stored yet, so adjusted xG is used as the base value in the expected-goals report chart;
+- league context uses fallback baselines when historical match data is unavailable.
+
+## 8. Alpha EV
 
 Fair odds:
 
@@ -268,7 +301,7 @@ Signal labels are simple screens:
 
 These labels are not staking advice.
 
-## 8. Model Confidence
+## 9. Model Confidence
 
 Confidence is shown as High, Moderate, or Low.
 
@@ -282,7 +315,7 @@ It depends on:
 
 Example: Moderate confidence may mean team ratings and venue data are available, but recent match history is partly inferred.
 
-## 9. Source Diagnostics
+## 10. Source Diagnostics
 
 The sidebar shows:
 
@@ -296,7 +329,7 @@ The sidebar shows:
 
 Source labels are `API`, `cache`, or `local CSV`.
 
-## 10. Prediction Snapshots And Backtesting
+## 11. Prediction Snapshots And Backtesting
 
 Use the **Polymarket alpha** tab for a selected match, then click **Save prediction snapshot**. Rows append to:
 
@@ -318,7 +351,36 @@ match_id,home,away,home_goals,away_goals,result_home_win,result_draw,result_away
 
 The **Backtesting** tab loads both logs and reports simple Brier score, log loss, mean alpha gap, hit rate by signal strength, and calibration buckets when completed results exist.
 
-## 11. Validate The Model
+## 12. Weekly Semantic Audit
+
+Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:
+
+```bash
+source .venv/bin/activate
+python scripts/weekly_semantic_audit.py
+```
+
+The audit is read-only except for writing a Markdown report to:
+
+```text
+reports/semantic_audits/weekly_semantic_audit_YYYY-MM-DD.md
+```
+
+It checks:
+
+- current Git status and recent commits;
+- files changed since the previous semantic audit;
+- CSV headers against `src/schema_registry.py`;
+- model, metric, API/source, Polymarket mapping, dashboard, README, AGENTS, and semantic-layer documentation changes;
+- `python -m py_compile app.py`;
+- `python -m py_compile src/*.py`;
+- `pytest -q` when tests are present.
+
+The audit does not require internet access, API keys, a cloud scheduler, or Polymarket credentials. It does not modify model code, CSV data, cache files, commits, or notifications.
+
+`data/cache/` and `.env` remain ignored. Small Markdown reports under `reports/semantic_audits/` are allowed through `.gitignore` so they can be tracked if useful.
+
+## 13. Validate The Model
 
 Run:
 
@@ -328,9 +390,9 @@ python -m pytest -q
 python scripts/update_all.py --start-date 2026-06-17 --end-date 2026-06-18
 ```
 
-The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, and missing-API fallback.
+The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, and Full report helper outputs.
 
-## 12. Known Limitations
+## 14. Known Limitations
 
 - Ratings are transparent priors unless connected to a real ratings API or recent match-history file.
 - Injuries, lineups, tactical changes, and motivation are not automatically modeled.
@@ -339,4 +401,5 @@ The tests check probability sums, fair odds, score matrix normalization, missing
 - Low-liquidity markets and missing prices should be treated as data warnings, not opportunities.
 - The Poisson model assumes independent scoring rates.
 - Training climate is approximate and should not be overinterpreted.
+- Full report v1 uses simple report-layer uncertainty bands and a score-timeline hazard approximation.
 - The app does not include trade execution, staking, bet sizing, Kelly criterion, or investment recommendations.
