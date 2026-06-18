@@ -93,6 +93,48 @@ def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool 
     )
 
 
+def filter_future_fixtures(
+    fixtures: pd.DataFrame,
+    now_utc: str | pd.Timestamp | None = None,
+    horizon_hours: float | None = None,
+) -> pd.DataFrame:
+    """Keep only fixtures whose UTC kickoff has not passed.
+
+    `date_utc` and `time_utc` are treated as UTC. Rows with missing or
+    unparseable kickoff timestamps are hidden because this dashboard is meant
+    for future-match evaluation.
+    """
+    if fixtures is None:
+        return pd.DataFrame(columns=FIXTURE_COLUMNS + ["kickoff_utc"])
+
+    if fixtures.empty:
+        empty = fixtures.copy()
+        if "kickoff_utc" not in empty.columns:
+            empty["kickoff_utc"] = pd.Series(dtype="datetime64[ns, UTC]")
+        empty.attrs = fixtures.attrs.copy()
+        return empty
+
+    out = fixtures.copy()
+    attrs = fixtures.attrs.copy()
+    now = pd.Timestamp.now(tz="UTC") if now_utc is None else pd.Timestamp(now_utc)
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    else:
+        now = now.tz_convert("UTC")
+
+    date_part = out.get("date_utc", pd.Series(index=out.index, dtype="object")).astype(str)
+    time_part = out.get("time_utc", pd.Series("00:00", index=out.index)).fillna("00:00").astype(str).str.slice(0, 5)
+    out["kickoff_utc"] = pd.to_datetime(date_part + " " + time_part, utc=True, errors="coerce")
+
+    mask = out["kickoff_utc"].notna() & (out["kickoff_utc"] >= now)
+    if horizon_hours is not None:
+        mask &= out["kickoff_utc"] <= now + pd.Timedelta(hours=float(horizon_hours))
+
+    filtered = out.loc[mask].sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
+    filtered.attrs = attrs
+    return filtered
+
+
 def fetch_football_results(
     start_date: date | None = None,
     end_date: date | None = None,

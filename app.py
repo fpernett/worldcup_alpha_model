@@ -10,7 +10,7 @@ from src.alpha import calculate_polymarket_alpha
 from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log, save_prediction_snapshot
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
 from src.config import api_summary
-from src.data_sources import get_upcoming_fixtures, update_all_sources
+from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.market_mapping import map_match_to_polymarket_markets, mapping_status
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.odds import load_market_odds
@@ -191,8 +191,9 @@ def build_source_status(fixtures, teams, venues, odds) -> pd.DataFrame:
     return pd.DataFrame(diagnostics)
 
 @st.cache_data(ttl=600)
-def load_inputs(start_date: date, end_date: date, refresh_counter: int):
+def load_inputs(start_date: date, end_date: date, refresh_counter: int, now_utc_iso: str, horizon_hours: float | None):
     fixtures = get_upcoming_fixtures(start_date, end_date)
+    fixtures = filter_future_fixtures(fixtures, now_utc=now_utc_iso, horizon_hours=horizon_hours)
     teams = get_team_ratings()
     venues = load_venues()
     odds = load_market_odds()
@@ -218,9 +219,14 @@ if "polymarket_refresh_counter" not in st.session_state:
 
 with st.sidebar:
     st.header("Fixture Window")
-    anchor_date = st.date_input("Date selector", value=date.today())
-    window = st.radio("Quick range", ["Today", "Tomorrow", "Date range"], index=0)
-    if window == "Today":
+    anchor_date = st.date_input("Start date", value=date.today())
+    window = st.radio("Quick range", ["Upcoming 48 hours", "Today", "Tomorrow", "Date range"], index=0)
+    horizon_hours = None
+    if window == "Upcoming 48 hours":
+        start_date = anchor_date
+        end_date = anchor_date + timedelta(days=2)
+        horizon_hours = 48.0
+    elif window == "Today":
         start_date = anchor_date
         end_date = anchor_date
     elif window == "Tomorrow":
@@ -286,20 +292,24 @@ with st.sidebar:
     st.header("Model Parameters")
     base_total = st.slider("Base total goals", 1.8, 3.2, 2.50, 0.05)
     elo_weight = st.slider(
-    "Elo xG weight",
-    0.0010,
-    0.0060,
-    0.0032,
-    0.0001,
-    format="%.4f",
-)
+        "Elo xG weight",
+        0.0010,
+        0.0060,
+        0.0032,
+        0.0001,
+        format="%.4f",
+    )
     attack_weight = st.slider("Attack weight", 0.20, 0.90, 0.55, 0.05)
     defense_weight = st.slider("Defense weight", 0.20, 0.90, 0.45, 0.05)
     form_weight = st.slider("Recent form weight", 0.00, 0.40, 0.20, 0.02)
     env_weight = st.slider("Environment weight", 0.000, 0.030, 0.010, 0.001)
 
 fixtures, teams, venues, market_odds, source_status = load_inputs(
-    start_date, end_date, st.session_state["refresh_counter"]
+    start_date,
+    end_date,
+    st.session_state["refresh_counter"],
+    pd.Timestamp.now(tz="UTC").floor("min").isoformat(),
+    horizon_hours,
 )
 polymarket_markets = load_polymarket_inputs(
     polymarket_query,
@@ -324,10 +334,16 @@ with st.sidebar:
     )
     if polymarket_markets.attrs.get("warning"):
         st.warning(polymarket_markets.attrs["warning"])
+    if polymarket_markets.empty:
+        st.warning(
+            "No Polymarket market rows are loaded. The default Gamma API returned no usable rows, "
+            "the selected query found no matches, or the request failed. You can also paste fallback "
+            "rows into `data/polymarket_markets.csv`."
+        )
 
 st.subheader("Available Matches")
 if fixtures.empty:
-    st.warning("No fixtures found for the selected window. Add rows to `data/fixtures.csv` or configure a fixture API.")
+    st.warning("No future fixtures found for the selected window. Add upcoming rows to `data/fixtures.csv`, widen the date range, or configure a fixture API.")
     st.stop()
 
 fixture_view = fixtures.copy()
@@ -342,10 +358,11 @@ fixture_view["match_label"] = (
 )
 
 st.dataframe(
-    fixture_view[["match_id", "date_utc", "time_utc", "competition", "group", "home", "away", "venue", "city"]],
+    fixture_view[["match_id", "kickoff_utc", "competition", "group", "home", "away", "venue", "city"]],
     width="stretch",
     hide_index=True,
 )
+st.caption("Only fixtures with future UTC kickoff times are shown. Past matches are hidden automatically.")
 
 selected_labels = st.multiselect(
     "Select one or more games to model",
@@ -468,9 +485,31 @@ for label in selected_labels:
 
     with tabs[3]:
         st.subheader("Candidate Matched Markets")
-        st.caption(f"Mapping status: {mapping_status(mapped_markets)}")
-        if mapped_markets.empty:
-            st.warning("No Polymarket mappings found for this selected match. Add rows to `data/market_mappings.csv` or `data/polymarket_markets.csv`.")
+        pm_source = polymarket_markets.attrs.get("source_label", "unknown source")
+        pm_warning = polymarket_markets.attrs.get("warning", "")
+        st.caption(
+            f"Mapping status: {mapping_status(mapped_markets)} | "
+            f"Loaded Polymarket markets: {len(polymarket_markets)} from {pm_source}"
+        )
+        if pm_warning:
+            st.warning(pm_warning)
+        if polymarket_markets.empty:
+            st.warning(
+                "No Polymarket market data is loaded, so there is nothing to map for this match. "
+                "Click **Update Polymarket markets** to refresh the default Gamma API, broaden the "
+                "sidebar market search query, or add fallback rows to `data/polymarket_markets.csv`."
+            )
+            st.caption(
+                "Required CSV columns: market_id, question, slug, event_title, category, start_date, "
+                "end_date, active, closed, outcomes, yes_price, no_price, liquidity, volume, source, last_updated."
+            )
+        elif mapped_markets.empty:
+            st.warning(
+                f"Loaded {len(polymarket_markets)} Polymarket market row(s), but none matched "
+                f"{result['home']} vs {result['away']}. Add a confirmed row to "
+                "`data/market_mappings.csv` or adjust the Polymarket market data/query. Turn off "
+                "**Show only mapped markets** to inspect the loaded Gamma rows."
+            )
         else:
             candidate_display = mapped_markets.copy()
             for col in ["yes_price", "no_price"]:
@@ -498,8 +537,14 @@ for label in selected_labels:
             )
 
         st.subheader("Polymarket Alpha")
-        if filtered_polymarket_alpha.empty:
-            st.info("No alpha rows match the current mapping, liquidity, and alpha-gap filters.")
+        if polymarket_markets.empty:
+            st.info("Polymarket alpha needs loaded market rows with YES/NO prices before it can calculate fair-price gaps.")
+        elif mapped_markets.empty:
+            st.info("Polymarket alpha needs at least one mapped market for this selected match.")
+        elif polymarket_alpha.empty:
+            st.info("Mapped markets were found, but prices were missing or invalid, so no alpha rows could be calculated.")
+        elif filtered_polymarket_alpha.empty:
+            st.info("Alpha rows exist, but none match the current liquidity and alpha-gap filters.")
         else:
             display_pm = polymarket_alpha_display(filtered_polymarket_alpha)
             st.dataframe(

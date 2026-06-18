@@ -68,7 +68,7 @@ ODDS_API_URL=
 ODDS_API_KEY=
 POLYMARKET_API_URL=
 POLYMARKET_CLOB_API_URL=
-POLYMARKET_GAMMA_API_URL=
+POLYMARKET_GAMMA_API_URL=https://gamma-api.polymarket.com
 ```
 
 If an API key or API URL is missing, or an API call fails, the app continues with cache or local CSV data.
@@ -151,6 +151,16 @@ Decimal odds are used. Missing odds do not break the app; alpha EV is left blank
 
 ### Polymarket Markets
 
+The app uses the public Polymarket Gamma API as the default read-only market source:
+
+```text
+https://gamma-api.polymarket.com/markets
+```
+
+No Polymarket API key is required for this market-data fetch. The sidebar button
+**Update Polymarket markets** refreshes Gamma data, writes the cache files, and
+then filters the loaded markets by the sidebar search query.
+
 Edit `data/polymarket_markets.csv` to paste Polymarket market data manually:
 
 ```text
@@ -159,14 +169,16 @@ market_id,question,slug,event_title,category,start_date,end_date,active,closed,o
 
 Prices can be entered as probabilities (`0.42`) or cents (`42`). The app normalizes them to probabilities internally.
 
-If `POLYMARKET_GAMMA_API_URL`, `POLYMARKET_API_URL`, or `POLYMARKET_CLOB_API_URL` is configured, the app tries to fetch markets read-only. Successful API responses are cached in:
+If `POLYMARKET_GAMMA_API_URL` or `POLYMARKET_API_URL` is configured, that URL
+overrides the default Gamma base URL. Successful API responses are cached in:
 
 ```text
 data/cache/polymarket_markets_raw.json
 data/cache/polymarket_markets_normalized.csv
 ```
 
-If the API is empty or fails, the app uses cache or `data/polymarket_markets.csv`.
+If Gamma is unavailable or the API call fails, the app uses cache or
+`data/polymarket_markets.csv`.
 
 ### Manual Market Mappings
 

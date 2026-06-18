@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+import requests
 
 from src.alpha import calculate_polymarket_alpha
 from src.backtesting import load_prediction_log, save_prediction_snapshot
+from src.market_mapping import map_match_to_polymarket_markets
 from src.polymarket import POLYMARKET_COLUMNS, get_polymarket_markets, normalize_price
 from src.sensitivity import run_sensitivity_analysis
 from src.model import ModelConfig
@@ -119,13 +121,104 @@ def test_prediction_log_append(tmp_path, monkeypatch) -> None:
     assert log.iloc[0]["market_id"] == "PM1"
 
 
+def test_gamma_api_default_used_when_env_empty(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("POLYMARKET_API_URL", raising=False)
+    monkeypatch.delenv("POLYMARKET_GAMMA_API_URL", raising=False)
+    monkeypatch.delenv("POLYMARKET_CLOB_API_URL", raising=False)
+    monkeypatch.setattr("src.cache.CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr("src.polymarket.DATA_DIR", tmp_path)
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "id": "PM-MEX",
+                    "question": "Will Mexico win the 2026 FIFA World Cup?",
+                    "slug": "will-mexico-win-the-2026-fifa-world-cup",
+                    "events": [{"title": "World Cup Winner", "category": "Sports"}],
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.035", "0.965"]',
+                    "liquidityNum": "1000",
+                    "volumeNum": "5000",
+                    "active": True,
+                    "closed": False,
+                    "updatedAt": "2026-06-18T12:00:00Z",
+                }
+            ]
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=0):
+        calls.append((url, params, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr("src.polymarket.requests.get", fake_get)
+
+    markets = get_polymarket_markets(query="World Cup", force_refresh=True)
+
+    assert calls
+    assert calls[0][0] == "https://gamma-api.polymarket.com/markets"
+    assert markets.attrs.get("source_label") == "API"
+    assert markets.iloc[0]["market_id"] == "PM-MEX"
+    assert float(markets.iloc[0]["yes_price"]) == 0.035
+    assert markets.iloc[0]["event_title"] == "World Cup Winner"
+
+
 def test_missing_polymarket_api_falls_back_to_csv(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("POLYMARKET_API_URL", raising=False)
     monkeypatch.delenv("POLYMARKET_GAMMA_API_URL", raising=False)
     monkeypatch.delenv("POLYMARKET_CLOB_API_URL", raising=False)
     monkeypatch.setattr("src.storage.DATA_DIR", tmp_path)
     monkeypatch.setattr("src.polymarket.DATA_DIR", tmp_path)
+    monkeypatch.setattr("src.cache.CACHE_DIR", tmp_path / "cache")
     pd.DataFrame(columns=POLYMARKET_COLUMNS).to_csv(tmp_path / "polymarket_markets.csv", index=False)
+
+    def fake_get(*args, **kwargs):
+        raise requests.RequestException("offline")
+
+    monkeypatch.setattr("src.polymarket.requests.get", fake_get)
+
     markets = get_polymarket_markets()
     assert list(markets.columns) == POLYMARKET_COLUMNS
     assert markets.attrs.get("source_label") == "local CSV"
+
+
+def test_world_cup_outright_is_not_mapped_to_selected_match() -> None:
+    match = pd.Series(
+        {
+            "match_id": "MEX-KOR",
+            "date_utc": "2026-06-19",
+            "time_utc": "01:00",
+            "home": "Mexico",
+            "away": "South Korea",
+        }
+    )
+    markets = pd.DataFrame(
+        [
+            {
+                "market_id": "PM-MEX",
+                "question": "Will Mexico win the 2026 FIFA World Cup?",
+                "slug": "will-mexico-win-the-2026-fifa-world-cup",
+                "event_title": "World Cup Winner",
+                "category": "Sports",
+                "start_date": "2025-07-02T22:28:24Z",
+                "end_date": "2026-07-20T00:00:00Z",
+                "active": 1,
+                "closed": 0,
+                "outcomes": '["Yes", "No"]',
+                "yes_price": 0.035,
+                "no_price": 0.965,
+                "liquidity": 1000,
+                "volume": 5000,
+                "source": "API",
+                "last_updated": "2026-06-18T12:00:00Z",
+            }
+        ]
+    )
+
+    mapped = map_match_to_polymarket_markets(match, markets)
+
+    assert mapped.empty

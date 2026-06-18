@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.climate import environment_from_venue_row
+from src.data_sources import filter_future_fixtures
 from src.model import ModelConfig, environmental_adjustments, fair_odds, outcome_probs, run_match_model, score_matrix
 
 
@@ -117,3 +118,19 @@ def test_roof_closed_reduces_weather_impact() -> None:
 
     assert abs(roof_adj["total_environment_log_adj"]) < abs(open_adj["total_environment_log_adj"])
     assert roof_adj["weather_impact_multiplier"] < open_adj["weather_impact_multiplier"]
+
+
+def test_future_fixture_filter_excludes_past_and_keeps_tomorrow() -> None:
+    fixtures = pd.DataFrame(
+        [
+            {"match_id": "PAST", "date_utc": "2026-06-18", "time_utc": "02:00", "home": "A", "away": "B"},
+            {"match_id": "LATER", "date_utc": "2026-06-18", "time_utc": "16:00", "home": "C", "away": "D"},
+            {"match_id": "TOMORROW", "date_utc": "2026-06-19", "time_utc": "01:00", "home": "E", "away": "F"},
+            {"match_id": "TOO_FAR", "date_utc": "2026-06-21", "time_utc": "12:00", "home": "G", "away": "H"},
+        ]
+    )
+
+    filtered = filter_future_fixtures(fixtures, now_utc="2026-06-18T13:07:00Z", horizon_hours=48)
+
+    assert filtered["match_id"].tolist() == ["LATER", "TOMORROW"]
+    assert "kickoff_utc" in filtered.columns

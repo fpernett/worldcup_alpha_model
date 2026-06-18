@@ -136,7 +136,11 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
     for _, market in markets.iterrows():
         text = _market_text(market)
         score, reasons = _team_match_score(text, home, away)
+        has_home = _has_team(text, home)
+        has_away = _has_team(text, away)
         if score <= 0:
+            continue
+        if _is_tournament_outright(text):
             continue
 
         proximity_score, proximity_reason = _date_proximity_score(kickoff, market)
@@ -147,6 +151,9 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
         market_type, model_side, polymarket_side, type_reason, type_score = _infer_market_type(text, home, away)
         score += type_score
         reasons.append(type_reason)
+
+        if _is_match_level_market(market_type) and not (has_home and has_away):
+            continue
 
         if market_type == "other" and score < 0.60:
             continue
@@ -180,10 +187,8 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
 
 
 def _team_match_score(text: str, home: str, away: str) -> tuple[float, list[str]]:
-    home_terms = _team_terms(home)
-    away_terms = _team_terms(away)
-    has_home = any(_contains_term(text, term) for term in home_terms)
-    has_away = any(_contains_term(text, term) for term in away_terms)
+    has_home = _has_team(text, home)
+    has_away = _has_team(text, away)
     reasons = []
     score = 0.0
     if has_home and has_away:
@@ -193,6 +198,10 @@ def _team_match_score(text: str, home: str, away: str) -> tuple[float, list[str]
         score += 0.20
         reasons.append("one team found")
     return score, reasons
+
+
+def _has_team(text: str, team: str) -> bool:
+    return any(_contains_term(text, term) for term in _team_terms(team))
 
 
 def _infer_market_type(text: str, home: str, away: str) -> tuple[str, str, str, str, float]:
@@ -247,6 +256,31 @@ def _market_text(market: pd.Series) -> str:
         str(market.get(col, "") or "")
         for col in ["question", "slug", "event_title", "category"]
     ).lower()
+
+
+def _is_tournament_outright(text: str) -> bool:
+    outright_patterns = [
+        "win the 2026 fifa world cup",
+        "win 2026 fifa world cup",
+        "world cup winner",
+        "winner of the 2026 fifa world cup",
+    ]
+    return any(pattern in text for pattern in outright_patterns)
+
+
+def _is_match_level_market(market_type: str) -> bool:
+    return market_type in {
+        "match_winner_home",
+        "match_winner_away",
+        "draw",
+        "home_not_win",
+        "away_not_win",
+        "over_2_5",
+        "under_2_5",
+        "btts_yes",
+        "btts_no",
+        "correct_score",
+    }
 
 
 def _team_terms(team: str) -> list[str]:
