@@ -1,3 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# System files
+.DS_Store
+
+# Cache
+data/cache/
+*.log
+
+# Optional large or generated files
+exports/
+reports/
 .env
 .venv/
 __pycache__/
