@@ -1,11 +1,12 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 .venv/
 venv/
 .env
+.env.*
+!.env.example
+.pytest_cache/
 
 # Streamlit
 .streamlit/secrets.toml
@@ -13,15 +14,15 @@ venv/
 # System files
 .DS_Store
 
-# Cache
+# Generated caches and logs
 data/cache/
 *.log
 
 # Optional large or generated files
 exports/
 reports/
-.env
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
+htmlcov/
+.coverage
+build/
+dist/
+*.egg-info/
