@@ -12,11 +12,11 @@ from src.climate import get_team_training_climate, get_venue_environment, load_v
 from src.config import api_summary
 from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.feature_engineering import load_recent_matches
-from src.market_mapping import map_match_to_polymarket_markets, mapping_status
+from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
 from src.market_tables import group_market_alpha
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.odds import load_market_odds
-from src.polymarket import get_polymarket_markets, update_polymarket_markets
+from src.polymarket import get_match_polymarket_markets, get_polymarket_markets, update_polymarket_markets
 from src.ratings import get_team_ratings
 from src.report_charts import (
     create_compact_score_matrix,
@@ -264,6 +264,37 @@ def load_polymarket_inputs(query: str, use_cache: bool, refresh_counter: int):
     return get_polymarket_markets(query=query or None, use_cache=use_cache)
 
 
+@st.cache_data(ttl=600)
+def load_match_polymarket_inputs(home: str, away: str, date_utc: str, refresh_counter: int):
+    return get_match_polymarket_markets(home, away, date_utc)
+
+
+def merge_polymarket_inputs(primary: pd.DataFrame, secondary: pd.DataFrame) -> pd.DataFrame:
+    frames = [df for df in [primary, secondary] if df is not None and not df.empty]
+    if not frames:
+        out = primary.copy() if primary is not None else pd.DataFrame()
+    else:
+        out = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["market_id"]).reset_index(drop=True)
+    source_labels = list(
+        dict.fromkeys(
+            str(df.attrs.get("source_label", "")).strip()
+            for df in [primary, secondary]
+            if df is not None and str(df.attrs.get("source_label", "")).strip()
+        )
+    )
+    warnings = list(
+        dict.fromkeys(
+            str(df.attrs.get("warning", "")).strip()
+            for df in [primary, secondary]
+            if df is not None and str(df.attrs.get("warning", "")).strip()
+        )
+    )
+    out.attrs["source_label"] = " + ".join(source_labels) if source_labels else "unknown source"
+    if out.empty and warnings:
+        out.attrs["warning"] = "; ".join(warnings)
+    return out
+
+
 st.title("FIFA World Cup Match Alpha Model")
 st.caption(
     "Transparent local model for statistical alpha estimates. It estimates probabilities, fair odds, scorelines, "
@@ -329,6 +360,7 @@ with st.sidebar:
     min_liquidity = st.number_input("Minimum liquidity", min_value=0.0, value=0.0, step=25.0)
     min_alpha_gap = st.slider("Minimum alpha gap (cents)", 0.0, 20.0, 0.0, 0.5)
     show_only_mapped = st.toggle("Show only mapped markets", value=True)
+    search_selected_match = st.toggle("Search selected match markets", value=True)
 
     if st.button("Update Polymarket markets", width="stretch"):
         with st.spinner("Refreshing Polymarket markets if an API is configured..."):
@@ -456,6 +488,22 @@ for label in selected_labels:
 
     confidence = result["confidence"]
     mapped_markets = map_match_to_polymarket_markets(match, polymarket_markets)
+    match_polymarket_markets = pd.DataFrame()
+    mapping_market_pool = polymarket_markets
+    if mapped_markets.empty and search_selected_match:
+        match_polymarket_markets = load_match_polymarket_inputs(
+            str(match.get("home", "")),
+            str(match.get("away", "")),
+            str(match.get("date_utc", "")),
+            st.session_state["polymarket_refresh_counter"],
+        )
+        mapping_market_pool = merge_polymarket_inputs(polymarket_markets, match_polymarket_markets)
+        mapped_markets = map_match_to_polymarket_markets(match, mapping_market_pool)
+    unmapped_diagnostics = (
+        explain_unmapped_polymarket_markets(match, mapping_market_pool)
+        if mapped_markets.empty and not mapping_market_pool.empty
+        else pd.DataFrame()
+    )
     polymarket_alpha = calculate_polymarket_alpha(result, mapped_markets, min_liquidity=min_liquidity)
     sensitivity_df = run_sensitivity_analysis(match, teams, venues, market_odds)
     robustness_df = assess_alpha_robustness(polymarket_alpha, sensitivity_df)
@@ -665,15 +713,19 @@ for label in selected_labels:
 
     with tabs[4]:
         st.subheader("Candidate Matched Markets")
-        pm_source = polymarket_markets.attrs.get("source_label", "unknown source")
-        pm_warning = polymarket_markets.attrs.get("warning", "")
+        pm_source = mapping_market_pool.attrs.get("source_label", "unknown source")
+        pm_warning = mapping_market_pool.attrs.get("warning", "")
+        match_search_note = ""
+        if search_selected_match:
+            match_search_note = f" | Selected-match search rows: {len(match_polymarket_markets)}"
         st.caption(
             f"Mapping status: {mapping_status(mapped_markets)} | "
-            f"Loaded Polymarket markets: {len(polymarket_markets)} from {pm_source}"
+            f"Candidate Polymarket markets: {len(mapping_market_pool)} from {pm_source} | "
+            f"Sidebar rows: {len(polymarket_markets)}{match_search_note}"
         )
         if pm_warning:
             st.warning(pm_warning)
-        if polymarket_markets.empty:
+        if mapping_market_pool.empty:
             st.warning(
                 "No Polymarket market data is loaded, so there is nothing to map for this match. "
                 "Click **Update Polymarket markets** to refresh the default Gamma API, broaden the "
@@ -684,12 +736,55 @@ for label in selected_labels:
                 "end_date, active, closed, outcomes, yes_price, no_price, liquidity, volume, source, last_updated."
             )
         elif mapped_markets.empty:
+            mostly_outrights = (
+                not unmapped_diagnostics.empty
+                and unmapped_diagnostics["rejection_reason"]
+                .astype(str)
+                .str.contains("Tournament outright", case=False, na=False)
+                .all()
+            )
+            search_detail = (
+                " The app also searched Gamma by the selected home and away team names."
+                if search_selected_match
+                else " Turn on **Search selected match markets** to query Gamma by the selected teams."
+            )
+            reason_detail = (
+                " Gamma only returned tournament-winner markets for these teams."
+                if mostly_outrights
+                else ""
+            )
             st.warning(
-                f"Loaded {len(polymarket_markets)} Polymarket market row(s), but none matched "
-                f"{result['home']} vs {result['away']}. Add a confirmed row to "
+                f"Checked {len(mapping_market_pool)} Polymarket market row(s), but none matched "
+                f"{result['home']} vs {result['away']}.{search_detail}{reason_detail} Add a confirmed row to "
                 "`data/market_mappings.csv` or adjust the Polymarket market data/query. Turn off "
                 "**Show only mapped markets** to inspect the loaded Gamma rows."
             )
+            if not unmapped_diagnostics.empty:
+                diagnostic_display = unmapped_diagnostics.head(25).copy()
+                for col in ["yes_price", "no_price"]:
+                    if col in diagnostic_display.columns:
+                        diagnostic_display[col] = diagnostic_display[col].map(
+                            lambda x: "" if pd.isna(x) else f"{100*float(x):.1f}"
+                        )
+                st.dataframe(
+                    diagnostic_display[
+                        [
+                            "market_id",
+                            "question",
+                            "event_title",
+                            "has_home",
+                            "has_away",
+                            "market_type_guess",
+                            "rejection_reason",
+                            "yes_price",
+                            "no_price",
+                            "liquidity",
+                            "volume",
+                        ]
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
         else:
             candidate_display = mapped_markets.copy()
             for col in ["yes_price", "no_price"]:
@@ -717,7 +812,7 @@ for label in selected_labels:
             )
 
         st.subheader("Polymarket Alpha")
-        if polymarket_markets.empty:
+        if mapping_market_pool.empty:
             st.info("Polymarket alpha needs loaded market rows with YES/NO prices before it can calculate fair-price gaps.")
         elif mapped_markets.empty:
             st.info("Polymarket alpha needs at least one mapped market for this selected match.")
@@ -755,7 +850,7 @@ for label in selected_labels:
         if not show_only_mapped:
             st.subheader("Loaded Polymarket Markets")
             st.dataframe(
-                polymarket_markets.head(50)[
+                mapping_market_pool.head(50)[
                     [
                         "market_id",
                         "question",

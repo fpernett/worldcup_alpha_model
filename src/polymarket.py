@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pandas as pd
@@ -41,12 +42,31 @@ POLYMARKET_COLUMNS = [
 DEFAULT_POLYMARKET_GAMMA_API_URL = "https://gamma-api.polymarket.com"
 GAMMA_PAGE_LIMIT = 100
 GAMMA_MAX_PAGES = 5
+TEAM_SLUG_CODES = {
+    "Bosnia and Herzegovina": "bih",
+    "Canada": "can",
+    "Colombia": "col",
+    "Croatia": "cro",
+    "Czechia": "cze",
+    "DR Congo": "cod",
+    "England": "eng",
+    "Ghana": "gha",
+    "Mexico": "mex",
+    "Panama": "pan",
+    "Portugal": "por",
+    "Qatar": "qat",
+    "South Africa": "rsa",
+    "South Korea": "kor",
+    "Switzerland": "sui",
+    "Uzbekistan": "uzb",
+}
 
 
 def get_polymarket_markets(
     query: str | None = None,
     use_cache: bool = False,
     force_refresh: bool = False,
+    write_cache: bool = True,
 ) -> pd.DataFrame:
     """Load Polymarket markets from API, cache, or local CSV.
 
@@ -62,9 +82,10 @@ def get_polymarket_markets(
         if cached is not None and cached.empty:
             warning = "Cached Polymarket market file was empty; refreshing Gamma API."
 
-    api_markets, error = _fetch_markets_from_api(query)
+    api_markets, error = _fetch_markets_from_api(query, write_cache=write_cache)
     if api_markets is not None and not api_markets.empty:
-        write_dataframe_cache(api_markets, "polymarket_markets_normalized.csv", "Polymarket Gamma API")
+        if write_cache:
+            write_dataframe_cache(api_markets, "polymarket_markets_normalized.csv", "Polymarket Gamma API")
         return set_source_attrs(api_markets, SOURCE_API, "Polymarket Gamma API", utc_now_iso(), warning=warning or None)
     warning = "; ".join(part for part in [warning, error or "Polymarket Gamma API returned no usable markets."] if part)
 
@@ -94,6 +115,25 @@ def update_polymarket_markets(query: str | None = None) -> dict[str, Any]:
     }
 
 
+def get_match_polymarket_markets(home: str, away: str, date_utc: Any | None = None) -> pd.DataFrame:
+    """Read-only selected-match market search.
+
+    Broad World Cup searches often return tournament outrights first. Sports
+    match pages are event-backed, so try the fixture event slug before falling
+    back to team searches. The mapper still validates each market before use.
+    """
+    event_markets, event_error = _fetch_event_markets_from_api(_match_event_slug_candidates(home, away, date_utc))
+    frames = [event_markets]
+    frames.extend(
+        get_polymarket_markets(query=query, use_cache=False, force_refresh=True, write_cache=False)
+        for query in _match_search_queries(home, away)
+    )
+    out = _combine_market_frames(frames, fallback_source="selected-match Gamma search")
+    if event_error and out.empty:
+        out.attrs["warning"] = event_error
+    return out
+
+
 def normalize_price(value: Any) -> float | pd.NA:
     price = coerce_float(value, float("nan"))
     if pd.isna(price):
@@ -105,7 +145,7 @@ def normalize_price(value: Any) -> float | pd.NA:
     return float(price)
 
 
-def _fetch_markets_from_api(query: str | None) -> tuple[pd.DataFrame | None, str | None]:
+def _fetch_markets_from_api(query: str | None, write_cache: bool = True) -> tuple[pd.DataFrame | None, str | None]:
     endpoint = _polymarket_endpoint()
     if not endpoint:
         return None, "No Polymarket API URL is configured."
@@ -125,7 +165,8 @@ def _fetch_markets_from_api(query: str | None) -> tuple[pd.DataFrame | None, str
     except Exception as exc:
         return None, str(exc)
 
-    write_json_cache(records, "polymarket_markets_raw.json", "Polymarket Gamma API")
+    if write_cache:
+        write_json_cache(records, "polymarket_markets_raw.json", "Polymarket Gamma API")
     if not records:
         return None, "Polymarket API payload did not contain market records."
 
@@ -244,15 +285,143 @@ def _extract_market_records(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _polymarket_endpoint() -> str | None:
+def _fetch_event_markets_from_api(slugs: list[str]) -> tuple[pd.DataFrame, str | None]:
+    if not slugs:
+        return pd.DataFrame(columns=POLYMARKET_COLUMNS), None
+
+    endpoint = _polymarket_events_endpoint()
+    if not endpoint:
+        return pd.DataFrame(columns=POLYMARKET_COLUMNS), "No Polymarket API URL is configured."
+
+    records: list[dict[str, Any]] = []
+    errors = []
+    try:
+        for slug in slugs:
+            response = requests.get(
+                endpoint,
+                params={"slug": slug, "active": "true", "closed": "false"},
+                timeout=25,
+            )
+            response.raise_for_status()
+            events = _extract_event_records(response.json())
+            records.extend(_event_market_records(events))
+            if records:
+                break
+    except Exception as exc:
+        errors.append(str(exc))
+
+    if not records:
+        return pd.DataFrame(columns=POLYMARKET_COLUMNS), "; ".join(errors) if errors else None
+
+    df = _normalise_markets(pd.DataFrame(records), SOURCE_API)
+    return set_source_attrs(df, SOURCE_API, "Polymarket Gamma events API", utc_now_iso()), None
+
+
+def _extract_event_records(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("events", "data", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        if isinstance(payload.get("markets"), list):
+            return [payload]
+    return []
+
+
+def _event_market_records(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records = []
+    for event in events:
+        event_title = str(event.get("title") or event.get("name") or event.get("slug") or "")
+        event_category = _event_category(event)
+        for market in event.get("markets") or []:
+            if not isinstance(market, dict):
+                continue
+            row = market.copy()
+            row["event_title"] = row.get("event_title") or row.get("eventTitle") or event_title
+            row["category"] = row.get("category") or event_category
+            row["source"] = SOURCE_API
+            if not row.get("endDate") and event.get("endDate"):
+                row["endDate"] = event.get("endDate")
+            records.append(row)
+    return records
+
+
+def _event_category(event: dict[str, Any]) -> str:
+    sport = event.get("sport")
+    if isinstance(sport, str) and sport.strip():
+        return sport.strip()
+    tags = event.get("tags")
+    if isinstance(tags, list):
+        for tag in tags:
+            if isinstance(tag, dict):
+                label = str(tag.get("label") or tag.get("name") or tag.get("slug") or "").strip()
+                if label:
+                    return label
+            elif str(tag).strip():
+                return str(tag).strip()
+    series = event.get("series")
+    if isinstance(series, list) and series:
+        first = series[0]
+        if isinstance(first, dict):
+            return str(first.get("title") or first.get("slug") or "").strip()
+    return ""
+
+
+def _polymarket_base_url() -> str | None:
     cfg = get_config()
     base = cfg.polymarket_gamma_api_url or cfg.polymarket_api_url or DEFAULT_POLYMARKET_GAMMA_API_URL
     if not base:
         return None
     endpoint = base.rstrip("/")
-    if not endpoint.endswith("/markets"):
-        endpoint = f"{endpoint}/markets"
+    for suffix in ("/markets", "/events"):
+        if endpoint.endswith(suffix):
+            endpoint = endpoint[: -len(suffix)]
     return endpoint
+
+
+def _polymarket_endpoint() -> str | None:
+    base = _polymarket_base_url()
+    if not base:
+        return None
+    return f"{base}/markets"
+
+
+def _polymarket_events_endpoint() -> str | None:
+    base = _polymarket_base_url()
+    if not base:
+        return None
+    return f"{base}/events"
+
+
+def _match_event_slug_candidates(home: str, away: str, date_utc: Any | None) -> list[str]:
+    date_slug = _date_slug(date_utc)
+    home_code = _team_slug_code(home)
+    away_code = _team_slug_code(away)
+    if not date_slug or not home_code or not away_code:
+        return []
+    return [
+        f"fifwc-{home_code}-{away_code}-{date_slug}",
+        f"fifwc-{away_code}-{home_code}-{date_slug}",
+    ]
+
+
+def _date_slug(value: Any | None) -> str:
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return ""
+    return timestamp.strftime("%Y-%m-%d")
+
+
+def _team_slug_code(team: str) -> str:
+    team_text = str(team or "").strip()
+    if not team_text:
+        return ""
+    if team_text in TEAM_SLUG_CODES:
+        return TEAM_SLUG_CODES[team_text]
+    letters = re.findall(r"[a-z0-9]+", team_text.lower())
+    return "".join(letters)[:3]
 
 
 def _gamma_market_params(query: str | None, offset: int = 0) -> dict[str, Any]:
@@ -272,7 +441,9 @@ def _gamma_market_params(query: str | None, offset: int = 0) -> dict[str, Any]:
 def _filter_query(df: pd.DataFrame, query: str | None) -> pd.DataFrame:
     if df.empty or not query:
         return df
-    query_l = query.lower()
+    query_l = str(query).lower().strip()
+    if not query_l:
+        return df
     haystack = (
         df["question"].astype(str)
         + " "
@@ -282,7 +453,71 @@ def _filter_query(df: pd.DataFrame, query: str | None) -> pd.DataFrame:
         + " "
         + df["category"].astype(str)
     ).str.lower()
-    return df.loc[haystack.str.contains(query_l, regex=False, na=False)].reset_index(drop=True)
+    phrase_match = haystack.str.contains(query_l, regex=False, na=False)
+    tokens = _query_tokens(query_l)
+    if not tokens:
+        return df.loc[phrase_match].reset_index(drop=True)
+    token_match = pd.Series(True, index=df.index)
+    for token in tokens:
+        token_match &= haystack.str.contains(token, regex=False, na=False)
+    return df.loc[phrase_match | token_match].reset_index(drop=True)
+
+
+def _query_tokens(query: str) -> list[str]:
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "for",
+        "game",
+        "match",
+        "of",
+        "or",
+        "the",
+        "to",
+        "v",
+        "vs",
+        "will",
+    }
+    return [token for token in re.findall(r"[a-z0-9]+", query.lower()) if token not in stopwords]
+
+
+def _match_search_queries(home: str, away: str) -> list[str]:
+    values = [str(home or "").strip(), str(away or "").strip()]
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _combine_market_frames(frames: list[pd.DataFrame], fallback_source: str) -> pd.DataFrame:
+    valid_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    warnings = list(
+        dict.fromkeys(
+            str(frame.attrs.get("warning", "")).strip()
+            for frame in frames
+            if frame is not None and str(frame.attrs.get("warning", "")).strip()
+        )
+    )
+    source_labels = list(
+        dict.fromkeys(
+            str(frame.attrs.get("source_label", "")).strip()
+            for frame in frames
+            if frame is not None and str(frame.attrs.get("source_label", "")).strip()
+        )
+    )
+
+    if not valid_frames:
+        out = pd.DataFrame(columns=POLYMARKET_COLUMNS)
+    else:
+        out = pd.concat(valid_frames, ignore_index=True)
+        for col in POLYMARKET_COLUMNS:
+            if col not in out.columns:
+                out[col] = pd.NA
+        out = out[POLYMARKET_COLUMNS].drop_duplicates(subset=["market_id"]).reset_index(drop=True)
+
+    out.attrs["source_label"] = " + ".join(source_labels) if source_labels else fallback_source
+    out.attrs["last_updated"] = utc_now_iso()
+    if out.empty and warnings:
+        out.attrs["warning"] = "; ".join(warnings)
+    return out
 
 
 def _event_title(row: pd.Series) -> str:

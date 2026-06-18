@@ -30,6 +30,20 @@ MAPPING_COLUMNS = [
     "closed",
 ]
 
+UNMAPPED_DIAGNOSTIC_COLUMNS = [
+    "market_id",
+    "question",
+    "event_title",
+    "has_home",
+    "has_away",
+    "market_type_guess",
+    "rejection_reason",
+    "yes_price",
+    "no_price",
+    "liquidity",
+    "volume",
+]
+
 MANUAL_MAPPING_COLUMNS = [
     "match_id",
     "market_id",
@@ -88,6 +102,41 @@ def mapping_status(mapped_markets: pd.DataFrame) -> str:
     if (mapped_markets["mapping_confidence"] == "high").any():
         return "automatic high confidence"
     return "automatic low confidence"
+
+
+def explain_unmapped_polymarket_markets(match_row: pd.Series, polymarket_df: pd.DataFrame) -> pd.DataFrame:
+    if polymarket_df is None or polymarket_df.empty:
+        return pd.DataFrame(columns=UNMAPPED_DIAGNOSTIC_COLUMNS)
+
+    home = str(match_row.get("home", ""))
+    away = str(match_row.get("away", ""))
+    rows = []
+    for _, market in polymarket_df.iterrows():
+        text = _market_text(market)
+        has_home = _has_team(text, home)
+        has_away = _has_team(text, away)
+        market_type, _, _, _, _ = _infer_market_type(text, home, away)
+        rows.append(
+            {
+                "market_id": market.get("market_id", ""),
+                "question": market.get("question", ""),
+                "event_title": market.get("event_title", ""),
+                "has_home": has_home,
+                "has_away": has_away,
+                "market_type_guess": market_type,
+                "rejection_reason": _unmapped_reason(text, home, away, has_home, has_away, market_type),
+                "yes_price": market.get("yes_price", pd.NA),
+                "no_price": market.get("no_price", pd.NA),
+                "liquidity": market.get("liquidity", pd.NA),
+                "volume": market.get("volume", pd.NA),
+            }
+        )
+
+    out = pd.DataFrame(rows, columns=UNMAPPED_DIAGNOSTIC_COLUMNS)
+    out["_team_hits"] = out[["has_home", "has_away"]].sum(axis=1)
+    out["_liquidity_sort"] = pd.to_numeric(out["liquidity"], errors="coerce")
+    out = out.sort_values(["_team_hits", "_liquidity_sort"], ascending=[False, False], na_position="last")
+    return out.drop(columns=["_team_hits", "_liquidity_sort"]).reset_index(drop=True)
 
 
 def _manual_mappings(match_id: str, markets: pd.DataFrame, home: str, away: str) -> pd.DataFrame:
@@ -200,6 +249,20 @@ def _team_match_score(text: str, home: str, away: str) -> tuple[float, list[str]
     return score, reasons
 
 
+def _unmapped_reason(text: str, home: str, away: str, has_home: bool, has_away: bool, market_type: str) -> str:
+    if _is_tournament_outright(text):
+        return "Tournament outright, not a selected-match market"
+    if not has_home and not has_away:
+        return "Neither selected team found"
+    if has_home and not has_away:
+        return f"Only {home} found; match-level markets require both teams"
+    if has_away and not has_home:
+        return f"Only {away} found; match-level markets require both teams"
+    if market_type in {"group_winner", "qualification", "other"}:
+        return "Related market type is not supported for selected-match alpha"
+    return "Below automatic mapping confidence threshold"
+
+
 def _has_team(text: str, team: str) -> bool:
     return any(_contains_term(text, term) for term in _team_terms(team))
 
@@ -215,7 +278,7 @@ def _infer_market_type(text: str, home: str, away: str) -> tuple[str, str, str, 
         return "btts_yes", "btts_yes", "YES", "BTTS Yes market", 0.25
     if "draw" in text or "tie" in text:
         return "draw", "draw", "YES", "draw market", 0.25
-    if "correct score" in text or re.search(r"\b\d+\s*-\s*\d+\b", text):
+    if "correct score" in text or re.search(r"(?<![\d-])\d{1,2}\s*-\s*\d{1,2}(?![\d-])", text):
         return "correct_score", "correct_score", "YES", "correct score market", 0.15
     if "group" in text and ("winner" in text or "win group" in text):
         return "group_winner", "group_winner", "YES", "group winner market", 0.10

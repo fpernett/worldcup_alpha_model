@@ -5,8 +5,8 @@ import requests
 
 from src.alpha import calculate_polymarket_alpha
 from src.backtesting import load_prediction_log, save_prediction_snapshot
-from src.market_mapping import map_match_to_polymarket_markets
-from src.polymarket import POLYMARKET_COLUMNS, get_polymarket_markets, normalize_price
+from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets
+from src.polymarket import POLYMARKET_COLUMNS, get_match_polymarket_markets, get_polymarket_markets, normalize_price
 from src.sensitivity import run_sensitivity_analysis
 from src.model import ModelConfig
 
@@ -167,6 +167,173 @@ def test_gamma_api_default_used_when_env_empty(tmp_path, monkeypatch) -> None:
     assert markets.iloc[0]["event_title"] == "World Cup Winner"
 
 
+def test_multi_word_polymarket_query_matches_tokens(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "id": "PM-ENG-CRO",
+                    "question": "Will England beat Croatia?",
+                    "slug": "will-england-beat-croatia",
+                    "events": [{"title": "England vs Croatia", "category": "Sports"}],
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.42", "0.58"]',
+                    "liquidityNum": "1000",
+                    "volumeNum": "5000",
+                    "active": True,
+                    "closed": False,
+                }
+            ]
+
+    def fake_get(url, params=None, timeout=0):
+        return FakeResponse()
+
+    monkeypatch.setattr("src.polymarket.requests.get", fake_get)
+
+    markets = get_polymarket_markets(query="England Croatia", force_refresh=True, write_cache=False)
+
+    assert len(markets) == 1
+    assert markets.iloc[0]["market_id"] == "PM-ENG-CRO"
+
+
+def test_selected_match_search_finds_match_market_and_mapper_rejects_outrights(monkeypatch) -> None:
+    match_market = {
+        "id": "PM-ENG-CRO",
+        "question": "Will England beat Croatia?",
+        "slug": "will-england-beat-croatia",
+        "events": [{"title": "England vs Croatia", "category": "Sports"}],
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["0.42", "0.58"]',
+        "liquidityNum": "1000",
+        "volumeNum": "5000",
+        "active": True,
+        "closed": False,
+    }
+    outright_market = {
+        "id": "PM-ENG-OUTRIGHT",
+        "question": "Will England win the 2026 FIFA World Cup?",
+        "slug": "will-england-win-the-2026-fifa-world-cup",
+        "events": [{"title": "World Cup Winner", "category": "Sports"}],
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["0.12", "0.88"]',
+        "liquidityNum": "1000",
+        "volumeNum": "5000",
+        "active": True,
+        "closed": False,
+    }
+
+    class FakeResponse:
+        def __init__(self, records: list[dict]) -> None:
+            self.records = records
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return self.records
+
+    def fake_get(url, params=None, timeout=0):
+        search = (params or {}).get("search")
+        if search == "England":
+            return FakeResponse([match_market, outright_market])
+        if search == "Croatia":
+            return FakeResponse([match_market])
+        return FakeResponse([])
+
+    monkeypatch.setattr("src.polymarket.requests.get", fake_get)
+
+    markets = get_match_polymarket_markets("England", "Croatia")
+    mapped = map_match_to_polymarket_markets(sample_match(), markets)
+
+    assert set(markets["market_id"]) == {"PM-ENG-CRO", "PM-ENG-OUTRIGHT"}
+    assert len(mapped) == 1
+    assert mapped.iloc[0]["market_id"] == "PM-ENG-CRO"
+    assert mapped.iloc[0]["model_side"] == "home_win"
+
+
+def test_selected_match_search_loads_gamma_event_markets(monkeypatch) -> None:
+    event_payload = [
+        {
+            "id": "351741",
+            "slug": "fifwc-can-qat-2026-06-18",
+            "title": "Canada vs. Qatar",
+            "sport": "soccer",
+            "endDate": "2026-06-18T22:00:00Z",
+            "markets": [
+                {
+                    "id": "1897112",
+                    "question": "Will Canada win on 2026-06-18?",
+                    "slug": "fifwc-can-qat-2026-06-18-can",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.765", "0.235"]',
+                    "liquidityNum": "3021430.7208",
+                    "volumeNum": "4282896.4475",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "id": "1897113",
+                    "question": "Will Canada vs. Qatar end in a draw?",
+                    "slug": "fifwc-can-qat-2026-06-18-draw",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.155", "0.845"]',
+                    "liquidityNum": "3304100.4944",
+                    "volumeNum": "791226.6480",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "id": "1897114",
+                    "question": "Will Qatar win on 2026-06-18?",
+                    "slug": "fifwc-can-qat-2026-06-18-qat",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.075", "0.925"]',
+                    "liquidityNum": "3238977.6558",
+                    "volumeNum": "1240425.3224",
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    class FakeResponse:
+        def __init__(self, records):
+            self.records = records
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return self.records
+
+    def fake_get(url, params=None, timeout=0):
+        if url == "https://gamma-api.polymarket.com/events":
+            return FakeResponse(event_payload if (params or {}).get("slug") == "fifwc-can-qat-2026-06-18" else [])
+        return FakeResponse([])
+
+    monkeypatch.setattr("src.polymarket.requests.get", fake_get)
+
+    match = pd.Series(
+        {
+            "match_id": "CAN-QAT",
+            "date_utc": "2026-06-18",
+            "time_utc": "22:00",
+            "home": "Canada",
+            "away": "Qatar",
+        }
+    )
+    markets = get_match_polymarket_markets("Canada", "Qatar", "2026-06-18")
+    mapped = map_match_to_polymarket_markets(match, markets)
+
+    assert set(markets["market_id"]) == {"1897112", "1897113", "1897114"}
+    assert set(mapped["model_side"]) == {"home_win", "draw", "away_win"}
+    assert mapped.loc[mapped["model_side"] == "home_win", "yes_price"].iloc[0] == 0.765
+
+
 def test_missing_polymarket_api_falls_back_to_csv(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("POLYMARKET_API_URL", raising=False)
     monkeypatch.delenv("POLYMARKET_GAMMA_API_URL", raising=False)
@@ -222,3 +389,46 @@ def test_world_cup_outright_is_not_mapped_to_selected_match() -> None:
     mapped = map_match_to_polymarket_markets(match, markets)
 
     assert mapped.empty
+
+
+def test_unmapped_diagnostics_explain_tournament_outrights() -> None:
+    match = pd.Series(
+        {
+            "match_id": "CAN-QAT",
+            "date_utc": "2026-06-18",
+            "time_utc": "22:00",
+            "home": "Canada",
+            "away": "Qatar",
+        }
+    )
+    markets = pd.DataFrame(
+        [
+            {
+                "market_id": "PM-CAN",
+                "question": "Will Canada win the 2026 FIFA World Cup?",
+                "slug": "will-canada-win-the-2026-fifa-world-cup",
+                "event_title": "World Cup Winner",
+                "category": "Sports",
+                "yes_price": 0.0025,
+                "no_price": 0.9975,
+                "liquidity": 1000,
+                "volume": 5000,
+            },
+            {
+                "market_id": "PM-QAT",
+                "question": "Will Qatar win the 2026 FIFA World Cup?",
+                "slug": "will-qatar-win-the-2026-fifa-world-cup",
+                "event_title": "World Cup Winner",
+                "category": "Sports",
+                "yes_price": 0.0005,
+                "no_price": 0.9995,
+                "liquidity": 1000,
+                "volume": 5000,
+            },
+        ]
+    )
+
+    diagnostics = explain_unmapped_polymarket_markets(match, markets)
+
+    assert len(diagnostics) == 2
+    assert diagnostics["rejection_reason"].str.contains("Tournament outright").all()
