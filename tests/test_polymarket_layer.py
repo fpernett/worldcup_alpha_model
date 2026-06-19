@@ -6,7 +6,13 @@ import requests
 from src.alpha import calculate_polymarket_alpha
 from src.backtesting import load_prediction_log, save_prediction_snapshot
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets
-from src.polymarket import POLYMARKET_COLUMNS, get_match_polymarket_markets, get_polymarket_markets, normalize_price
+from src.polymarket import (
+    POLYMARKET_COLUMNS,
+    _match_event_slug_candidates,
+    get_match_polymarket_markets,
+    get_polymarket_markets,
+    normalize_price,
+)
 from src.sensitivity import run_sensitivity_analysis
 from src.model import ModelConfig
 
@@ -332,6 +338,123 @@ def test_selected_match_search_loads_gamma_event_markets(monkeypatch) -> None:
     assert set(markets["market_id"]) == {"1897112", "1897113", "1897114"}
     assert set(mapped["model_side"]) == {"home_win", "draw", "away_win"}
     assert mapped.loc[mapped["model_side"] == "home_win", "yes_price"].iloc[0] == 0.765
+
+
+def test_mexico_korea_event_slug_uses_polymarket_team_code_and_local_date(monkeypatch) -> None:
+    candidates = _match_event_slug_candidates("Mexico", "South Korea", "2026-06-19")
+    assert "fifwc-mex-kr-2026-06-18" in candidates
+
+    event_payload = [
+        {
+            "id": "351742",
+            "slug": "fifwc-mex-kr-2026-06-18",
+            "title": "Mexico vs. Korea Republic",
+            "sport": "soccer",
+            "endDate": "2026-06-19T01:00:00Z",
+            "markets": [
+                {
+                    "id": "1897115",
+                    "question": "Will Mexico win on 2026-06-18?",
+                    "slug": "fifwc-mex-kr-2026-06-18-mex",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.475", "0.525"]',
+                    "liquidityNum": "3000000",
+                    "volumeNum": "4000000",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "id": "1897116",
+                    "question": "Will Mexico vs. Korea Republic end in a draw?",
+                    "slug": "fifwc-mex-kr-2026-06-18-draw",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.295", "0.705"]',
+                    "liquidityNum": "3000000",
+                    "volumeNum": "4000000",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "id": "1897117",
+                    "question": "Will Korea Republic win on 2026-06-18?",
+                    "slug": "fifwc-mex-kr-2026-06-18-kr",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.235", "0.765"]',
+                    "liquidityNum": "3000000",
+                    "volumeNum": "4000000",
+                    "active": True,
+                    "closed": False,
+                },
+            ],
+        }
+    ]
+
+    class FakeResponse:
+        def __init__(self, records):
+            self.records = records
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return self.records
+
+    def fake_get(url, params=None, timeout=0):
+        if url == "https://gamma-api.polymarket.com/events":
+            return FakeResponse(event_payload if (params or {}).get("slug") == "fifwc-mex-kr-2026-06-18" else [])
+        return FakeResponse([])
+
+    monkeypatch.setattr("src.polymarket.requests.get", fake_get)
+
+    match = pd.Series(
+        {
+            "match_id": "MEX-KOR",
+            "date_utc": "2026-06-19",
+            "time_utc": "01:00",
+            "home": "Mexico",
+            "away": "South Korea",
+        }
+    )
+    markets = get_match_polymarket_markets("Mexico", "South Korea", "2026-06-19")
+    mapped = map_match_to_polymarket_markets(match, markets)
+
+    assert set(markets["market_id"]) == {"1897115", "1897116", "1897117"}
+    assert set(mapped["model_side"]) == {"home_win", "draw", "away_win"}
+    assert mapped.loc[mapped["model_side"] == "away_win", "yes_price"].iloc[0] == 0.235
+
+
+def test_mapper_recognizes_usa_alias_for_united_states() -> None:
+    match = pd.Series(
+        {
+            "match_id": "USA-AUS",
+            "date_utc": "2026-06-19",
+            "time_utc": "19:00",
+            "home": "United States",
+            "away": "Australia",
+        }
+    )
+    markets = pd.DataFrame(
+        [
+            {
+                "market_id": "PM-USA-AUS",
+                "question": "Will USA beat Australia?",
+                "slug": "fifwc-usa-aus-2026-06-19-usa",
+                "event_title": "USA vs Australia",
+                "category": "Sports",
+                "yes_price": 0.55,
+                "no_price": 0.45,
+                "liquidity": 1000,
+                "volume": 5000,
+                "closed": 0,
+            }
+        ]
+    )
+
+    mapped = map_match_to_polymarket_markets(match, markets)
+
+    assert len(mapped) == 1
+    assert mapped.iloc[0]["model_side"] == "home_win"
+    assert mapped.iloc[0]["mapping_confidence"] == "high"
 
 
 def test_missing_polymarket_api_falls_back_to_csv(tmp_path, monkeypatch) -> None:

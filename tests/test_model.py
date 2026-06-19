@@ -134,3 +134,38 @@ def test_future_fixture_filter_excludes_past_and_keeps_tomorrow() -> None:
 
     assert filtered["match_id"].tolist() == ["LATER", "TOMORROW"]
     assert "kickoff_utc" in filtered.columns
+
+
+def test_fixture_filter_can_include_past_for_selected_date_range() -> None:
+    fixtures = pd.DataFrame(
+        [
+            {"match_id": "PAST", "date_utc": "2026-06-18", "time_utc": "02:00", "home": "A", "away": "B"},
+            {"match_id": "LATER", "date_utc": "2026-06-18", "time_utc": "16:00", "home": "C", "away": "D"},
+            {"match_id": "TOMORROW", "date_utc": "2026-06-19", "time_utc": "01:00", "home": "E", "away": "F"},
+        ]
+    )
+
+    filtered = filter_future_fixtures(
+        fixtures,
+        now_utc="2026-06-18T13:07:00Z",
+        include_past=True,
+    )
+
+    assert filtered["match_id"].tolist() == ["PAST", "LATER", "TOMORROW"]
+    assert "kickoff_utc" in filtered.columns
+
+
+def test_local_fixture_fallback_covers_next_48_hours() -> None:
+    fixtures = pd.read_csv("data/fixtures.csv")
+
+    filtered = filter_future_fixtures(
+        fixtures,
+        now_utc="2026-06-18T23:00:00Z",
+        horizon_hours=48,
+    )
+
+    labels = set(filtered["home"].astype(str) + " vs " + filtered["away"].astype(str))
+    assert len(filtered) >= 7
+    assert "Mexico vs South Korea" in labels
+    assert "United States vs Australia" in labels
+    assert "Brazil vs Haiti" in labels

@@ -43,22 +43,66 @@ DEFAULT_POLYMARKET_GAMMA_API_URL = "https://gamma-api.polymarket.com"
 GAMMA_PAGE_LIMIT = 100
 GAMMA_MAX_PAGES = 5
 TEAM_SLUG_CODES = {
+    "Algeria": "alg",
+    "Argentina": "arg",
+    "Australia": "aus",
+    "Austria": "aut",
+    "Belgium": "bel",
     "Bosnia and Herzegovina": "bih",
+    "Brazil": "bra",
+    "Cape Verde": "cpv",
     "Canada": "can",
     "Colombia": "col",
     "Croatia": "cro",
+    "Curacao": ["cuw", "cur"],
     "Czechia": "cze",
     "DR Congo": "cod",
+    "Ecuador": "ecu",
+    "Egypt": "egy",
     "England": "eng",
+    "France": "fra",
+    "Germany": "ger",
     "Ghana": "gha",
+    "Haiti": "hai",
+    "Iran": "irn",
+    "Iraq": "irq",
+    "Ivory Coast": "civ",
+    "Japan": "jpn",
+    "Jordan": "jor",
     "Mexico": "mex",
+    "Morocco": "mar",
+    "Netherlands": "ned",
+    "New Zealand": "nzl",
+    "Norway": "nor",
     "Panama": "pan",
+    "Paraguay": "par",
     "Portugal": "por",
     "Qatar": "qat",
+    "Saudi Arabia": "ksa",
+    "Scotland": "sco",
+    "Senegal": "sen",
     "South Africa": "rsa",
-    "South Korea": "kor",
+    "South Korea": ["kr", "kor"],
+    "Spain": "esp",
     "Switzerland": "sui",
+    "Sweden": "swe",
+    "Tunisia": "tun",
+    "Turkiye": ["tur", "tür"],
+    "United States": ["usa", "us"],
+    "Uruguay": "uru",
     "Uzbekistan": "uzb",
+}
+
+TEAM_SEARCH_ALIASES = {
+    "Bosnia and Herzegovina": ["Bosnia"],
+    "Cape Verde": ["Cabo Verde"],
+    "Curacao": ["Curaçao"],
+    "Czechia": ["Czech Republic"],
+    "DR Congo": ["Congo", "Congo DR"],
+    "Ivory Coast": ["Cote d'Ivoire", "Côte d'Ivoire"],
+    "South Korea": ["Korea Republic", "Korea"],
+    "Turkiye": ["Turkey", "Türkiye"],
+    "United States": ["USA", "USMNT"],
 }
 
 
@@ -396,32 +440,54 @@ def _polymarket_events_endpoint() -> str | None:
 
 
 def _match_event_slug_candidates(home: str, away: str, date_utc: Any | None) -> list[str]:
-    date_slug = _date_slug(date_utc)
-    home_code = _team_slug_code(home)
-    away_code = _team_slug_code(away)
-    if not date_slug or not home_code or not away_code:
+    date_slugs = _date_slug_candidates(date_utc)
+    home_codes = _team_slug_codes(home)
+    away_codes = _team_slug_codes(away)
+    if not date_slugs or not home_codes or not away_codes:
         return []
-    return [
-        f"fifwc-{home_code}-{away_code}-{date_slug}",
-        f"fifwc-{away_code}-{home_code}-{date_slug}",
-    ]
+    candidates = []
+    for date_slug in date_slugs:
+        for home_code in home_codes:
+            for away_code in away_codes:
+                candidates.append(f"fifwc-{home_code}-{away_code}-{date_slug}")
+                candidates.append(f"fifwc-{away_code}-{home_code}-{date_slug}")
+    return list(dict.fromkeys(candidates))
 
 
 def _date_slug(value: Any | None) -> str:
+    candidates = _date_slug_candidates(value)
+    return candidates[0] if candidates else ""
+
+
+def _date_slug_candidates(value: Any | None) -> list[str]:
     timestamp = pd.to_datetime(value, errors="coerce")
     if pd.isna(timestamp):
-        return ""
-    return timestamp.strftime("%Y-%m-%d")
+        return []
+    dates = [timestamp.date(), (timestamp - pd.Timedelta(days=1)).date()]
+    return list(dict.fromkeys(day.isoformat() for day in dates))
 
 
 def _team_slug_code(team: str) -> str:
+    codes = _team_slug_codes(team)
+    return codes[0] if codes else ""
+
+
+def _team_slug_codes(team: str) -> list[str]:
     team_text = str(team or "").strip()
     if not team_text:
-        return ""
-    if team_text in TEAM_SLUG_CODES:
-        return TEAM_SLUG_CODES[team_text]
+        return []
+    configured = TEAM_SLUG_CODES.get(team_text)
+    if isinstance(configured, str):
+        codes = [configured]
+    elif isinstance(configured, (list, tuple)):
+        codes = [str(code) for code in configured if str(code).strip()]
+    else:
+        codes = []
     letters = re.findall(r"[a-z0-9]+", team_text.lower())
-    return "".join(letters)[:3]
+    fallback = "".join(letters)[:3]
+    if fallback:
+        codes.append(fallback)
+    return list(dict.fromkeys(code.lower().strip() for code in codes if code))
 
 
 def _gamma_market_params(query: str | None, offset: int = 0) -> dict[str, Any]:
@@ -483,8 +549,23 @@ def _query_tokens(query: str) -> list[str]:
 
 
 def _match_search_queries(home: str, away: str) -> list[str]:
-    values = [str(home or "").strip(), str(away or "").strip()]
+    home_terms = _team_search_terms(home)
+    away_terms = _team_search_terms(away)
+    values = []
+    if home_terms and away_terms:
+        values.extend([f"{home_terms[0]} {away_terms[0]}", f"{home_terms[0]} vs {away_terms[0]}"])
+    values.extend(home_terms)
+    values.extend(away_terms)
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _team_search_terms(team: str) -> list[str]:
+    team_text = str(team or "").strip()
+    if not team_text:
+        return []
+    terms = [team_text]
+    terms.extend(TEAM_SEARCH_ALIASES.get(team_text, []))
+    return list(dict.fromkeys(term for term in terms if term))
 
 
 def _combine_market_frames(frames: list[pd.DataFrame], fallback_source: str) -> pd.DataFrame:

@@ -97,12 +97,13 @@ def filter_future_fixtures(
     fixtures: pd.DataFrame,
     now_utc: str | pd.Timestamp | None = None,
     horizon_hours: float | None = None,
+    include_past: bool = False,
 ) -> pd.DataFrame:
-    """Keep only fixtures whose UTC kickoff has not passed.
+    """Add UTC kickoff timestamps and optionally keep only future fixtures.
 
     `date_utc` and `time_utc` are treated as UTC. Rows with missing or
-    unparseable kickoff timestamps are hidden because this dashboard is meant
-    for future-match evaluation.
+    unparseable kickoff timestamps are hidden because match modelling needs a
+    concrete kickoff time.
     """
     if fixtures is None:
         return pd.DataFrame(columns=FIXTURE_COLUMNS + ["kickoff_utc"])
@@ -126,7 +127,9 @@ def filter_future_fixtures(
     time_part = out.get("time_utc", pd.Series("00:00", index=out.index)).fillna("00:00").astype(str).str.slice(0, 5)
     out["kickoff_utc"] = pd.to_datetime(date_part + " " + time_part, utc=True, errors="coerce")
 
-    mask = out["kickoff_utc"].notna() & (out["kickoff_utc"] >= now)
+    mask = out["kickoff_utc"].notna()
+    if not include_past:
+        mask &= out["kickoff_utc"] >= now
     if horizon_hours is not None:
         mask &= out["kickoff_utc"] <= now + pd.Timedelta(hours=float(horizon_hours))
 

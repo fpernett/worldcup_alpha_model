@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -247,10 +248,30 @@ def build_source_status(fixtures, teams, venues, odds) -> pd.DataFrame:
 
     return pd.DataFrame(diagnostics)
 
+
+def local_input_version() -> tuple[float, ...]:
+    data_dir = Path("data")
+    filenames = ["fixtures.csv", "team_ratings.csv", "venues.csv", "market_odds.csv"]
+    return tuple((data_dir / filename).stat().st_mtime if (data_dir / filename).exists() else 0.0 for filename in filenames)
+
+
 @st.cache_data(ttl=600)
-def load_inputs(start_date: date, end_date: date, refresh_counter: int, now_utc_iso: str, horizon_hours: float | None):
+def load_inputs(
+    start_date: date,
+    end_date: date,
+    refresh_counter: int,
+    input_version: tuple[float, ...],
+    now_utc_iso: str,
+    horizon_hours: float | None,
+    include_past: bool,
+):
     fixtures = get_upcoming_fixtures(start_date, end_date)
-    fixtures = filter_future_fixtures(fixtures, now_utc=now_utc_iso, horizon_hours=horizon_hours)
+    fixtures = filter_future_fixtures(
+        fixtures,
+        now_utc=now_utc_iso,
+        horizon_hours=horizon_hours,
+        include_past=include_past,
+    )
     teams = get_team_ratings()
     venues = load_venues()
     odds = load_market_odds()
@@ -308,26 +329,37 @@ if "polymarket_refresh_counter" not in st.session_state:
 
 with st.sidebar:
     st.header("Fixture Window")
-    anchor_date = st.date_input("Start date", value=date.today())
-    window = st.radio("Quick range", ["Upcoming 48 hours", "Today", "Tomorrow", "Date range"], index=0)
+    utc_today = pd.Timestamp.now(tz="UTC").date()
+    window = st.radio(
+        "Quick range",
+        ["Upcoming 48 hours", "Today (UTC)", "Tomorrow (UTC)", "Next 7 days", "Custom UTC date range"],
+        index=0,
+    )
     horizon_hours = None
     if window == "Upcoming 48 hours":
-        start_date = anchor_date
-        end_date = anchor_date + timedelta(days=2)
+        start_date = utc_today
+        end_date = utc_today + timedelta(days=2)
         horizon_hours = 48.0
-    elif window == "Today":
+    elif window == "Today (UTC)":
+        anchor_date = st.date_input("Anchor date (UTC)", value=utc_today)
         start_date = anchor_date
         end_date = anchor_date
-    elif window == "Tomorrow":
+    elif window == "Tomorrow (UTC)":
+        anchor_date = st.date_input("Anchor date (UTC)", value=utc_today)
         start_date = anchor_date + timedelta(days=1)
         end_date = start_date
+    elif window == "Next 7 days":
+        anchor_date = st.date_input("Anchor date (UTC)", value=utc_today)
+        start_date = anchor_date
+        end_date = anchor_date + timedelta(days=7)
     else:
-        selected_range = st.date_input("Custom range", value=(anchor_date, anchor_date + timedelta(days=3)))
-        if isinstance(selected_range, tuple) and len(selected_range) == 2:
-            start_date, end_date = selected_range
-        else:
-            start_date = anchor_date
-            end_date = anchor_date
+        custom_start = st.date_input("Range start (UTC)", value=utc_today)
+        custom_end = st.date_input("Range end (UTC)", value=utc_today + timedelta(days=7))
+        if custom_end < custom_start:
+            st.warning("Range end is before range start, so the app will swap them.")
+        start_date, end_date = sorted((custom_start, custom_end))
+    hide_past_kickoffs = st.checkbox("Hide past kickoffs", value=True)
+    st.caption(f"UTC fixture window: {start_date.isoformat()} to {end_date.isoformat()}.")
 
     st.header("Data")
     if st.button("Update API data", width="stretch"):
@@ -398,8 +430,10 @@ fixtures, teams, venues, market_odds, historical_matches, source_status = load_i
     start_date,
     end_date,
     st.session_state["refresh_counter"],
+    local_input_version(),
     pd.Timestamp.now(tz="UTC").floor("min").isoformat(),
     horizon_hours,
+    include_past=not hide_past_kickoffs,
 )
 polymarket_markets = load_polymarket_inputs(
     polymarket_query,
@@ -433,7 +467,7 @@ with st.sidebar:
 
 st.subheader("Available Matches")
 if fixtures.empty:
-    st.warning("No future fixtures found for the selected window. Add upcoming rows to `data/fixtures.csv`, widen the date range, or configure a fixture API.")
+    st.warning("No fixtures found for the selected UTC window. Add rows to `data/fixtures.csv`, widen the date range, or configure a fixture API.")
     st.stop()
 
 fixture_view = fixtures.copy()
@@ -452,7 +486,10 @@ st.dataframe(
     width="stretch",
     hide_index=True,
 )
-st.caption("Only fixtures with future UTC kickoff times are shown. Past matches are hidden automatically.")
+if hide_past_kickoffs:
+    st.caption("Only fixtures with future UTC kickoff times are shown. Clear the sidebar checkbox to inspect past kickoffs in the selected UTC range.")
+else:
+    st.caption("All fixtures in the selected UTC date range are shown, including past kickoffs.")
 
 selected_labels = st.multiselect(
     "Select one or more games to model",

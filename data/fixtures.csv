@@ -6,4 +6,34 @@ match_id,date_utc,time_utc,competition,group,home,away,venue,city,country
 66456910,2026-06-18,16:00,FIFA World Cup,Group A,Czechia,South Africa,Arrowhead Stadium,Kansas City,USA
 66456922,2026-06-18,19:00,FIFA World Cup,Group B,Switzerland,Bosnia and Herzegovina,Levi's Stadium,Santa Clara,USA
 66456920,2026-06-18,22:00,FIFA World Cup,Group B,Canada,Qatar,BMO Field,Toronto,Canada
-66456908,2026-06-19,01:00,FIFA World Cup,Group A,Mexico,South Korea,Estadio Azteca,Mexico City,Mexico
+66456908,2026-06-19,01:00,FIFA World Cup,Group A,Mexico,South Korea,Estadio Akron,Zapopan,Mexico
+wc2026_32,2026-06-19,19:00,FIFA World Cup,Group D,United States,Australia,Lumen Field,Seattle,USA
+wc2026_30,2026-06-19,22:00,FIFA World Cup,Group C,Scotland,Morocco,Gillette Stadium,Foxborough,USA
+wc2026_29,2026-06-20,00:30,FIFA World Cup,Group C,Brazil,Haiti,Lincoln Financial Field,Philadelphia,USA
+wc2026_31,2026-06-20,03:00,FIFA World Cup,Group D,Turkiye,Paraguay,Levi's Stadium,Santa Clara,USA
+wc2026_35,2026-06-20,17:00,FIFA World Cup,Group F,Netherlands,Sweden,NRG Stadium,Houston,USA
+wc2026_33,2026-06-20,20:00,FIFA World Cup,Group E,Germany,Ivory Coast,BMO Field,Toronto,Canada
+wc2026_34,2026-06-21,03:00,FIFA World Cup,Group E,Ecuador,Curacao,Arrowhead Stadium,Kansas City,USA
+wc2026_36,2026-06-21,04:00,FIFA World Cup,Group F,Tunisia,Japan,Estadio BBVA,Guadalupe,Mexico
+wc2026_37,2026-06-21,16:00,FIFA World Cup,Group H,Spain,Saudi Arabia,Mercedes-Benz Stadium,Atlanta,USA
+wc2026_38,2026-06-21,19:00,FIFA World Cup,Group G,Belgium,Iran,SoFi Stadium,Inglewood,USA
+wc2026_39,2026-06-21,22:00,FIFA World Cup,Group H,Uruguay,Cape Verde,Hard Rock Stadium,Miami Gardens,USA
+wc2026_40,2026-06-22,01:00,FIFA World Cup,Group G,New Zealand,Egypt,BC Place,Vancouver,Canada
+wc2026_41,2026-06-22,17:00,FIFA World Cup,Group J,Argentina,Austria,Dallas Stadium,Arlington,USA
+wc2026_42,2026-06-22,21:00,FIFA World Cup,Group I,France,Iraq,Lincoln Financial Field,Philadelphia,USA
+wc2026_43,2026-06-23,00:00,FIFA World Cup,Group I,Norway,Senegal,MetLife Stadium,East Rutherford,USA
+wc2026_44,2026-06-23,03:00,FIFA World Cup,Group J,Jordan,Algeria,Levi's Stadium,Santa Clara,USA
+wc2026_45,2026-06-23,17:00,FIFA World Cup,Group K,Portugal,Uzbekistan,NRG Stadium,Houston,USA
+wc2026_46,2026-06-23,20:00,FIFA World Cup,Group L,England,Ghana,Gillette Stadium,Foxborough,USA
+wc2026_47,2026-06-23,23:00,FIFA World Cup,Group L,Panama,Croatia,BMO Field,Toronto,Canada
+wc2026_48,2026-06-24,02:00,FIFA World Cup,Group K,Colombia,DR Congo,Estadio Akron,Zapopan,Mexico
+wc2026_49,2026-06-24,19:00,FIFA World Cup,Group B,Switzerland,Canada,BC Place,Vancouver,Canada
+wc2026_50,2026-06-24,19:00,FIFA World Cup,Group B,Bosnia and Herzegovina,Qatar,Lumen Field,Seattle,USA
+wc2026_51,2026-06-24,22:00,FIFA World Cup,Group C,Scotland,Brazil,Hard Rock Stadium,Miami Gardens,USA
+wc2026_52,2026-06-24,22:00,FIFA World Cup,Group C,Morocco,Haiti,Mercedes-Benz Stadium,Atlanta,USA
+wc2026_53,2026-06-25,01:00,FIFA World Cup,Group A,Czechia,Mexico,Estadio Azteca,Mexico City,Mexico
+wc2026_54,2026-06-25,01:00,FIFA World Cup,Group A,South Africa,South Korea,Estadio BBVA,Guadalupe,Mexico
+wc2026_55,2026-06-25,20:00,FIFA World Cup,Group E,Ecuador,Germany,MetLife Stadium,East Rutherford,USA
+wc2026_56,2026-06-25,20:00,FIFA World Cup,Group E,Curacao,Ivory Coast,Lincoln Financial Field,Philadelphia,USA
+wc2026_57,2026-06-25,23:00,FIFA World Cup,Group F,Japan,Sweden,Dallas Stadium,Arlington,USA
+wc2026_58,2026-06-25,23:00,FIFA World Cup,Group F,Tunisia,Netherlands,Arrowhead Stadium,Kansas City,USA
