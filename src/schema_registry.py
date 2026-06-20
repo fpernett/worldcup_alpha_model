@@ -31,6 +31,96 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "last_updated",
         "notes",
     ],
+    "data/team_name_aliases.csv": [
+        "alias",
+        "canonical",
+    ],
+    "data/historical_matches.csv": [
+        "match_id",
+        "date_utc",
+        "competition",
+        "competition_type",
+        "team",
+        "opponent",
+        "is_home",
+        "is_neutral",
+        "venue",
+        "city",
+        "country",
+        "team_goals",
+        "opponent_goals",
+        "team_xg",
+        "opponent_xg",
+        "shots_for",
+        "shots_against",
+        "shots_on_target_for",
+        "shots_on_target_against",
+        "possession_pct",
+        "opponent_elo",
+        "team_elo_pre",
+        "temperature_c",
+        "humidity_pct",
+        "altitude_m",
+        "wind_kmh",
+        "precipitation_mm",
+        "roof_closed",
+        "source",
+        "last_updated",
+    ],
+    "data/team_behavior.csv": [
+        "team",
+        "reference_date",
+        "behavior_window_start",
+        "behavior_window_end",
+        "matches_available_all_time",
+        "matches_used_recent",
+        "oldest_match_used",
+        "latest_match_used",
+        "behavior_config_name",
+        "n_matches",
+        "weighted_goals_for",
+        "weighted_goals_for_raw",
+        "weighted_goals_for_adjusted",
+        "weighted_goals_against",
+        "weighted_goals_against_raw",
+        "weighted_goals_against_adjusted",
+        "weighted_goal_difference",
+        "all_time_goals_for",
+        "all_time_goals_against",
+        "attack_index",
+        "attack_index_raw",
+        "attack_index_adjusted",
+        "defense_index",
+        "defense_index_raw",
+        "defense_index_adjusted",
+        "recent_form_index",
+        "weighted_btts_rate",
+        "weighted_over_2_5_rate",
+        "clean_sheet_rate",
+        "failed_to_score_rate",
+        "environment_response_index",
+        "environment_sample_size",
+        "attack_data_quality",
+        "defense_data_quality",
+        "form_data_quality",
+        "environment_data_quality",
+        "overall_data_quality",
+        "behavior_warning",
+        "sample_size_warning",
+        "staleness_warning",
+        "opponent_quality_warning",
+        "mean_opponent_elo_recent",
+        "median_opponent_elo_recent",
+        "min_opponent_elo_recent",
+        "max_opponent_elo_recent",
+        "opponent_elo_coverage_recent",
+        "strong_opponent_match_count",
+        "weak_opponent_match_count",
+        "schedule_strength_label",
+        "schedule_strength_warning",
+        "opponent_adjustment_warning",
+        "last_updated",
+    ],
     "data/venues.csv": [
         "venue",
         "city",
@@ -128,6 +218,15 @@ MODEL_DEFINITION_FILES: set[str] = {
     "src/ratings.py",
     "src/climate.py",
     "src/weather.py",
+    "src/historical_data.py",
+    "src/historical_ingestion.py",
+    "src/football_api.py",
+    "src/team_names.py",
+    "src/team_behavior.py",
+    "src/recency.py",
+    "src/behavior_calibration.py",
+    "src/elo.py",
+    "src/environment_response.py",
 }
 
 METRIC_DEFINITION_FILES: set[str] = {
@@ -137,6 +236,12 @@ METRIC_DEFINITION_FILES: set[str] = {
     "src/backtesting.py",
     "src/report_metrics.py",
     "src/market_tables.py",
+    "src/team_behavior.py",
+    "src/environment_response.py",
+    "src/recency.py",
+    "src/behavior_calibration.py",
+    "src/elo.py",
+    "src/historical_ingestion.py",
 }
 
 API_SOURCE_FILES: set[str] = {
@@ -146,6 +251,12 @@ API_SOURCE_FILES: set[str] = {
     "src/odds.py",
     "src/polymarket.py",
     "src/cache.py",
+    "src/historical_data.py",
+    "src/historical_ingestion.py",
+    "src/football_api.py",
+    "src/team_names.py",
+    "src/team_behavior.py",
+    "src/elo.py",
 }
 
 POLYMARKET_MAPPING_FILES: set[str] = {
@@ -176,3 +287,25 @@ SEMANTIC_LAYER_DOCUMENTS: set[str] = {
     "~/.codex/skills/worldcup-alpha-model-semantic-layer/references/evidence.md",
 }
 
+
+def validate_historical_matches_schema(df) -> list[str]:
+    return _validate_schema(df, "data/historical_matches.csv")
+
+
+def validate_team_behavior_schema(df) -> list[str]:
+    return _validate_schema(df, "data/team_behavior.csv")
+
+
+def _validate_schema(df, schema_name: str) -> list[str]:
+    expected = EXPECTED_CSV_SCHEMAS[schema_name]
+    if df is None:
+        return [f"{schema_name}: dataframe is missing; expected columns: {', '.join(expected)}"]
+    try:
+        columns = list(df.columns)
+    except Exception as exc:
+        return [f"{schema_name}: could not inspect columns: {exc}"]
+    missing = [col for col in expected if col not in columns]
+    warnings: list[str] = []
+    if missing:
+        warnings.append(f"{schema_name}: missing columns: {', '.join(missing)}")
+    return warnings

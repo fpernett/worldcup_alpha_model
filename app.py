@@ -12,12 +12,15 @@ from src.backtesting import evaluate_predictions, load_prediction_log, load_resu
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
 from src.config import api_summary
 from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
+from src.environment_response import calculate_environment_response
 from src.feature_engineering import load_recent_matches
+from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
 from src.market_tables import group_market_alpha
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.odds import load_market_odds
 from src.polymarket import get_match_polymarket_markets, get_polymarket_markets, update_polymarket_markets
+from src.recency import calculate_match_weight
 from src.ratings import get_team_ratings
 from src.report_charts import (
     create_compact_score_matrix,
@@ -36,6 +39,7 @@ from src.report_metrics import (
     calculate_team_rating_percentiles,
 )
 from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
+from src.team_behavior import load_team_behavior
 from src.timeline import calculate_score_timeline
 
 
@@ -113,7 +117,19 @@ def climate_factor_display(df: pd.DataFrame) -> pd.DataFrame:
     return out[["factor", "value", "category", "favours", "multiplier"]]
 
 
-def build_source_status(fixtures, teams, venues, odds) -> pd.DataFrame:
+def behavior_metric_display(value: float, as_pct: bool = False) -> str:
+    if pd.isna(value):
+        return ""
+    return f"{100 * float(value):.1f}%" if as_pct else f"{float(value):.3f}"
+
+
+def behavior_delta_display(value: float) -> str:
+    if pd.isna(value):
+        return ""
+    return f"{float(value):+.3f}"
+
+
+def build_source_status(fixtures, teams, venues, odds, historical_long_matches=None, team_behavior=None) -> pd.DataFrame:
     apis = api_summary()
 
     def source_label(df, fallback):
@@ -240,6 +256,50 @@ def build_source_status(fixtures, teams, venues, odds) -> pd.DataFrame:
                 ],
             ),
         },
+        {
+            "input": "historical_matches",
+            "source": source_label(historical_long_matches, "local CSV"),
+            "rows": safe_len(historical_long_matches),
+            "api_configured": apis.get("fixtures", False),
+            "last_updated": last_updated(historical_long_matches),
+            "warning": warning(historical_long_matches),
+            "missing_columns": missing_columns(
+                historical_long_matches,
+                [
+                    "match_id",
+                    "date_utc",
+                    "competition",
+                    "competition_type",
+                    "team",
+                    "opponent",
+                    "team_goals",
+                    "opponent_goals",
+                    "source",
+                    "last_updated",
+                ],
+            ),
+        },
+        {
+            "input": "team_behavior",
+            "source": source_label(team_behavior, "local CSV"),
+            "rows": safe_len(team_behavior),
+            "api_configured": False,
+            "last_updated": last_updated(team_behavior),
+            "warning": warning(team_behavior),
+            "missing_columns": missing_columns(
+                team_behavior,
+                [
+                    "team",
+                    "reference_date",
+                    "n_matches",
+                    "attack_index",
+                    "defense_index",
+                    "recent_form_index",
+                    "overall_data_quality",
+                    "last_updated",
+                ],
+            ),
+        },
     ]
 
     for row in diagnostics:
@@ -251,8 +311,348 @@ def build_source_status(fixtures, teams, venues, odds) -> pd.DataFrame:
 
 def local_input_version() -> tuple[float, ...]:
     data_dir = Path("data")
-    filenames = ["fixtures.csv", "team_ratings.csv", "venues.csv", "market_odds.csv"]
+    filenames = [
+        "fixtures.csv",
+        "team_ratings.csv",
+        "venues.csv",
+        "market_odds.csv",
+        "historical_matches.csv",
+        "team_behavior.csv",
+    ]
     return tuple((data_dir / filename).stat().st_mtime if (data_dir / filename).exists() else 0.0 for filename in filenames)
+
+
+def selected_behavior_rows(team_behavior: pd.DataFrame, home: str, away: str) -> pd.DataFrame:
+    behavior = team_behavior.copy() if team_behavior is not None else pd.DataFrame()
+    if behavior.empty or "team" not in behavior.columns:
+        return pd.DataFrame()
+    selected = behavior.loc[behavior["team"].astype(str).str.lower().isin([home.lower(), away.lower()])].copy()
+    if selected.empty:
+        return selected
+    if "matches_used_recent" not in selected.columns and "n_matches" in selected.columns:
+        selected["matches_used_recent"] = selected["n_matches"]
+    columns = [
+        "team",
+        "matches_used_recent",
+        "weighted_goals_for",
+        "weighted_goals_against",
+        "attack_index",
+        "defense_index",
+        "recent_form_index",
+        "weighted_btts_rate",
+        "weighted_over_2_5_rate",
+        "clean_sheet_rate",
+        "failed_to_score_rate",
+        "overall_data_quality",
+    ]
+    for col in columns:
+        if col not in selected.columns:
+            selected[col] = pd.NA
+    display = selected[columns].copy()
+    for col in ["weighted_goals_for", "weighted_goals_against", "attack_index", "defense_index", "recent_form_index"]:
+        display[col] = display[col].map(lambda x: behavior_metric_display(x))
+    for col in ["weighted_btts_rate", "weighted_over_2_5_rate", "clean_sheet_rate", "failed_to_score_rate"]:
+        display[col] = display[col].map(lambda x: behavior_metric_display(x, as_pct=True))
+    return display
+
+
+def behavior_window_display(team_behavior: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+    behavior = team_behavior.copy() if team_behavior is not None else pd.DataFrame()
+    if behavior.empty or "team" not in behavior.columns:
+        return pd.DataFrame()
+    selected = behavior.loc[behavior["team"].astype(str).str.lower().isin([team.lower() for team in teams])].copy()
+    if selected.empty:
+        return selected
+    if "matches_used_recent" not in selected.columns and "n_matches" in selected.columns:
+        selected["matches_used_recent"] = selected["n_matches"]
+    columns = [
+        "team",
+        "matches_available_all_time",
+        "matches_used_recent",
+        "behavior_window_start",
+        "oldest_match_used",
+        "latest_match_used",
+        "overall_data_quality",
+        "behavior_config_name",
+        "behavior_warning",
+        "sample_size_warning",
+        "staleness_warning",
+        "opponent_quality_warning",
+    ]
+    for col in columns:
+        if col not in selected.columns:
+            selected[col] = pd.NA
+    display = selected[columns].copy()
+    display["warnings"] = display.apply(
+        lambda row: str(row.get("behavior_warning", "") or "").strip()
+        or "; ".join(
+            [
+                str(row[col])
+                for col in ["sample_size_warning", "staleness_warning", "opponent_quality_warning"]
+                if str(row.get(col, "") or "").strip()
+            ]
+        ),
+        axis=1,
+    )
+    return display[
+        [
+            "team",
+            "matches_available_all_time",
+            "matches_used_recent",
+            "behavior_window_start",
+            "oldest_match_used",
+            "latest_match_used",
+            "overall_data_quality",
+            "behavior_config_name",
+            "warnings",
+        ]
+    ]
+
+
+def recent_vs_all_time_display(team_behavior: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+    behavior = team_behavior.copy() if team_behavior is not None else pd.DataFrame()
+    if behavior.empty or "team" not in behavior.columns:
+        return pd.DataFrame()
+    selected = behavior.loc[behavior["team"].astype(str).str.lower().isin([team.lower() for team in teams])].copy()
+    if selected.empty:
+        return selected
+    columns = [
+        "team",
+        "all_time_goals_for",
+        "weighted_goals_for",
+        "all_time_goals_against",
+        "weighted_goals_against",
+    ]
+    for col in columns:
+        if col not in selected.columns:
+            selected[col] = pd.NA
+    display = selected[columns].copy()
+    for col in columns:
+        if col != "team":
+            display[col] = display[col].map(lambda x: behavior_metric_display(x))
+    return display
+
+
+def schedule_strength_display(team_behavior: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+    behavior = team_behavior.copy() if team_behavior is not None else pd.DataFrame()
+    if behavior.empty or "team" not in behavior.columns:
+        return pd.DataFrame()
+    selected = behavior.loc[behavior["team"].astype(str).str.lower().isin([team.lower() for team in teams])].copy()
+    if selected.empty:
+        return selected
+    columns = [
+        "team",
+        "mean_opponent_elo_recent",
+        "strong_opponent_match_count",
+        "weak_opponent_match_count",
+        "schedule_strength_label",
+        "attack_index_raw",
+        "attack_index_adjusted",
+        "defense_index_raw",
+        "defense_index_adjusted",
+        "opponent_adjustment_warning",
+        "schedule_strength_warning",
+    ]
+    for col in columns:
+        if col not in selected.columns:
+            selected[col] = pd.NA
+    display = selected[columns].copy()
+    for col in ["mean_opponent_elo_recent", "attack_index_raw", "attack_index_adjusted", "defense_index_raw", "defense_index_adjusted"]:
+        display[col] = display[col].map(lambda x: behavior_metric_display(x))
+    display["warnings"] = display.apply(
+        lambda row: "; ".join(
+            [
+                str(row.get(col, "") or "")
+                for col in ["schedule_strength_warning", "opponent_adjustment_warning"]
+                if str(row.get(col, "") or "").strip()
+            ]
+        ),
+        axis=1,
+    )
+    return display[
+        [
+            "team",
+            "mean_opponent_elo_recent",
+            "strong_opponent_match_count",
+            "weak_opponent_match_count",
+            "schedule_strength_label",
+            "attack_index_raw",
+            "attack_index_adjusted",
+            "defense_index_raw",
+            "defense_index_adjusted",
+            "warnings",
+        ]
+    ]
+
+
+def historical_match_history_display(matches_df: pd.DataFrame, team: str, reference_date, limit: int = 20) -> pd.DataFrame:
+    matches = matches_df.copy() if matches_df is not None else pd.DataFrame()
+    if matches.empty or "team" not in matches.columns:
+        return pd.DataFrame()
+    view = matches.loc[matches["team"].astype(str).str.lower() == str(team).lower()].copy()
+    if view.empty:
+        return view
+    view["date_utc"] = pd.to_datetime(view["date_utc"], errors="coerce")
+    view = view.dropna(subset=["date_utc"]).sort_values("date_utc", ascending=False).head(limit)
+    view["weight"] = view.apply(lambda row: calculate_match_weight(row, reference_date), axis=1)
+    view["score"] = (
+        pd.to_numeric(view.get("team_goals"), errors="coerce").map(lambda x: "" if pd.isna(x) else str(int(x)))
+        + "-"
+        + pd.to_numeric(view.get("opponent_goals"), errors="coerce").map(lambda x: "" if pd.isna(x) else str(int(x)))
+    )
+    view["environment_flags"] = view.apply(_environment_flags, axis=1)
+    for col in ["team_goals", "opponent_goals"]:
+        view[col] = pd.to_numeric(view[col], errors="coerce")
+    display = view[
+        [
+            "date_utc",
+            "opponent",
+            "competition",
+            "score",
+            "weight",
+            "team_goals",
+            "opponent_goals",
+            "environment_flags",
+        ]
+    ].copy()
+    display["date_utc"] = display["date_utc"].dt.date.astype(str)
+    display["weight"] = display["weight"].map(lambda x: "" if pd.isna(x) else f"{float(x):.3f}")
+    return display.rename(columns={"team_goals": "goals_for", "opponent_goals": "goals_against"})
+
+
+def environment_response_display(matches_df: pd.DataFrame, teams: list[str], reference_date) -> pd.DataFrame:
+    rows = [calculate_environment_response(matches_df, team, reference_date) for team in teams]
+    display = pd.DataFrame(rows)
+    if display.empty:
+        return display
+    columns = [
+        "team",
+        "environment_sample_size",
+        "hot_match_count",
+        "humid_match_count",
+        "altitude_match_count",
+        "hot_attack_delta",
+        "hot_defense_delta",
+        "humid_attack_delta",
+        "humid_defense_delta",
+        "altitude_attack_delta",
+        "altitude_defense_delta",
+        "environment_response_index",
+        "environment_data_quality",
+        "environment_warning",
+    ]
+    for col in columns:
+        if col not in display.columns:
+            display[col] = pd.NA
+    for col in [c for c in columns if c.endswith("_delta") or c == "environment_response_index"]:
+        display[col] = display[col].map(lambda x: "" if pd.isna(x) else f"{float(x):.3f}")
+    return display[columns]
+
+
+def model_impact_display(result: dict) -> pd.DataFrame:
+    rows = []
+    for side in ["home_inputs", "away_inputs"]:
+        inputs = result.get(side, pd.Series(dtype="object"))
+        team = str(inputs.get("team", ""))
+        for label, manual_col, final_col, behavior_col, source_col, delta_col, cap_col in [
+            ("Attack", "manual_attack", "attack", "behavior_attack_index", "attack_source", "behavior_attack_delta", "behavior_attack_cap_hit"),
+            ("Defense", "manual_defense", "defense", "behavior_defense_index", "defense_source", "behavior_defense_delta", "behavior_defense_cap_hit"),
+            (
+                "Recent form",
+                "manual_recent_form",
+                "recent_form",
+                "behavior_recent_form_index",
+                "recent_form_source",
+                "behavior_recent_form_delta",
+                "behavior_recent_form_cap_hit",
+            ),
+        ]:
+            delta = inputs.get(delta_col)
+            if pd.isna(delta):
+                manual = inputs.get(manual_col)
+                final = inputs.get(final_col)
+                delta = pd.NA if pd.isna(manual) or pd.isna(final) else float(final) - float(manual)
+            rows.append(
+                {
+                    "team": team,
+                    "input": label,
+                    "manual_value": behavior_metric_display(inputs.get(manual_col)),
+                    "behavior_index": behavior_metric_display(inputs.get(behavior_col)),
+                    "model_input_after_blend": behavior_metric_display(inputs.get(final_col)),
+                    "delta": behavior_delta_display(delta),
+                    "cap_hit": _truthy(inputs.get(cap_col, False)),
+                    "source": inputs.get(source_col, ""),
+                    "blend_used": _truthy(inputs.get("behavior_blend_used", False)),
+                    "behavior_quality": inputs.get("behavior_overall_data_quality", ""),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def historical_behavior_overview(matches_df: pd.DataFrame, behavior_df: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+    matches = matches_df.copy() if matches_df is not None else pd.DataFrame()
+    behavior = behavior_df.copy() if behavior_df is not None else pd.DataFrame()
+    rows = []
+    for team in teams:
+        team_rows = pd.DataFrame()
+        if not matches.empty and "team" in matches.columns:
+            team_rows = matches.loc[matches["team"].astype(str).str.lower() == team.lower()].copy()
+        latest = ""
+        if not team_rows.empty and "date_utc" in team_rows.columns:
+            dates = pd.to_datetime(team_rows["date_utc"], errors="coerce").dropna()
+            latest = dates.max().date().isoformat() if not dates.empty else ""
+        quality = ""
+        if not behavior.empty and "team" in behavior.columns:
+            row = behavior.loc[behavior["team"].astype(str).str.lower() == team.lower()]
+            if not row.empty:
+                quality = str(row.iloc[0].get("overall_data_quality", "") or "")
+        rows.append(
+            {
+                "team": team,
+                "historical_rows": len(team_rows),
+                "latest_match_date": latest,
+                "behavior_quality": quality or "none",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _environment_flags(row: pd.Series) -> str:
+    flags = []
+    temperature = _row_float(row, "temperature_c")
+    humidity = _row_float(row, "humidity_pct")
+    altitude = _row_float(row, "altitude_m")
+    wind = _row_float(row, "wind_kmh")
+    precipitation = _row_float(row, "precipitation_mm")
+    roof_closed = _row_float(row, "roof_closed")
+    if temperature is not None and temperature >= 28:
+        flags.append("hot")
+    if humidity is not None and humidity >= 70:
+        flags.append("humid")
+    if altitude is not None and altitude >= 1000:
+        flags.append("altitude")
+    if wind is not None and wind >= 20:
+        flags.append("wind")
+    if precipitation is not None and precipitation > 0:
+        flags.append("rain")
+    if roof_closed is not None and roof_closed >= 1:
+        flags.append("roof closed")
+    return ", ".join(flags)
+
+
+def _row_float(row: pd.Series, column: str) -> float | None:
+    value = pd.to_numeric(pd.Series([row.get(column)]), errors="coerce").iloc[0]
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def _truthy(value) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
 @st.cache_data(ttl=600)
@@ -275,9 +675,11 @@ def load_inputs(
     teams = get_team_ratings()
     venues = load_venues()
     odds = load_market_odds()
-    historical_matches = load_recent_matches()
-    status = build_source_status(fixtures, teams, venues, odds)
-    return fixtures, teams, venues, odds, historical_matches, status
+    recent_matches = load_recent_matches()
+    historical_long_matches = load_historical_matches()
+    team_behavior = load_team_behavior()
+    status = build_source_status(fixtures, teams, venues, odds, historical_long_matches, team_behavior)
+    return fixtures, teams, venues, odds, recent_matches, historical_long_matches, team_behavior, status
 
 
 @st.cache_data(ttl=600)
@@ -426,7 +828,7 @@ with st.sidebar:
     form_weight = st.slider("Recent form weight", 0.00, 0.40, 0.20, 0.02)
     env_weight = st.slider("Environment weight", 0.000, 0.030, 0.010, 0.001)
 
-fixtures, teams, venues, market_odds, historical_matches, source_status = load_inputs(
+fixtures, teams, venues, market_odds, recent_matches, historical_long_matches, team_behavior, source_status = load_inputs(
     start_date,
     end_date,
     st.session_state["refresh_counter"],
@@ -558,9 +960,9 @@ for label in selected_labels:
         ]
 
     venue_env = result.get("environment", {})
-    data_support = build_data_support(match, historical_matches)
+    data_support = build_data_support(match, recent_matches)
     goal_distribution = calculate_goal_distribution(result.get("score_matrix"), max_goals=14)
-    league_context = calculate_league_context(historical_matches, result)
+    league_context = calculate_league_context(recent_matches, result)
     score_timeline = calculate_score_timeline(result["hxg"], result["axg"])
     expected_goals_df = build_expected_goals_df(result)
     rating_percentiles = calculate_team_rating_percentiles(teams, result["home"], result["away"])
@@ -585,6 +987,7 @@ for label in selected_labels:
             "Backtesting",
             "Team inputs",
             "Venue/environment",
+            "Historical behavior",
             "Model notes",
         ]
     )
@@ -959,6 +1362,17 @@ for label in selected_labels:
     with tabs[7]:
         st.subheader("Team Inputs")
         team_inputs = pd.DataFrame([result["home_inputs"], result["away_inputs"]])
+        for col in [
+            "manual_attack",
+            "manual_defense",
+            "manual_recent_form",
+            "attack_source",
+            "defense_source",
+            "recent_form_source",
+            "behavior_blend_used",
+        ]:
+            if col not in team_inputs.columns:
+                team_inputs[col] = pd.NA
         st.dataframe(
             team_inputs[
                 [
@@ -970,6 +1384,13 @@ for label in selected_labels:
                     "fifa_rank_proxy",
                     "training_temp_c",
                     "training_humidity_pct",
+                    "manual_attack",
+                    "manual_defense",
+                    "manual_recent_form",
+                    "attack_source",
+                    "defense_source",
+                    "recent_form_source",
+                    "behavior_blend_used",
                     "data_quality",
                     "last_updated",
                     "notes",
@@ -1029,11 +1450,114 @@ for label in selected_labels:
         )
 
     with tabs[9]:
+        if historical_long_matches.empty:
+            st.info(
+                "No historical matches loaded yet. Run:\n\n"
+                "`.venv/bin/python scripts/import_historical_csv.py --input path/to/results.csv "
+                "--source public_csv --rebuild-behavior`"
+            )
+        else:
+            h1, h2, h3 = st.columns(3)
+            h1.metric("Historical rows", f"{len(historical_long_matches):,}")
+            selected_overview = historical_behavior_overview(
+                historical_long_matches,
+                team_behavior,
+                [result["home"], result["away"]],
+            )
+            h2.metric(f"{result['home']} rows", f"{int(selected_overview.iloc[0]['historical_rows']):,}")
+            h3.metric(f"{result['away']} rows", f"{int(selected_overview.iloc[1]['historical_rows']):,}")
+            st.dataframe(selected_overview, hide_index=True, width="stretch")
+
+        st.subheader("Recent Window Summary")
+        window_summary = behavior_window_display(team_behavior, [result["home"], result["away"]])
+        if window_summary.empty:
+            st.caption("No calibrated behavior window rows are available.")
+        else:
+            st.dataframe(window_summary, hide_index=True, width="stretch")
+            for warning_text in window_summary.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
+                if warning_text:
+                    st.warning(warning_text)
+
+        st.subheader("Recent vs All-Time")
+        all_time_compare = recent_vs_all_time_display(team_behavior, [result["home"], result["away"]])
+        if all_time_compare.empty:
+            st.caption("No all-time diagnostic behavior rows are available.")
+        else:
+            st.dataframe(all_time_compare, hide_index=True, width="stretch")
+
+        st.subheader("Schedule Strength")
+        st.caption("This section checks whether recent good results came against strong or weak opponents.")
+        schedule_display = schedule_strength_display(team_behavior, [result["home"], result["away"]])
+        if schedule_display.empty:
+            st.caption("No opponent-Elo schedule diagnostics are available.")
+        else:
+            st.dataframe(schedule_display, hide_index=True, width="stretch")
+            for warning_text in schedule_display.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
+                if warning_text:
+                    st.warning(warning_text)
+
+        st.subheader("Team Behavior Summary")
+        st.caption(
+            "Historical behavior is a recency-weighted descriptive layer, not causal proof. "
+            "Friendlies, opponent quality, and missing event data can materially affect these metrics."
+        )
+        behavior_summary = selected_behavior_rows(team_behavior, result["home"], result["away"])
+        if behavior_summary.empty:
+            st.info(
+                "No team behavior rows are available for this selected match. Add rows to "
+                "`data/historical_matches.csv` or run the historical ingestion command above, then rebuild "
+                "`data/team_behavior.csv`."
+            )
+        else:
+            st.dataframe(behavior_summary, hide_index=True, width="stretch")
+
+        st.subheader("Recency-Weighted Match History")
+        h1, h2 = st.columns(2)
+        with h1:
+            st.markdown(f"**{result['home']}**")
+            home_history = historical_match_history_display(historical_long_matches, result["home"], match.get("date_utc"), limit=20)
+            if home_history.empty:
+                st.caption("No long-format historical rows available.")
+            else:
+                st.dataframe(home_history, hide_index=True, width="stretch")
+        with h2:
+            st.markdown(f"**{result['away']}**")
+            away_history = historical_match_history_display(historical_long_matches, result["away"], match.get("date_utc"), limit=20)
+            if away_history.empty:
+                st.caption("No long-format historical rows available.")
+            else:
+                st.dataframe(away_history, hide_index=True, width="stretch")
+
+        st.subheader("Environment Response")
+        env_response = environment_response_display(historical_long_matches, [result["home"], result["away"]], match.get("date_utc"))
+        st.dataframe(env_response, hide_index=True, width="stretch")
+        st.caption(
+            "Environmental response uses hot >= 28 C, humid >= 70%, altitude >= 1000 m, "
+            "wind >= 20 km/h, and rain > 0 mm. Effects are capped and conservative."
+        )
+        for warning_text in env_response.get("environment_warning", pd.Series(dtype="object")).dropna().astype(str):
+            if warning_text:
+                st.warning(warning_text)
+
+        st.subheader("Model Impact")
+        impact_display = model_impact_display(result)
+        st.dataframe(impact_display, hide_index=True, width="stretch")
+        if not impact_display.empty and impact_display["cap_hit"].any():
+            st.warning("One or more behavior adjustments reached the configured movement cap; manual ratings remain the base input.")
+        st.caption(
+            "Blend rules: high/moderate behavior can move attack and defense up to a 30% blend, and recent form up to 50%. "
+            "Low-quality behavior uses half those weights; insufficient behavior uses manual values only. "
+            "Attack and defense deltas are capped at 0.12, and recent-form deltas are capped at 0.18. "
+            "The model remains a statistical alpha screen, not betting advice."
+        )
+
+    with tabs[10]:
         st.markdown(
             """
             **Assumptions**
 
             - Expected goals combine Elo, attack, opponent defense, recent form, and conservative environmental adjustments.
+            - Historical behavior, when available with acceptable data quality, is blended conservatively into attack, defense, and recent form.
             - Scorelines come from an independent Poisson goal model and are normalized over the displayed score grid.
             - Fair odds are calculated as `1 / probability`.
             - Alpha EV is calculated as `model_probability x market_decimal_odds - 1`.
@@ -1044,6 +1568,9 @@ for label in selected_labels:
             - This is not a black-box machine learning model and does not account for every lineup, tactical, injury, or motivation factor.
             - Missing market odds leave alpha EV blank.
             - Weather and training climates are approximate when API or recent match data are unavailable.
+            - Historical behavior is descriptive, not causal proof; friendlies may not reflect full competitive strength.
+            - Opponent quality matters, and environmental response requires enough previous matches to be meaningful.
+            - Environmental effects are capped and conservative.
             - Outputs are statistical estimates only and are not staking, bet sizing, or investment recommendations.
             """
         )

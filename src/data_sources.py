@@ -15,8 +15,10 @@ from src.cache import (
     write_json_cache,
 )
 from src.config import DATA_DIR, SOURCE_API, SOURCE_CACHE, SOURCE_LOCAL, get_config
+from src.historical_data import build_historical_matches_from_results, load_historical_matches, merge_and_save_historical_matches
 from src.odds import ODDS_COLUMNS, load_market_odds, update_market_odds_for_fixtures
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
+from src.team_behavior import rebuild_team_behavior_csv
 from src.utils import csv_status, parse_date, read_csv_with_columns
 from src.weather import VENUE_COLUMNS, fetch_weather_for_fixtures
 
@@ -185,7 +187,7 @@ def fetch_football_results(
     )
 
 
-def get_source_status(fixtures=None, teams=None, venues=None, odds=None):
+def get_source_status(fixtures=None, teams=None, venues=None, odds=None, historical_matches=None, team_behavior=None):
     """
     Return source diagnostics for the dashboard.
 
@@ -308,6 +310,50 @@ def get_source_status(fixtures=None, teams=None, venues=None, odds=None):
                 ],
             ),
         },
+        {
+            "input": "historical_matches",
+            "source": "cache/local CSV",
+            "rows": safe_len(historical_matches),
+            "api_configured": bool(getattr(__import__("os"), "environ").get("FOOTBALL_API_KEY")),
+            "last_updated": file_mtime("data/historical_matches.csv"),
+            "warning": "",
+            "missing_columns": missing_columns(
+                historical_matches,
+                [
+                    "match_id",
+                    "date_utc",
+                    "competition",
+                    "competition_type",
+                    "team",
+                    "opponent",
+                    "team_goals",
+                    "opponent_goals",
+                    "source",
+                    "last_updated",
+                ],
+            ),
+        },
+        {
+            "input": "team_behavior",
+            "source": "computed local CSV",
+            "rows": safe_len(team_behavior),
+            "api_configured": False,
+            "last_updated": file_mtime("data/team_behavior.csv"),
+            "warning": "",
+            "missing_columns": missing_columns(
+                team_behavior,
+                [
+                    "team",
+                    "reference_date",
+                    "n_matches",
+                    "attack_index",
+                    "defense_index",
+                    "recent_form_index",
+                    "overall_data_quality",
+                    "last_updated",
+                ],
+            ),
+        },
     ]
 
     for row in diagnostics:
@@ -317,18 +363,34 @@ def get_source_status(fixtures=None, teams=None, venues=None, odds=None):
     return pd.DataFrame(diagnostics)
 
 
-def update_all_sources(start_date: date | None = None, end_date: date | None = None) -> dict[str, Any]:
+def update_all_sources(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    update_historical_behavior: bool = True,
+) -> dict[str, Any]:
     start = start_date or date.today()
     end = end_date or start
     summary: dict[str, Any] = {"updated_at": utc_now_iso(), "steps": []}
 
     fixtures = _safe_step(summary, "fixtures", lambda: get_upcoming_fixtures(start, end, force_refresh=True))
-    _safe_step(
+    results = _safe_step(
         summary,
         "results",
         lambda: fetch_football_results(start - timedelta(days=365), end, force_refresh=True),
     )
     ratings = _safe_step(summary, "ratings", lambda: get_team_ratings(force_refresh=True))
+
+    historical = None
+    behavior = None
+    if update_historical_behavior:
+        historical = _safe_step(summary, "historical_matches", lambda: _update_historical_matches_from_results(results))
+        teams_for_behavior = ratings if isinstance(ratings, pd.DataFrame) else None
+        historical_for_behavior = historical if isinstance(historical, pd.DataFrame) else load_historical_matches(use_cache=False)
+        behavior = _safe_step(
+            summary,
+            "team_behavior",
+            lambda: rebuild_team_behavior_csv(historical_for_behavior, teams_for_behavior, reference_date=end),
+        )
 
     fixture_frame = fixtures if isinstance(fixtures, pd.DataFrame) else get_upcoming_fixtures(start, end)
     _safe_step(summary, "weather", lambda: fetch_weather_for_fixtures(fixture_frame))
@@ -336,7 +398,20 @@ def update_all_sources(start_date: date | None = None, end_date: date | None = N
 
     summary["fixtures_rows"] = len(fixtures) if isinstance(fixtures, pd.DataFrame) else 0
     summary["team_ratings_rows"] = len(ratings) if isinstance(ratings, pd.DataFrame) else 0
+    summary["historical_matches_rows"] = len(historical) if isinstance(historical, pd.DataFrame) else 0
+    summary["team_behavior_rows"] = len(behavior) if isinstance(behavior, pd.DataFrame) else 0
     return summary
+
+
+def _update_historical_matches_from_results(results: Any) -> pd.DataFrame:
+    existing = load_historical_matches(use_cache=False)
+    if not isinstance(results, pd.DataFrame) or results.empty:
+        return existing
+    source = results.attrs.get("source_detail") or results.attrs.get("source_label") or "football_results"
+    historical_rows = build_historical_matches_from_results(results, source=str(source))
+    if historical_rows.empty:
+        return existing
+    return merge_and_save_historical_matches(historical_rows)
 
 
 def _fetch_football_data_fixtures(start_date: date, end_date: date) -> tuple[pd.DataFrame | None, str | None]:
