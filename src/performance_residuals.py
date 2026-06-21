@@ -16,7 +16,12 @@ RESIDUAL_COLUMNS = [
     "expected_goals_against",
     "goals_for_residual",
     "goals_against_residual",
+    "goals_for_residual_capped",
+    "goals_against_residual_capped",
+    "blowout_weight",
 ]
+
+DEFAULT_RESIDUAL_CAP = 1.75
 
 
 def calculate_expected_result_from_elo(
@@ -46,7 +51,7 @@ def calculate_expected_goals_from_elo(
     return clamp(expected_goals, 0.25, 3.50)
 
 
-def add_performance_residuals(matches_df: pd.DataFrame | None) -> pd.DataFrame:
+def add_performance_residuals(matches_df: pd.DataFrame | None, residual_cap: float = DEFAULT_RESIDUAL_CAP) -> pd.DataFrame:
     if matches_df is None or matches_df.empty:
         columns = list(matches_df.columns) if isinstance(matches_df, pd.DataFrame) else []
         return pd.DataFrame(columns=columns + [col for col in RESIDUAL_COLUMNS if col not in columns])
@@ -71,7 +76,34 @@ def add_performance_residuals(matches_df: pd.DataFrame | None) -> pd.DataFrame:
     )
     out["goals_for_residual"] = out["team_goals"] - out["expected_goals_for"]
     out["goals_against_residual"] = out["opponent_goals"] - out["expected_goals_against"]
+    out["goals_for_residual_capped"] = out["goals_for_residual"].map(lambda value: cap_residual(value, residual_cap))
+    out["goals_against_residual_capped"] = out["goals_against_residual"].map(lambda value: cap_residual(value, residual_cap))
+    out["blowout_weight"] = out.apply(lambda row: blowout_weight(row.get("team_goals"), row.get("opponent_goals")), axis=1)
     return out
+
+
+def cap_residual(value: Any, cap: float = DEFAULT_RESIDUAL_CAP) -> float:
+    residual = coerce_float(value, float("nan"))
+    if pd.isna(residual):
+        return float("nan")
+    cap_value = abs(float(cap))
+    return clamp(residual, -cap_value, cap_value)
+
+
+def blowout_weight(team_goals: Any = None, opponent_goals: Any = None, goal_difference: Any = None) -> float:
+    if goal_difference is None:
+        goals_for = coerce_float(team_goals, float("nan"))
+        goals_against = coerce_float(opponent_goals, float("nan"))
+        if pd.isna(goals_for) or pd.isna(goals_against):
+            return 1.0
+        margin = abs(goals_for - goals_against)
+    else:
+        margin = abs(coerce_float(goal_difference, float("nan")))
+        if pd.isna(margin):
+            return 1.0
+    if margin <= 2:
+        return 1.0
+    return clamp(1.0 / (1.0 + 0.35 * (margin - 2.0)), 0.55, 1.0)
 
 
 def attack_index_from_goal_residual(weighted_goal_for_residual: Any) -> float:

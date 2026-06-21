@@ -16,19 +16,21 @@ from src.utils import today_iso  # noqa: E402
 
 AUDIT_COLUMNS = [
     "team",
-    "matches_used_recent",
-    "mean_opponent_elo_recent",
     "attack_index_raw",
-    "attack_index_adjusted_old",
-    "attack_index_residual",
+    "attack_index_residual_raw",
+    "attack_index_residual_robust",
     "attack_index_final",
-    "weighted_goal_for_residual",
+    "weighted_goal_for_residual_raw",
+    "weighted_goal_for_residual_robust",
+    "top_3_attack_residual_share",
     "defense_index_raw",
-    "defense_index_adjusted_old",
-    "defense_index_residual",
+    "defense_index_residual_raw",
+    "defense_index_residual_robust",
     "defense_index_final",
-    "weighted_goal_against_residual",
-    "recent_form_index",
+    "weighted_goal_against_residual_raw",
+    "weighted_goal_against_residual_robust",
+    "top_3_defense_residual_share",
+    "residual_concentration_warning",
     "warnings",
 ]
 
@@ -48,19 +50,25 @@ def build_residual_audit_table(teams: list[str] | None = None) -> pd.DataFrame:
         rows.append(
             {
                 "team": str(row.get("team", "")),
-                "matches_used_recent": _int_or_blank(row.get("matches_used_recent", row.get("n_matches"))),
-                "mean_opponent_elo_recent": _round_or_blank(row.get("mean_opponent_elo_recent")),
                 "attack_index_raw": _round_or_blank(row.get("attack_index_raw")),
-                "attack_index_adjusted_old": _round_or_blank(row.get("attack_index_adjusted_old", row.get("attack_index_adjusted"))),
-                "attack_index_residual": _round_or_blank(row.get("attack_index_residual")),
+                "attack_index_residual_raw": _round_or_blank(row.get("attack_index_residual_raw", row.get("attack_index_residual"))),
+                "attack_index_residual_robust": _round_or_blank(row.get("attack_index_residual_robust", row.get("attack_index_residual"))),
                 "attack_index_final": _round_or_blank(row.get("attack_index_final", row.get("attack_index"))),
-                "weighted_goal_for_residual": _signed_round(row.get("weighted_goal_for_residual")),
+                "weighted_goal_for_residual_raw": _signed_round(row.get("weighted_goal_for_residual_raw", row.get("weighted_goal_for_residual"))),
+                "weighted_goal_for_residual_robust": _signed_round(row.get("weighted_goal_for_residual_robust", row.get("weighted_goal_for_residual"))),
+                "top_3_attack_residual_share": _pct_or_blank(row.get("top_3_attack_residual_share")),
                 "defense_index_raw": _round_or_blank(row.get("defense_index_raw")),
-                "defense_index_adjusted_old": _round_or_blank(row.get("defense_index_adjusted_old", row.get("defense_index_adjusted"))),
-                "defense_index_residual": _round_or_blank(row.get("defense_index_residual")),
+                "defense_index_residual_raw": _round_or_blank(row.get("defense_index_residual_raw", row.get("defense_index_residual"))),
+                "defense_index_residual_robust": _round_or_blank(row.get("defense_index_residual_robust", row.get("defense_index_residual"))),
                 "defense_index_final": _round_or_blank(row.get("defense_index_final", row.get("defense_index"))),
-                "weighted_goal_against_residual": _signed_round(row.get("weighted_goal_against_residual")),
-                "recent_form_index": _round_or_blank(row.get("recent_form_index")),
+                "weighted_goal_against_residual_raw": _signed_round(
+                    row.get("weighted_goal_against_residual_raw", row.get("weighted_goal_against_residual"))
+                ),
+                "weighted_goal_against_residual_robust": _signed_round(
+                    row.get("weighted_goal_against_residual_robust", row.get("weighted_goal_against_residual"))
+                ),
+                "top_3_defense_residual_share": _pct_or_blank(row.get("top_3_defense_residual_share")),
+                "residual_concentration_warning": str(row.get("residual_concentration_warning", "") or ""),
                 "warnings": _warnings(row),
             }
         )
@@ -93,6 +101,7 @@ def main() -> None:
 
 def _warnings(row: pd.Series) -> str:
     warning_parts = [
+        str(row.get("residual_concentration_warning", "") or ""),
         str(row.get("residual_warning", "") or ""),
         str(row.get("schedule_strength_warning", "") or ""),
         str(row.get("opponent_quality_warning", "") or ""),
@@ -121,6 +130,13 @@ def _signed_round(value: object) -> str:
     if pd.isna(numeric):
         return ""
     return f"{numeric:+.3f}"
+
+
+def _pct_or_blank(value: object) -> str:
+    numeric = _num(value)
+    if pd.isna(numeric):
+        return ""
+    return f"{100 * numeric:.1f}%"
 
 
 def _int_or_blank(value: object) -> str:

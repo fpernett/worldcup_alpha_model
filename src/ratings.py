@@ -474,7 +474,12 @@ def _behavior_blend_weights(row: pd.Series) -> dict[str, float] | None:
     attack_adjusted = coerce_float(row.get("attack_index_adjusted_old", row.get("attack_index_adjusted")), float("nan"))
     if schedule_label == "weak" and not pd.isna(attack_raw) and not pd.isna(attack_adjusted) and attack_adjusted < attack_raw:
         weights["attack"] *= 0.50
-    residual_warning = str(row.get("residual_warning", "") or "").strip()
+    residual_warning = " ".join(
+        [
+            str(row.get("residual_warning", "") or "").strip(),
+            str(row.get("residual_concentration_warning", "") or "").strip(),
+        ]
+    ).strip()
     if residual_warning:
         weights = {key: value * 0.50 for key, value in weights.items()}
     return weights

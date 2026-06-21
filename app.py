@@ -9,6 +9,12 @@ import streamlit as st
 
 from src.alpha import calculate_polymarket_alpha
 from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log, save_prediction_snapshot
+from src.behavior_driver_report import (
+    audit_final_model_inputs,
+    calculate_competition_breakdown,
+    calculate_opponent_tier_breakdown,
+    get_behavior_driver_matches,
+)
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
 from src.config import api_summary
 from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
@@ -511,21 +517,44 @@ def expected_performance_display(team_behavior: pd.DataFrame, teams: list[str]) 
         selected["attack_index_adjusted_old"] = selected["attack_index_adjusted"]
     if "defense_index_adjusted_old" not in selected.columns and "defense_index_adjusted" in selected.columns:
         selected["defense_index_adjusted_old"] = selected["defense_index_adjusted"]
+    if "attack_index_residual_raw" not in selected.columns and "attack_index_residual" in selected.columns:
+        selected["attack_index_residual_raw"] = selected["attack_index_residual"]
+    if "attack_index_residual_robust" not in selected.columns and "attack_index_residual" in selected.columns:
+        selected["attack_index_residual_robust"] = selected["attack_index_residual"]
+    if "defense_index_residual_raw" not in selected.columns and "defense_index_residual" in selected.columns:
+        selected["defense_index_residual_raw"] = selected["defense_index_residual"]
+    if "defense_index_residual_robust" not in selected.columns and "defense_index_residual" in selected.columns:
+        selected["defense_index_residual_robust"] = selected["defense_index_residual"]
+    if "weighted_goal_for_residual_raw" not in selected.columns and "weighted_goal_for_residual" in selected.columns:
+        selected["weighted_goal_for_residual_raw"] = selected["weighted_goal_for_residual"]
+    if "weighted_goal_for_residual_robust" not in selected.columns and "weighted_goal_for_residual" in selected.columns:
+        selected["weighted_goal_for_residual_robust"] = selected["weighted_goal_for_residual"]
+    if "weighted_goal_against_residual_raw" not in selected.columns and "weighted_goal_against_residual" in selected.columns:
+        selected["weighted_goal_against_residual_raw"] = selected["weighted_goal_against_residual"]
+    if "weighted_goal_against_residual_robust" not in selected.columns and "weighted_goal_against_residual" in selected.columns:
+        selected["weighted_goal_against_residual_robust"] = selected["weighted_goal_against_residual"]
     columns = [
         "team",
         "mean_opponent_elo_recent",
         "attack_index_raw",
         "attack_index_adjusted_old",
-        "attack_index_residual",
+        "attack_index_residual_raw",
+        "attack_index_residual_robust",
         "attack_index_final",
+        "weighted_goal_for_residual_raw",
+        "weighted_goal_for_residual_robust",
+        "top_3_attack_residual_share",
         "defense_index_raw",
         "defense_index_adjusted_old",
-        "defense_index_residual",
+        "defense_index_residual_raw",
+        "defense_index_residual_robust",
         "defense_index_final",
-        "weighted_goal_for_residual",
-        "weighted_goal_against_residual",
+        "weighted_goal_against_residual_raw",
+        "weighted_goal_against_residual_robust",
+        "top_3_defense_residual_share",
         "weighted_result_residual",
         "residual_coverage_recent",
+        "residual_concentration_warning",
         "residual_warning",
         "opponent_adjustment_warning",
     ]
@@ -537,24 +566,31 @@ def expected_performance_display(team_behavior: pd.DataFrame, teams: list[str]) 
         "mean_opponent_elo_recent",
         "attack_index_raw",
         "attack_index_adjusted_old",
-        "attack_index_residual",
+        "attack_index_residual_raw",
+        "attack_index_residual_robust",
         "attack_index_final",
         "defense_index_raw",
         "defense_index_adjusted_old",
-        "defense_index_residual",
+        "defense_index_residual_raw",
+        "defense_index_residual_robust",
         "defense_index_final",
     ]:
         display[col] = display[col].map(lambda x: behavior_metric_display(x))
-    for col in ["weighted_goal_for_residual", "weighted_goal_against_residual", "weighted_result_residual"]:
+    for col in [
+        "weighted_goal_for_residual_raw",
+        "weighted_goal_for_residual_robust",
+        "weighted_goal_against_residual_raw",
+        "weighted_goal_against_residual_robust",
+        "weighted_result_residual",
+    ]:
         display[col] = display[col].map(lambda x: behavior_delta_display(x))
-    display["residual_coverage_recent"] = display["residual_coverage_recent"].map(
-        lambda x: behavior_metric_display(x, as_pct=True)
-    )
+    for col in ["residual_coverage_recent", "top_3_attack_residual_share", "top_3_defense_residual_share"]:
+        display[col] = display[col].map(lambda x: behavior_metric_display(x, as_pct=True))
     display["warnings"] = display.apply(
         lambda row: "; ".join(
             [
                 str(row.get(col, "") or "")
-                for col in ["residual_warning", "opponent_adjustment_warning"]
+                for col in ["residual_concentration_warning", "residual_warning", "opponent_adjustment_warning"]
                 if str(row.get(col, "") or "").strip()
             ]
         ),
@@ -566,14 +602,20 @@ def expected_performance_display(team_behavior: pd.DataFrame, teams: list[str]) 
             "mean_opponent_elo_recent",
             "attack_index_raw",
             "attack_index_adjusted_old",
-            "attack_index_residual",
+            "attack_index_residual_raw",
+            "attack_index_residual_robust",
             "attack_index_final",
-            "weighted_goal_for_residual",
+            "weighted_goal_for_residual_raw",
+            "weighted_goal_for_residual_robust",
+            "top_3_attack_residual_share",
             "defense_index_raw",
             "defense_index_adjusted_old",
-            "defense_index_residual",
+            "defense_index_residual_raw",
+            "defense_index_residual_robust",
             "defense_index_final",
-            "weighted_goal_against_residual",
+            "weighted_goal_against_residual_raw",
+            "weighted_goal_against_residual_robust",
+            "top_3_defense_residual_share",
             "weighted_result_residual",
             "residual_coverage_recent",
             "warnings",
@@ -584,6 +626,75 @@ def expected_performance_display(team_behavior: pd.DataFrame, teams: list[str]) 
             "defense_index_adjusted_old": "defense_index_adjusted_old_opponent",
         }
     )
+
+
+def behavior_driver_matches_display(matches_df: pd.DataFrame, team: str, reference_date, sort_by: str, limit: int = 10) -> pd.DataFrame:
+    drivers = get_behavior_driver_matches(matches_df, team, reference_date, n=limit, sort_by=sort_by)
+    if drivers.empty:
+        return drivers
+    display = drivers.copy()
+    numeric_cols = [
+        "team_goals",
+        "opponent_goals",
+        "team_elo_pre",
+        "opponent_elo",
+        "match_weight",
+        "blowout_weight",
+        "expected_goals_for",
+        "expected_goals_against",
+        "goals_for_residual_raw",
+        "goals_for_residual_robust",
+        "goals_against_residual_raw",
+        "goals_against_residual_robust",
+        "attack_contribution",
+        "defense_contribution",
+    ]
+    for col in numeric_cols:
+        if col in display.columns:
+            display[col] = display[col].map(lambda x: "" if pd.isna(x) else f"{float(x):.3f}")
+    return display
+
+
+def behavior_breakdown_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    display = df.copy()
+    for col in [
+        "weighted_goals_for",
+        "weighted_goals_against",
+        "weighted_goal_for_residual_robust",
+        "weighted_goal_against_residual_robust",
+        "attack_contribution",
+        "defense_contribution",
+    ]:
+        if col in display.columns:
+            display[col] = display[col].map(lambda x: "" if pd.isna(x) else f"{float(x):.3f}")
+    return display
+
+
+def final_model_input_audit_display(team_ratings: pd.DataFrame, team_behavior: pd.DataFrame, selected_teams: list[str]) -> pd.DataFrame:
+    audit = audit_final_model_inputs(team_ratings, team_ratings, team_behavior)
+    if audit.empty or "team" not in audit.columns:
+        return audit
+    wanted = {team.lower() for team in selected_teams}
+    audit = audit.loc[audit["team"].astype(str).str.lower().isin(wanted)].copy()
+    for col in [
+        "manual_attack",
+        "behavior_attack_final",
+        "adjusted_attack_used_by_model",
+        "attack_delta",
+        "manual_defense",
+        "behavior_defense_final",
+        "adjusted_defense_used_by_model",
+        "defense_delta",
+        "manual_recent_form",
+        "behavior_recent_form",
+        "adjusted_recent_form_used_by_model",
+        "recent_form_delta",
+    ]:
+        if col in audit.columns:
+            audit[col] = audit[col].map(lambda x: behavior_delta_display(x) if col.endswith("_delta") else behavior_metric_display(x))
+    return audit
 
 
 def historical_match_history_display(matches_df: pd.DataFrame, team: str, reference_date, limit: int = 20) -> pd.DataFrame:
@@ -1605,6 +1716,71 @@ for label in selected_labels:
         else:
             st.dataframe(residual_display, hide_index=True, width="stretch")
             for warning_text in residual_display.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
+                if warning_text:
+                    st.warning(warning_text)
+
+        st.subheader("Behavior Drivers")
+        st.caption(
+            "This section explains whether a team's high score comes from consistent performance, weak opponents, "
+            "friendlies, or a few large wins."
+        )
+        for selected_team in [result["home"], result["away"]]:
+            with st.expander(f"{selected_team} behavior drivers", expanded=False):
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.markdown("**Top attack driver matches**")
+                    attack_drivers = behavior_driver_matches_display(
+                        historical_long_matches,
+                        selected_team,
+                        match.get("date_utc"),
+                        sort_by="attack",
+                        limit=10,
+                    )
+                    if attack_drivers.empty:
+                        st.caption("No attack driver rows are available.")
+                    else:
+                        st.dataframe(attack_drivers, hide_index=True, width="stretch")
+                with d2:
+                    st.markdown("**Top defense driver matches**")
+                    defense_drivers = behavior_driver_matches_display(
+                        historical_long_matches,
+                        selected_team,
+                        match.get("date_utc"),
+                        sort_by="defense",
+                        limit=10,
+                    )
+                    if defense_drivers.empty:
+                        st.caption("No defense driver rows are available.")
+                    else:
+                        st.dataframe(defense_drivers, hide_index=True, width="stretch")
+
+                b1, b2 = st.columns(2)
+                with b1:
+                    st.markdown("**Opponent tier breakdown**")
+                    opponent_breakdown = behavior_breakdown_display(
+                        calculate_opponent_tier_breakdown(historical_long_matches, selected_team, match.get("date_utc"))
+                    )
+                    if opponent_breakdown.empty:
+                        st.caption("No opponent-tier breakdown is available.")
+                    else:
+                        st.dataframe(opponent_breakdown, hide_index=True, width="stretch")
+                with b2:
+                    st.markdown("**Competition breakdown**")
+                    competition_breakdown = behavior_breakdown_display(
+                        calculate_competition_breakdown(historical_long_matches, selected_team, match.get("date_utc"))
+                    )
+                    if competition_breakdown.empty:
+                        st.caption("No competition breakdown is available.")
+                    else:
+                        st.dataframe(competition_breakdown, hide_index=True, width="stretch")
+
+        st.subheader("Final Model Input Impact")
+        input_audit = final_model_input_audit_display(teams, team_behavior, [result["home"], result["away"]])
+        if input_audit.empty:
+            st.caption("No final model input audit rows are available.")
+        else:
+            st.dataframe(input_audit, hide_index=True, width="stretch")
+            for warning_text in input_audit.get("warning", pd.Series(dtype="object")).dropna().astype(str):
                 if warning_text:
                     st.warning(warning_text)
 

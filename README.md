@@ -29,7 +29,7 @@ The dashboard opens in your browser. Select a date window, then select one or mo
 
 For each selected match, open the **Full report** tab for a report-style view with Alpha Read, data support, goal distribution, outcome donut, league context, score timeline, scoreline matrix, expected goals, team ratings, climate factors, model information, and grouped market value tables.
 
-Open the **Historical behavior** tab to inspect the calibrated recent-window behavior layer, including attacking/defensive behavior, schedule strength, expected-performance residuals, goal-market rates, recent-vs-all-time diagnostics, environment response samples, warnings, and the before/after impact on model inputs.
+Open the **Historical behavior** tab to inspect the calibrated recent-window behavior layer, including attacking/defensive behavior, schedule strength, expected-performance residuals, behavior driver matches, opponent/competition breakdowns, goal-market rates, recent-vs-all-time diagnostics, environment response samples, warnings, and the final model input impact.
 
 ## 3. Update Data
 
@@ -117,6 +117,15 @@ Audit Elo calibration and residual-based behavior:
 ```
 
 These audits compare rolling Elo with manual ratings, then show whether recent attack and defense were better or worse than expected given opponent Elo. Reports are saved under `reports/`.
+
+Audit behavior drivers and final model inputs:
+
+```bash
+.venv/bin/python scripts/audit_behavior_drivers.py --teams Norway England Argentina Brazil Uruguay Croatia Morocco "United States" Mexico
+.venv/bin/python scripts/audit_model_inputs.py
+```
+
+The driver audit shows top attack/defense driver matches, opponent-tier mix, competition-type mix, and behavior warnings. The model-input audit shows the actual attack, defense, and recent-form values used by the model after manual-rating blends and delta caps.
 
 ## 4. Optional API Keys
 
@@ -259,7 +268,7 @@ Examples include `USA -> United States`, `Korea Republic -> South Korea`, and `C
 `data/team_behavior.csv` is rebuilt from historical matches:
 
 ```text
-team,reference_date,behavior_window_start,behavior_window_end,matches_available_all_time,matches_used_recent,oldest_match_used,latest_match_used,behavior_config_name,n_matches,weighted_goals_for,weighted_goals_for_raw,weighted_goals_for_adjusted,weighted_goals_against,weighted_goals_against_raw,weighted_goals_against_adjusted,weighted_goal_difference,all_time_goals_for,all_time_goals_against,attack_index,attack_index_raw,attack_index_adjusted_old,attack_index_adjusted,attack_index_residual,attack_index_final,defense_index,defense_index_raw,defense_index_adjusted_old,defense_index_adjusted,defense_index_residual,defense_index_final,weighted_goal_for_residual,weighted_goal_against_residual,weighted_result_residual,residual_coverage_recent,recent_form_index,weighted_btts_rate,weighted_over_2_5_rate,clean_sheet_rate,failed_to_score_rate,environment_response_index,environment_sample_size,attack_data_quality,defense_data_quality,form_data_quality,environment_data_quality,overall_data_quality,behavior_warning,sample_size_warning,staleness_warning,opponent_quality_warning,mean_opponent_elo_recent,median_opponent_elo_recent,min_opponent_elo_recent,max_opponent_elo_recent,opponent_elo_coverage_recent,strong_opponent_match_count,weak_opponent_match_count,schedule_strength_label,schedule_strength_warning,opponent_adjustment_warning,residual_warning,last_updated
+team,reference_date,behavior_window_start,behavior_window_end,matches_available_all_time,matches_used_recent,oldest_match_used,latest_match_used,behavior_config_name,n_matches,weighted_goals_for,weighted_goals_for_raw,weighted_goals_for_adjusted,weighted_goals_against,weighted_goals_against_raw,weighted_goals_against_adjusted,weighted_goal_difference,all_time_goals_for,all_time_goals_against,attack_index,attack_index_raw,attack_index_adjusted_old,attack_index_adjusted,attack_index_residual,attack_index_residual_raw,attack_index_residual_robust,attack_index_final,defense_index,defense_index_raw,defense_index_adjusted_old,defense_index_adjusted,defense_index_residual,defense_index_residual_raw,defense_index_residual_robust,defense_index_final,weighted_goal_for_residual,weighted_goal_for_residual_raw,weighted_goal_for_residual_robust,weighted_goal_against_residual,weighted_goal_against_residual_raw,weighted_goal_against_residual_robust,weighted_result_residual,residual_coverage_recent,mean_blowout_weight_recent,top_3_attack_residual_share,top_3_defense_residual_share,recent_form_index,weighted_btts_rate,weighted_over_2_5_rate,clean_sheet_rate,failed_to_score_rate,environment_response_index,environment_sample_size,attack_data_quality,defense_data_quality,form_data_quality,environment_data_quality,overall_data_quality,behavior_warning,sample_size_warning,staleness_warning,opponent_quality_warning,mean_opponent_elo_recent,median_opponent_elo_recent,min_opponent_elo_recent,max_opponent_elo_recent,opponent_elo_coverage_recent,strong_opponent_match_count,weak_opponent_match_count,schedule_strength_label,schedule_strength_warning,opponent_adjustment_warning,residual_warning,residual_concentration_warning,last_updated
 ```
 
 Rebuild it with the sidebar **Update API data** button, the historical API ingestion command, or the generic CSV importer:
@@ -398,18 +407,26 @@ Expected goals are capped between `0.25` and `3.50`. Result residual is actual r
 
 Simple opponent boosting was useful as a first diagnostic, but it could make almost every strong-schedule team look better on both attack and defense. Residual behavior is more discriminative because it asks whether the team actually beat, matched, or missed the Elo-based expectation.
 
-Final behavior indices use residual calibration conservatively:
+Residual Robustness v1 keeps raw residuals for diagnostics, then uses capped robust residuals for final behavior:
+
+- `cap_residual` clips goal residuals to `[-1.75, +1.75]`.
+- `blowout_weight` leaves normal margins unchanged and down-weights large-margin matches, with a floor of `0.55`.
+- `top_3_attack_residual_share` and `top_3_defense_residual_share` flag whether the residual signal is concentrated in only a few matches.
+- `residual_concentration_warning` is raised when either top-three share is at least `60%`.
+
+Final behavior indices use robust residual calibration conservatively:
 
 ```text
-attack_index_final = 0.70 * attack_index_raw + 0.30 * attack_index_residual
-defense_index_final = 0.70 * defense_index_raw + 0.30 * defense_index_residual
+attack_index_final = 0.70 * attack_index_raw + 0.30 * attack_index_residual_robust
+defense_index_final = 0.70 * defense_index_raw + 0.30 * defense_index_residual_robust
 ```
 
 The dashboard and audits still show the old opponent-adjusted indices as diagnostics:
 
 - `attack_index_raw` and `defense_index_raw`: recent weighted behavior before opponent adjustment.
 - `attack_index_adjusted_old` and `defense_index_adjusted_old`: old direct opponent-quality adjustment.
-- `attack_index_residual` and `defense_index_residual`: performance versus Elo-based expected goals.
+- `attack_index_residual_raw` and `defense_index_residual_raw`: uncapped performance versus Elo-based expected goals.
+- `attack_index_residual_robust` and `defense_index_residual_robust`: capped, blowout-weighted performance versus Elo-based expected goals.
 - `attack_index_final` and `defense_index_final`: primary behavior inputs used for rating blends.
 
 Audit Elo and residual behavior with:
@@ -418,6 +435,14 @@ Audit Elo and residual behavior with:
 .venv/bin/python scripts/audit_elo_calibration.py
 .venv/bin/python scripts/audit_performance_residuals.py
 ```
+
+Behavior Driver Report + Final Model Input Audit v1 adds transparency without changing the core formula:
+
+- top attack and defense driver matches show which recent games contribute most to behavior diagnostics;
+- opponent-tier breakdown separates elite, strong, average, and weak opponents;
+- competition breakdown separates World Cup, qualifiers, continental tournaments, Nations League, friendlies, and other matches;
+- final model input audit compares manual ratings, behavior indices, adjusted model inputs, deltas, cap flags, and warnings;
+- warnings flag high behavior versus low manual priors, capped behavior deltas, friendly-heavy or weak-opponent-heavy behavior, raw attack that is much higher than robust residual attack, and high top-three residual concentration.
 
 All-time behavior remains diagnostic only. Primary attack, defense, form, and goal-market behavior use the recent calibrated window.
 
@@ -443,7 +468,9 @@ opponent_adjustment_strength = 0.25
 goal_contribution_cap = 4.00
 min_opponent_elo_coverage = 0.65
 min_residual_coverage = 0.65
+residual_cap = 1.75
 residual_disagreement_threshold = 0.25
+residual_concentration_warning_threshold = 0.60
 max_behavior_blend = 0.30
 max_form_blend = 0.50
 ```
@@ -538,7 +565,7 @@ Report sections:
 - **Expected goals chart**: adjusted xG with simple uncertainty bands.
 - **Team ratings**: attack and defense inputs with percentile labels.
 - **Climate factors**: altitude, temperature, humidity, precipitation, and wind categories with conservative multipliers.
-- **Historical behavior**: recency-weighted team behavior summary, schedule strength, expected-performance residuals, recent long-format match history, environment response, and manual-vs-behavior model input impact.
+- **Historical behavior**: recency-weighted team behavior summary, schedule strength, expected-performance residuals, behavior driver matches, opponent/competition breakdowns, recent long-format match history, environment response, and manual-vs-behavior model input impact.
 - **Model information**: model version, training data count/range, source status, and backtest placeholder.
 - **Market value tables**: grouped decimal-odds alpha and Polymarket alpha screens.
 
@@ -693,9 +720,11 @@ python -m pytest -q
 .venv/bin/python scripts/audit_schedule_strength.py
 .venv/bin/python scripts/audit_elo_calibration.py
 .venv/bin/python scripts/audit_performance_residuals.py
+.venv/bin/python scripts/audit_behavior_drivers.py --teams Norway England Argentina Brazil Uruguay Croatia Morocco "United States" Mexico
+.venv/bin/python scripts/audit_model_inputs.py
 ```
 
-The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, historical CSV import, rolling Elo, Elo calibration, expected-performance residuals, opponent-quality adjustment, schedule-strength diagnostics, behavior calibration, rating blend caps, audit-script output, and Full report helper outputs.
+The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, historical CSV import, rolling Elo, Elo calibration, expected-performance residuals, opponent-quality adjustment, behavior driver reports, final model input audits, schedule-strength diagnostics, behavior calibration, rating blend caps, audit-script output, and Full report helper outputs.
 
 ## 14. Known Limitations
 

@@ -55,17 +55,28 @@ TEAM_BEHAVIOR_COLUMNS = [
     "attack_index_adjusted_old",
     "attack_index_adjusted",
     "attack_index_residual",
+    "attack_index_residual_raw",
+    "attack_index_residual_robust",
     "attack_index_final",
     "defense_index",
     "defense_index_raw",
     "defense_index_adjusted_old",
     "defense_index_adjusted",
     "defense_index_residual",
+    "defense_index_residual_raw",
+    "defense_index_residual_robust",
     "defense_index_final",
     "weighted_goal_for_residual",
+    "weighted_goal_for_residual_raw",
+    "weighted_goal_for_residual_robust",
     "weighted_goal_against_residual",
+    "weighted_goal_against_residual_raw",
+    "weighted_goal_against_residual_robust",
     "weighted_result_residual",
     "residual_coverage_recent",
+    "mean_blowout_weight_recent",
+    "top_3_attack_residual_share",
+    "top_3_defense_residual_share",
     "recent_form_index",
     "weighted_btts_rate",
     "weighted_over_2_5_rate",
@@ -93,6 +104,7 @@ TEAM_BEHAVIOR_COLUMNS = [
     "schedule_strength_warning",
     "opponent_adjustment_warning",
     "residual_warning",
+    "residual_concentration_warning",
     "last_updated",
 ]
 
@@ -165,9 +177,12 @@ def calculate_attack_behavior(
         ],
         default=0.5,
     )
-    weighted_goal_for_residual = _weighted_mean(view, "goals_for_residual")
-    attack_index_residual = attack_index_from_goal_residual(weighted_goal_for_residual)
-    attack_index_final = final_index_from_raw_and_residual(attack_index_raw, attack_index_residual)
+    weighted_goal_for_residual_raw = _weighted_mean(view, "goals_for_residual")
+    weighted_goal_for_residual_robust = _weighted_robust_residual(view, "goals_for_residual_capped")
+    attack_index_residual_raw = attack_index_from_goal_residual(weighted_goal_for_residual_raw)
+    attack_index_residual_robust = attack_index_from_goal_residual(weighted_goal_for_residual_robust)
+    attack_index_final = final_index_from_raw_and_residual(attack_index_raw, attack_index_residual_robust)
+    top_3_attack_residual_share = _top_residual_share(view, "goals_for_residual_capped")
 
     return {
         "team": team,
@@ -185,9 +200,14 @@ def calculate_attack_behavior(
         "attack_index_raw": round(attack_index_raw, 3),
         "attack_index_adjusted_old": round(attack_index_adjusted, 3),
         "attack_index_adjusted": round(attack_index_adjusted, 3),
-        "attack_index_residual": round(attack_index_residual, 3),
+        "attack_index_residual": round(attack_index_residual_robust, 3),
+        "attack_index_residual_raw": round(attack_index_residual_raw, 3),
+        "attack_index_residual_robust": round(attack_index_residual_robust, 3),
         "attack_index_final": round(attack_index_final, 3),
-        "weighted_goal_for_residual": _round_or_nan(weighted_goal_for_residual),
+        "weighted_goal_for_residual": _round_or_nan(weighted_goal_for_residual_robust),
+        "weighted_goal_for_residual_raw": _round_or_nan(weighted_goal_for_residual_raw),
+        "weighted_goal_for_residual_robust": _round_or_nan(weighted_goal_for_residual_robust),
+        "top_3_attack_residual_share": _round_or_nan(top_3_attack_residual_share),
         "attack_data_quality": _recent_quality(view, reference_date),
     }
 
@@ -242,9 +262,12 @@ def calculate_defense_behavior(
         ],
         default=0.5,
     )
-    weighted_goal_against_residual = _weighted_mean(view, "goals_against_residual")
-    defense_index_residual = defense_index_from_goal_residual(weighted_goal_against_residual)
-    defense_index_final = final_index_from_raw_and_residual(defense_index_raw, defense_index_residual)
+    weighted_goal_against_residual_raw = _weighted_mean(view, "goals_against_residual")
+    weighted_goal_against_residual_robust = _weighted_robust_residual(view, "goals_against_residual_capped")
+    defense_index_residual_raw = defense_index_from_goal_residual(weighted_goal_against_residual_raw)
+    defense_index_residual_robust = defense_index_from_goal_residual(weighted_goal_against_residual_robust)
+    defense_index_final = final_index_from_raw_and_residual(defense_index_raw, defense_index_residual_robust)
+    top_3_defense_residual_share = _top_residual_share(view, "goals_against_residual_capped")
 
     return {
         "team": team,
@@ -262,9 +285,14 @@ def calculate_defense_behavior(
         "defense_index_raw": round(defense_index_raw, 3),
         "defense_index_adjusted_old": round(defense_index_adjusted, 3),
         "defense_index_adjusted": round(defense_index_adjusted, 3),
-        "defense_index_residual": round(defense_index_residual, 3),
+        "defense_index_residual": round(defense_index_residual_robust, 3),
+        "defense_index_residual_raw": round(defense_index_residual_raw, 3),
+        "defense_index_residual_robust": round(defense_index_residual_robust, 3),
         "defense_index_final": round(defense_index_final, 3),
-        "weighted_goal_against_residual": _round_or_nan(weighted_goal_against_residual),
+        "weighted_goal_against_residual": _round_or_nan(weighted_goal_against_residual_robust),
+        "weighted_goal_against_residual_raw": _round_or_nan(weighted_goal_against_residual_raw),
+        "weighted_goal_against_residual_robust": _round_or_nan(weighted_goal_against_residual_robust),
+        "top_3_defense_residual_share": _round_or_nan(top_3_defense_residual_share),
         "defense_data_quality": _recent_quality(view, reference_date),
     }
 
@@ -401,6 +429,8 @@ def build_team_behavior_table(
         opponent_adjustment_warning = _opponent_adjustment_warning(attack, defense)
         residual_coverage = _residual_coverage(recent)
         weighted_result_residual = _weighted_mean(recent, "result_residual") if not recent.empty else np.nan
+        mean_blowout_weight = _weighted_mean(recent, "blowout_weight") if not recent.empty else np.nan
+        residual_concentration_warning = _residual_concentration_warning(attack, defense, config)
         residual_warning = _residual_warning(attack, defense, residual_coverage, config)
         behavior_warning = warning_text(
             sample_warning,
@@ -410,6 +440,7 @@ def build_team_behavior_table(
             schedule["schedule_strength_warning"],
             opponent_adjustment_warning,
             residual_warning,
+            residual_concentration_warning,
         )
 
         rows.append(
@@ -438,17 +469,28 @@ def build_team_behavior_table(
                 "attack_index_adjusted_old": attack["attack_index_adjusted_old"],
                 "attack_index_adjusted": attack["attack_index_adjusted"],
                 "attack_index_residual": attack["attack_index_residual"],
+                "attack_index_residual_raw": attack["attack_index_residual_raw"],
+                "attack_index_residual_robust": attack["attack_index_residual_robust"],
                 "attack_index_final": attack["attack_index_final"],
                 "defense_index": defense["defense_index"],
                 "defense_index_raw": defense["defense_index_raw"],
                 "defense_index_adjusted_old": defense["defense_index_adjusted_old"],
                 "defense_index_adjusted": defense["defense_index_adjusted"],
                 "defense_index_residual": defense["defense_index_residual"],
+                "defense_index_residual_raw": defense["defense_index_residual_raw"],
+                "defense_index_residual_robust": defense["defense_index_residual_robust"],
                 "defense_index_final": defense["defense_index_final"],
                 "weighted_goal_for_residual": attack["weighted_goal_for_residual"],
+                "weighted_goal_for_residual_raw": attack["weighted_goal_for_residual_raw"],
+                "weighted_goal_for_residual_robust": attack["weighted_goal_for_residual_robust"],
                 "weighted_goal_against_residual": defense["weighted_goal_against_residual"],
+                "weighted_goal_against_residual_raw": defense["weighted_goal_against_residual_raw"],
+                "weighted_goal_against_residual_robust": defense["weighted_goal_against_residual_robust"],
                 "weighted_result_residual": _round_or_nan(weighted_result_residual),
                 "residual_coverage_recent": round(residual_coverage, 3),
+                "mean_blowout_weight_recent": _round_or_nan(mean_blowout_weight),
+                "top_3_attack_residual_share": attack["top_3_attack_residual_share"],
+                "top_3_defense_residual_share": defense["top_3_defense_residual_share"],
                 "recent_form_index": form["recent_form_index"],
                 "weighted_btts_rate": goals["weighted_btts_rate"],
                 "weighted_over_2_5_rate": goals["weighted_over_2_5_rate"],
@@ -476,6 +518,7 @@ def build_team_behavior_table(
                 "schedule_strength_warning": schedule["schedule_strength_warning"],
                 "opponent_adjustment_warning": opponent_adjustment_warning,
                 "residual_warning": residual_warning,
+                "residual_concentration_warning": residual_concentration_warning,
                 "last_updated": now,
             }
         )
@@ -522,7 +565,7 @@ def _weighted_team_view(
         lambda elo: calculate_opponent_quality_modifier(elo, strength=config.opponent_adjustment_strength)
     )
     view["defense_quality_modifier"] = (1.0 / view["attack_quality_modifier"]).clip(0.75, 1.25)
-    view = add_performance_residuals(view)
+    view = add_performance_residuals(view, residual_cap=config.residual_cap)
     return view.sort_values("date_utc", ascending=False).reset_index(drop=True)
 
 
@@ -588,17 +631,28 @@ def _normalise_team_behavior(df: pd.DataFrame | None) -> pd.DataFrame:
         "attack_index_adjusted_old",
         "attack_index_adjusted",
         "attack_index_residual",
+        "attack_index_residual_raw",
+        "attack_index_residual_robust",
         "attack_index_final",
         "defense_index",
         "defense_index_raw",
         "defense_index_adjusted_old",
         "defense_index_adjusted",
         "defense_index_residual",
+        "defense_index_residual_raw",
+        "defense_index_residual_robust",
         "defense_index_final",
         "weighted_goal_for_residual",
+        "weighted_goal_for_residual_raw",
+        "weighted_goal_for_residual_robust",
         "weighted_goal_against_residual",
+        "weighted_goal_against_residual_raw",
+        "weighted_goal_against_residual_robust",
         "weighted_result_residual",
         "residual_coverage_recent",
+        "mean_blowout_weight_recent",
+        "top_3_attack_residual_share",
+        "top_3_defense_residual_share",
         "recent_form_index",
         "weighted_btts_rate",
         "weighted_over_2_5_rate",
@@ -643,6 +697,17 @@ def _weighted_mean(view: pd.DataFrame, column: str) -> float:
     return _weighted_series(view, pd.to_numeric(view[column], errors="coerce"))
 
 
+def _weighted_robust_residual(view: pd.DataFrame, capped_residual_column: str) -> float:
+    if capped_residual_column not in view.columns:
+        return float("nan")
+    values = pd.to_numeric(view[capped_residual_column], errors="coerce")
+    blowout_source = view["blowout_weight"] if "blowout_weight" in view.columns else pd.Series(1.0, index=view.index)
+    weight_source = view["match_weight"] if "match_weight" in view.columns else pd.Series(1.0, index=view.index)
+    blowout = pd.to_numeric(blowout_source, errors="coerce").fillna(1.0)
+    weights = pd.to_numeric(weight_source, errors="coerce").fillna(0.0) * blowout
+    return _weighted_series_with_weights(values, weights)
+
+
 def _weighted_rate(view: pd.DataFrame, mask: pd.Series) -> float:
     return _weighted_series(view, mask.astype(float))
 
@@ -650,10 +715,32 @@ def _weighted_rate(view: pd.DataFrame, mask: pd.Series) -> float:
 def _weighted_series(view: pd.DataFrame, values: pd.Series) -> float:
     numeric = pd.to_numeric(values, errors="coerce")
     weights = pd.to_numeric(view["match_weight"], errors="coerce").fillna(0.0)
+    return _weighted_series_with_weights(numeric, weights)
+
+
+def _weighted_series_with_weights(values: pd.Series, weights: pd.Series) -> float:
+    numeric = pd.to_numeric(values, errors="coerce")
+    weights = pd.to_numeric(weights, errors="coerce").fillna(0.0)
     mask = numeric.notna() & weights.notna() & (weights > 0)
     if not mask.any():
         return float("nan")
     return float(np.average(numeric.loc[mask], weights=weights.loc[mask]))
+
+
+def _top_residual_share(view: pd.DataFrame, capped_residual_column: str, top_n: int = 3) -> float:
+    if view is None or view.empty or capped_residual_column not in view.columns:
+        return float("nan")
+    values = pd.to_numeric(view[capped_residual_column], errors="coerce").abs()
+    blowout_source = view["blowout_weight"] if "blowout_weight" in view.columns else pd.Series(1.0, index=view.index)
+    weight_source = view["match_weight"] if "match_weight" in view.columns else pd.Series(1.0, index=view.index)
+    blowout = pd.to_numeric(blowout_source, errors="coerce").fillna(1.0)
+    weights = pd.to_numeric(weight_source, errors="coerce").fillna(0.0) * blowout
+    contributions = (values * weights).dropna()
+    contributions = contributions.loc[contributions > 0]
+    total = float(contributions.sum())
+    if total <= 0:
+        return 0.0
+    return clamp(float(contributions.sort_values(ascending=False).head(int(top_n)).sum()) / total, 0.0, 1.0)
 
 
 def _capped_goal_contribution(goals: pd.Series, modifier: pd.Series, cap: float) -> pd.Series:
@@ -759,6 +846,18 @@ def _residual_warning(attack: dict[str, Any], defense: dict[str, Any], residual_
     return " ".join(warnings)
 
 
+def _residual_concentration_warning(attack: dict[str, Any], defense: dict[str, Any], config: BehaviorConfig) -> str:
+    warnings = []
+    threshold = float(config.residual_concentration_warning_threshold)
+    attack_share = _numeric_or_nan(attack.get("top_3_attack_residual_share"))
+    defense_share = _numeric_or_nan(defense.get("top_3_defense_residual_share"))
+    if not np.isnan(attack_share) and attack_share >= threshold:
+        warnings.append(f"Attack residuals are concentrated in the top 3 matches ({attack_share:.0%}).")
+    if not np.isnan(defense_share) and defense_share >= threshold:
+        warnings.append(f"Defense residuals are concentrated in the top 3 matches ({defense_share:.0%}).")
+    return " ".join(warnings)
+
+
 def _numeric_or_nan(value: Any) -> float:
     try:
         if pd.isna(value):
@@ -816,8 +915,13 @@ def _empty_attack(team: str) -> dict[str, Any]:
         "attack_index_adjusted_old": 0.5,
         "attack_index_adjusted": 0.5,
         "attack_index_residual": 0.5,
+        "attack_index_residual_raw": 0.5,
+        "attack_index_residual_robust": 0.5,
         "attack_index_final": 0.5,
         "weighted_goal_for_residual": np.nan,
+        "weighted_goal_for_residual_raw": np.nan,
+        "weighted_goal_for_residual_robust": np.nan,
+        "top_3_attack_residual_share": np.nan,
         "attack_data_quality": "insufficient",
     }
 
@@ -840,8 +944,13 @@ def _empty_defense(team: str) -> dict[str, Any]:
         "defense_index_adjusted_old": 0.5,
         "defense_index_adjusted": 0.5,
         "defense_index_residual": 0.5,
+        "defense_index_residual_raw": 0.5,
+        "defense_index_residual_robust": 0.5,
         "defense_index_final": 0.5,
         "weighted_goal_against_residual": np.nan,
+        "weighted_goal_against_residual_raw": np.nan,
+        "weighted_goal_against_residual_robust": np.nan,
+        "top_3_defense_residual_share": np.nan,
         "defense_data_quality": "insufficient",
     }
 
