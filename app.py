@@ -23,7 +23,9 @@ from src.config import api_summary
 from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.environment_response import calculate_environment_response
 from src.external_benchmark_calibration import (
+    audit_external_benchmark_coverage,
     build_external_calibration_proposals,
+    external_benchmark_coverage_summary,
     external_benchmark_calibration_summary,
     load_external_calibration_proposals,
 )
@@ -1981,6 +1983,23 @@ for label in selected_labels:
                     hide_index=True,
                     width="stretch",
                 )
+
+            st.write("External Benchmark Coverage")
+            st.caption(
+                "External benchmarks are independent strength references such as FIFA ranking points or Elo. "
+                "More complete benchmark coverage makes the primary model less dependent on generated placeholders."
+            )
+            benchmark_coverage = audit_external_benchmark_coverage(rating_required, external_priors, manual_rating_rows)
+            benchmark_summary = external_benchmark_coverage_summary(benchmark_coverage)
+            st.dataframe(pd.DataFrame([benchmark_summary]), hide_index=True, width="stretch")
+            if not benchmark_coverage.empty:
+                missing_benchmarks = benchmark_coverage.loc[~benchmark_coverage["has_external_benchmark"].astype(bool)]
+                high_priority_missing = missing_benchmarks.loc[missing_benchmarks["priority"].astype(str) == "high"]
+                if not high_priority_missing.empty:
+                    st.write("High-priority teams missing external benchmarks")
+                    st.dataframe(high_priority_missing, hide_index=True, width="stretch")
+                else:
+                    st.caption("No high-priority required teams are missing external benchmarks.")
 
             st.write("External Benchmark Calibration")
             st.caption(

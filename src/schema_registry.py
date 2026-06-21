@@ -75,6 +75,15 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "last_updated",
         "notes",
     ],
+    "data/raw/external_team_strength_missing_template.csv": [
+        "team",
+        "fifa_rank",
+        "fifa_points",
+        "external_elo",
+        "source",
+        "last_updated",
+        "notes",
+    ],
     "data/historical_matches.csv": [
         "match_id",
         "date_utc",

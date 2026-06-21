@@ -39,6 +39,18 @@ CALIBRATED_PROPOSAL_COLUMNS = [
     "notes",
 ]
 
+EXTERNAL_BENCHMARK_COVERAGE_COLUMNS = [
+    "team",
+    "in_team_ratings",
+    "data_quality",
+    "has_external_benchmark",
+    "reference_overall_strength",
+    "source",
+    "last_updated",
+    "priority",
+    "recommended_action",
+]
+
 DEFAULT_PROPOSAL_PATH = DATA_DIR / "team_ratings_external_calibrated_proposed.csv"
 CALIBRATED_DATA_QUALITY = "external_benchmark_calibrated"
 CALIBRATION_NOTE = "External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting."
@@ -231,6 +243,109 @@ def build_external_calibration_proposals(
     return pd.DataFrame(rows, columns=CALIBRATED_PROPOSAL_COLUMNS)
 
 
+def audit_external_benchmark_coverage(
+    required_teams_df: pd.DataFrame | None,
+    external_priors_df: pd.DataFrame | None,
+    team_ratings_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Audit external benchmark coverage for teams required by fixtures/backtests."""
+    required = required_teams_df.copy() if required_teams_df is not None else pd.DataFrame()
+    priors = external_priors_df.copy() if external_priors_df is not None else pd.DataFrame(columns=EXTERNAL_PRIOR_COLUMNS)
+    ratings = _normalise_rating_frame(team_ratings_df)
+    for col in EXTERNAL_PRIOR_COLUMNS:
+        if col not in priors.columns:
+            priors[col] = pd.NA
+    if required.empty:
+        return pd.DataFrame(columns=EXTERNAL_BENCHMARK_COVERAGE_COLUMNS)
+
+    model_required = _required_team_rows(required)
+    rows: list[dict[str, Any]] = []
+    for _, team_row in model_required.iterrows():
+        team = normalize_team_name(_text_value(team_row.get("canonical_team", "")) or _text_value(team_row.get("team", "")))
+        if not team:
+            continue
+        rating = rating_row_for_team(ratings, team)
+        prior = rating_row_for_team(priors, team)
+        in_ratings = not rating.empty
+        data_quality = _text_value(rating.get("data_quality", "")) if in_ratings else ""
+        reference_overall = coerce_float(prior.get("reference_overall_strength"), float("nan")) if not prior.empty else float("nan")
+        has_benchmark = not pd.isna(reference_overall)
+        priority = _benchmark_priority(team_row, has_benchmark)
+        rows.append(
+            {
+                "team": team,
+                "in_team_ratings": bool(in_ratings),
+                "data_quality": data_quality,
+                "has_external_benchmark": bool(has_benchmark),
+                "reference_overall_strength": _round_or_na(reference_overall),
+                "source": _text_value(prior.get("source", "")) if not prior.empty else "",
+                "last_updated": _text_value(prior.get("last_updated", "")) if not prior.empty else "",
+                "priority": priority,
+                "recommended_action": _benchmark_recommended_action(in_ratings, has_benchmark, priority),
+            }
+        )
+    out = pd.DataFrame(rows, columns=EXTERNAL_BENCHMARK_COVERAGE_COLUMNS)
+    if out.empty:
+        return out
+    order = {"high": 0, "medium": 1, "low": 2}
+    out["_priority_order"] = out["priority"].map(lambda value: order.get(str(value), 99))
+    return out.drop_duplicates(subset=["team"], keep="first").sort_values(["_priority_order", "team"]).drop(columns=["_priority_order"]).reset_index(drop=True)
+
+
+def external_benchmark_coverage_summary(coverage_df: pd.DataFrame | None) -> dict[str, Any]:
+    coverage = coverage_df.copy() if coverage_df is not None else pd.DataFrame(columns=EXTERNAL_BENCHMARK_COVERAGE_COLUMNS)
+    if coverage.empty:
+        return {
+            "required_teams": 0,
+            "teams_with_external_benchmark": 0,
+            "teams_missing_external_benchmark": 0,
+            "high_priority_missing_teams": 0,
+            "last_external_benchmark_update": "",
+        }
+    has_benchmark = coverage["has_external_benchmark"].astype(bool)
+    missing = coverage.loc[~has_benchmark].copy()
+    high_missing = missing.loc[missing["priority"].astype(str) == "high"].copy()
+    latest = ""
+    if "last_updated" in coverage.columns:
+        dates = pd.to_datetime(coverage.loc[has_benchmark, "last_updated"], errors="coerce")
+        if dates.notna().any():
+            latest = dates.max().date().isoformat()
+    return {
+        "required_teams": int(len(coverage)),
+        "teams_with_external_benchmark": int(has_benchmark.sum()),
+        "teams_missing_external_benchmark": int((~has_benchmark).sum()),
+        "high_priority_missing_teams": int(len(high_missing)),
+        "last_external_benchmark_update": latest,
+    }
+
+
+def build_external_strength_template(
+    coverage_df: pd.DataFrame | None,
+    all_required_teams: bool = False,
+) -> pd.DataFrame:
+    coverage = coverage_df.copy() if coverage_df is not None else pd.DataFrame(columns=EXTERNAL_BENCHMARK_COVERAGE_COLUMNS)
+    columns = ["team", "fifa_rank", "fifa_points", "external_elo", "source", "last_updated", "notes"]
+    if coverage.empty:
+        return pd.DataFrame(columns=columns)
+    selected = coverage.copy() if all_required_teams else coverage.loc[~coverage["has_external_benchmark"].astype(bool)].copy()
+    order = {"high": 0, "medium": 1, "low": 2}
+    selected["_priority_order"] = selected["priority"].map(lambda value: order.get(str(value), 99))
+    selected = selected.sort_values(["_priority_order", "team"], ascending=[True, True])
+    rows = [
+        {
+            "team": row.get("team", ""),
+            "fifa_rank": pd.NA,
+            "fifa_points": pd.NA,
+            "external_elo": pd.NA,
+            "source": "",
+            "last_updated": "",
+            "notes": "",
+        }
+        for _, row in selected.iterrows()
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
 def load_external_calibration_proposals(path: str | Path = DEFAULT_PROPOSAL_PATH) -> pd.DataFrame:
     return read_csv_with_columns(_resolve_path(path), CALIBRATED_PROPOSAL_COLUMNS)
 
@@ -297,6 +412,52 @@ def external_benchmark_calibration_summary(
 
 def load_current_external_priors() -> pd.DataFrame:
     return load_external_priors()
+
+
+def _required_team_rows(required: pd.DataFrame) -> pd.DataFrame:
+    out = required.copy()
+    if "required_for_model" in out.columns:
+        out = out.loc[out["required_for_model"].astype(bool)].copy()
+    if out.empty:
+        return out
+    if "canonical_team" not in out.columns:
+        out["canonical_team"] = out["team"].map(normalize_team_name) if "team" in out.columns else ""
+    return out
+
+
+def _benchmark_priority(team_row: pd.Series, has_benchmark: bool) -> str:
+    if has_benchmark:
+        return "low"
+    in_fixture = _truthy(team_row.get("source_fixtures", False))
+    in_backtest = _truthy(team_row.get("source_backtest", False))
+    if in_fixture or in_backtest:
+        return "high"
+    if _truthy(team_row.get("required_for_model", False)):
+        return "medium"
+    return "low"
+
+
+def _benchmark_recommended_action(in_ratings: bool, has_benchmark: bool, priority: str) -> str:
+    if not in_ratings:
+        return "add team rating row before external calibration"
+    if has_benchmark:
+        return "none"
+    if priority == "high":
+        return "fill FIFA rank/points or public Elo snapshot"
+    if priority == "medium":
+        return "fill benchmark when available"
+    return "optional"
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _proposal_row(

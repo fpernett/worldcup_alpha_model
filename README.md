@@ -1159,6 +1159,44 @@ team,fifa_rank,fifa_points,external_elo,source,last_updated,notes
 
 The import script also works when only `fifa_rank` and `fifa_points` are populated. Optional direct columns `reference_attack`, `reference_defense`, and `reference_recent_form` are preserved if supplied, but the app does not infer those from overall strength.
 
+Audit external benchmark coverage for teams required by fixtures and the current completed-match backtest window:
+
+```bash
+.venv/bin/python scripts/audit_external_benchmark_coverage.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
+```
+
+Build a clean manual-entry template for missing benchmark snapshots:
+
+```bash
+.venv/bin/python scripts/build_external_team_strength_template.py
+```
+
+This writes:
+
+```text
+data/raw/external_team_strength_missing_template.csv
+```
+
+Template columns:
+
+```text
+team,fifa_rank,fifa_points,external_elo,source,last_updated,notes
+```
+
+By default, the template includes only required teams missing `reference_overall_strength`. Use `--all-required-teams` to output every required team. Fill FIFA rank and FIFA points manually from an official/public snapshot, and optionally add public Elo. Do not invent values for teams without a source.
+
+Import the filled missing-team template:
+
+```bash
+.venv/bin/python scripts/import_external_priors.py \
+  --input data/raw/external_team_strength_missing_template.csv \
+  --output data/team_rating_external_priors.csv \
+  --write
+```
+
 Import benchmark inputs into the external prior table:
 
 ```bash
@@ -1242,7 +1280,8 @@ Then rerun rating coverage, backtest QA, and the backtest:
 ```bash
 .venv/bin/python scripts/audit_rating_coverage.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup"
 .venv/bin/python scripts/audit_backtest_quality.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup"
-.venv/bin/python scripts/run_backtest.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup" --save-report
+.venv/bin/python scripts/run_asof_backtest.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup" --save-report
+.venv/bin/python scripts/run_blend_sensitivity.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup" --save-report
 ```
 
 Calibration warnings flag missing benchmarks, large internal-vs-external disagreements, behavior scores that sit far above external benchmarks, preserved reviewed rows, and delta caps. These warnings are audit signals; they do not trigger staking, trade execution, or automatic strategy changes.
