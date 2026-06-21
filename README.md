@@ -1169,6 +1169,31 @@ optional date/source columns: date, last_updated, source
 
 Team names are matched through `data/team_name_aliases.csv`, including common FIFA variants such as `USA -> United States`, `Korea Republic -> South Korea`, `IR Iran -> Iran`, `Türkiye -> Turkey`, `Congo DR -> DR Congo`, `Czech Republic -> Czechia`, and `Bosnia-Herzegovina -> Bosnia and Herzegovina`.
 
+Validate the snapshot before importing it:
+
+```bash
+.venv/bin/python scripts/validate_fifa_snapshot.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
+```
+
+The validator checks required World Cup teams, aliases, rank values, points values, ambiguous matches, and unused snapshot rows. It saves:
+
+```text
+reports/fifa_snapshot_validation_YYYY-MM-DD.csv
+reports/fifa_snapshot_validation_YYYY-MM-DD.md
+```
+
+If the snapshot is not ready, create a fill-in template for missing or incomplete teams:
+
+```bash
+.venv/bin/python scripts/validate_fifa_snapshot.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --missing-output data/raw/fifa_snapshot_missing_teams.csv
+```
+
 Create an external-strength file from the FIFA snapshot without modifying priors:
 
 ```bash
@@ -1196,6 +1221,11 @@ To fill blank cells in the missing-team template:
 Full external benchmark workflow:
 
 ```bash
+.venv/bin/python scripts/validate_fifa_snapshot.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
 .venv/bin/python scripts/import_fifa_rankings.py \
   --input data/raw/fifa_rankings_snapshot.csv \
   --output data/raw/external_team_strength_from_fifa.csv
@@ -1204,7 +1234,6 @@ Full external benchmark workflow:
   --output data/team_rating_external_priors.csv \
   --write
 .venv/bin/python scripts/calibrate_ratings_from_external.py --write
-.venv/bin/python scripts/audit_external_benchmark_coverage.py
 .venv/bin/python scripts/run_asof_backtest.py \
   --start-date 2026-06-11 \
   --end-date 2026-06-21 \

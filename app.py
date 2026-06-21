@@ -38,6 +38,7 @@ from src.external_priors import (
 )
 from src.feature_engineering import load_recent_matches
 from src.fifa_ranking_import import fifa_ranking_import_dashboard_status
+from src.fifa_snapshot_validation import fifa_snapshot_validation_dashboard_status
 from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
 from src.market_tables import group_market_alpha
@@ -1984,6 +1985,14 @@ for label in selected_labels:
                     hide_index=True,
                     width="stretch",
                 )
+
+            st.write("FIFA Snapshot Validation")
+            st.caption(
+                "This loads the latest saved validation report for the local FIFA ranking snapshot. "
+                "Run the validation script before importing snapshot data into external priors."
+            )
+            fifa_validation_status = fifa_snapshot_validation_dashboard_status()
+            st.dataframe(pd.DataFrame([fifa_validation_status]), hide_index=True, width="stretch")
 
             st.write("FIFA Ranking Import")
             st.caption(
