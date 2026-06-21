@@ -714,6 +714,95 @@ Inspect the per-match comparison to see where behavior adjustment increased or r
 
 Important v1 limitation: this backtest uses the current `data/team_behavior.csv`. It may have look-ahead bias because behavior metrics are not rebuilt as of each historical match date. Backtesting v2 should rebuild Elo and behavior snapshots as of each match date before scoring that match.
 
+### Strict As-Of-Date Backtesting
+
+Strict As-Of-Date Backtesting v2 scores completed matches using only information available before each match date. For every historical prediction date, it:
+
+- filters `data/historical_matches.csv` to rows where `date_utc < match date`;
+- excludes the completed match itself from behavior inputs;
+- rebuilds rolling Elo from the pre-match slice;
+- rebuilds recent team behavior from the pre-match slice;
+- runs `baseline_manual` and `behavior_adjusted_asof` with those as-of inputs.
+
+Run:
+
+```bash
+.venv/bin/python scripts/run_asof_backtest.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
+
+The script writes:
+
+```text
+reports/asof_backtest_predictions_YYYY-MM-DD.csv
+reports/asof_backtest_report_YYYY-MM-DD.md
+```
+
+The strict report includes the same Brier score, log loss, accuracy, mean actual-result probability, goal-market Brier, and total-goals MAE metrics as v1. It also adds:
+
+- `lookahead_safe_rate`: share of prediction rows that used no future behavior data;
+- `mean_home_behavior_matches_used` and `mean_away_behavior_matches_used`;
+- `matches_with_insufficient_asof_behavior`;
+- per-match latest behavior match used for home and away teams.
+
+Why this matters: v1 can look better because current behavior data may include matches that happened after the historical prediction date. V2 is more trustworthy because it prevents that look-ahead bias. V2 metrics may be worse than v1 if a team had little pre-match history available, but those lower-confidence rows are explicitly labeled.
+
+The dashboard **Backtesting** tab shows a **Strict As-Of-Date Backtest** section under the existing behavior-adjusted backtest. If any row has `lookahead_safe = False`, inspect the diagnostics before trusting the metrics.
+
+### Behavior Blend Sensitivity
+
+Behavior Blend Sensitivity v1 tests whether the historical behavior layer should influence model inputs at all, and if so, how strongly. It keeps the core match model formula unchanged and reruns strict as-of-date backtests across behavior blend multipliers.
+
+Default multipliers:
+
+```text
+0.00, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 1.00
+```
+
+Interpretation:
+
+- `0.00`: no behavior adjustment; this should match strict `baseline_manual` or be very close.
+- `1.00`: current default behavior blend.
+- values below `1.00`: weakened behavior influence.
+
+Run:
+
+```bash
+.venv/bin/python scripts/run_blend_sensitivity.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
+
+The script writes:
+
+```text
+reports/blend_sensitivity_predictions_YYYY-MM-DD.csv
+reports/blend_sensitivity_metrics_YYYY-MM-DD.csv
+reports/blend_sensitivity_team_YYYY-MM-DD.csv
+reports/blend_sensitivity_report_YYYY-MM-DD.md
+```
+
+How to read the output:
+
+- `delta_brier_vs_baseline < 0`: that blend improved 1X2 Brier score versus `0.00`.
+- `delta_log_loss_vs_baseline < 0`: that blend improved log loss versus `0.00`.
+- `delta_actual_prob_vs_baseline > 0`: that blend assigned more probability to the actual result.
+- Team-level helped/hurt counts show whether current/default behavior tends to help or hurt specific teams in the sample.
+
+Decision rule:
+
+- If no blend improves both Brier and log loss, keep behavior diagnostic-only.
+- If a weak blend from `0.05` to `0.15` improves both, consider a reduced behavior blend.
+- If `1.00` improves both, keep the current default.
+- Otherwise, investigate before changing defaults.
+
+This sensitivity step should be run before changing model defaults. It is evaluation-only and does not provide staking, sizing, trade execution, or betting advice.
+
 ### Backtest QA And Rating Coverage
 
 Before interpreting behavior-adjusted backtest metrics, run the rating coverage audit:

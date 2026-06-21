@@ -197,6 +197,16 @@ def run_backtest(
     strict_as_of_date: bool = False,
 ) -> dict[str, pd.DataFrame | str]:
     """Run baseline-manual and behavior-adjusted model modes on completed matches."""
+    if strict_as_of_date:
+        from src.asof_backtest import run_asof_backtest_result
+
+        return run_asof_backtest_result(
+            start_date=start_date,
+            end_date=end_date,
+            teams=teams,
+            competition=competition,
+        )
+
     matches = load_completed_matches_for_backtest(start_date=start_date, end_date=end_date, teams=teams)
     if competition and not matches.empty and "competition" in matches.columns:
         needle = str(competition).strip().lower()

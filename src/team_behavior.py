@@ -392,10 +392,11 @@ def build_team_behavior_table(
     teams_df: pd.DataFrame | None,
     reference_date: Any,
     config: BehaviorConfig = DEFAULT_BEHAVIOR_CONFIG,
+    teams: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> pd.DataFrame:
     matches = _normalise_historical_for_behavior(matches_df)
-    teams = _team_list(matches, teams_df)
-    if not teams:
+    team_names = _team_list(matches, teams_df, teams)
+    if not team_names:
         return pd.DataFrame(columns=TEAM_BEHAVIOR_COLUMNS)
 
     opponent_quality_map = build_opponent_quality_map(matches, teams_df)
@@ -404,7 +405,7 @@ def build_team_behavior_table(
     reference_label = pd.Timestamp(reference_date).date().isoformat()
     window_start = (pd.Timestamp(reference_date).normalize() - pd.DateOffset(years=config.lookback_years)).date().isoformat()
 
-    for team in teams:
+    for team in team_names:
         all_time = _team_all_time_view(matches, team)
         recent = _weighted_team_view(matches, team, reference_date, config, opponent_quality_map)
         attack = calculate_attack_behavior(matches, team, reference_date, config, opponent_quality_map)
@@ -682,7 +683,13 @@ def _team_all_time_view(matches: pd.DataFrame, team: str) -> pd.DataFrame:
     return matches.loc[matches["team"].astype(str).str.lower() == str(team).lower()].copy()
 
 
-def _team_list(matches: pd.DataFrame, teams_df: pd.DataFrame | None) -> list[str]:
+def _team_list(
+    matches: pd.DataFrame,
+    teams_df: pd.DataFrame | None,
+    selected_teams: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[str]:
+    if selected_teams:
+        return sorted({str(team).strip() for team in selected_teams if str(team).strip()})
     teams: list[str] = []
     if teams_df is not None and not teams_df.empty and "team" in teams_df.columns:
         teams.extend(teams_df["team"].dropna().astype(str).str.strip().tolist())

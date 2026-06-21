@@ -256,7 +256,12 @@ def _apply_recent_match_features(ratings: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _apply_behavior_blend(ratings: pd.DataFrame, manual_base: pd.DataFrame | None = None) -> pd.DataFrame:
+def _apply_behavior_blend(
+    ratings: pd.DataFrame,
+    manual_base: pd.DataFrame | None = None,
+    behavior_df: pd.DataFrame | None = None,
+    behavior_blend_multiplier: float = 1.0,
+) -> pd.DataFrame:
     """Blend optional historical behavior metrics into transparent rating inputs.
 
     Manual/API rating rows stay as the base. Behavior rows are only allowed to
@@ -267,7 +272,7 @@ def _apply_behavior_blend(ratings: pd.DataFrame, manual_base: pd.DataFrame | Non
         return out
 
     base = manual_base.copy() if manual_base is not None else ratings.copy()
-    behavior = load_team_behavior()
+    behavior = load_team_behavior() if behavior_df is None else behavior_df.copy()
     out = _append_fixture_behavior_neutral_rows(out, behavior)
     base = _append_fixture_behavior_neutral_rows(base, behavior)
     for col in [
@@ -347,14 +352,15 @@ def _apply_behavior_blend(ratings: pd.DataFrame, manual_base: pd.DataFrame | Non
         manual_defense = coerce_float(out.at[idx, "manual_defense"], coerce_float(row["defense"], 0.55))
         manual_form = coerce_float(out.at[idx, "manual_recent_form"], coerce_float(row["recent_form"], 0.55))
 
-        blend_weights = _behavior_blend_weights(behavior_row)
-        if blend_weights is None:
+        blend_weights = _behavior_blend_weights(behavior_row, behavior_blend_multiplier)
+        if blend_weights is None or max(blend_weights.values()) <= 0:
             out.at[idx, "attack"] = round(clamp(manual_attack, 0.0, 1.0), 3)
             out.at[idx, "defense"] = round(clamp(manual_defense, 0.0, 1.0), 3)
             out.at[idx, "recent_form"] = round(clamp(manual_form, 0.0, 1.0), 3)
-            out.at[idx, "attack_source"] = "manual_base_insufficient_behavior"
-            out.at[idx, "defense_source"] = "manual_base_insufficient_behavior"
-            out.at[idx, "recent_form_source"] = "manual_base_insufficient_behavior"
+            source_label = "manual_base_behavior_multiplier_0" if blend_weights is not None else "manual_base_insufficient_behavior"
+            out.at[idx, "attack_source"] = source_label
+            out.at[idx, "defense_source"] = source_label
+            out.at[idx, "recent_form_source"] = source_label
             continue
 
         attack, attack_delta, attack_cap_hit = _capped_behavior_value(
@@ -506,7 +512,7 @@ def _rating_source_label(row: pd.Series) -> str:
     return quality or "rating_input"
 
 
-def _behavior_blend_weights(row: pd.Series) -> dict[str, float] | None:
+def _behavior_blend_weights(row: pd.Series, behavior_blend_multiplier: float = 1.0) -> dict[str, float] | None:
     quality = str(row.get("overall_data_quality", "")).lower()
     if quality not in {"high", "moderate", "low"}:
         return None
@@ -554,7 +560,18 @@ def _behavior_blend_weights(row: pd.Series) -> dict[str, float] | None:
     ).strip()
     if residual_warning:
         weights = {key: value * 0.50 for key, value in weights.items()}
-    return weights
+    return apply_behavior_blend_multiplier(weights, behavior_blend_multiplier)
+
+
+def apply_behavior_blend_multiplier(config_or_weights, multiplier: float):
+    """Scale behavior blend weights for sensitivity runs without mutating defaults."""
+    value = coerce_float(multiplier, 1.0)
+    if pd.isna(value):
+        value = 1.0
+    value = max(0.0, float(value))
+    if isinstance(config_or_weights, dict):
+        return {key: max(0.0, float(weight) * value) for key, weight in config_or_weights.items()}
+    return config_or_weights
 
 
 def _capped_behavior_value(manual_value: float, behavior_value: float, blend_weight: float, delta_cap: float) -> tuple[float, float, bool]:

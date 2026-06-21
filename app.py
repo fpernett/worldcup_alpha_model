@@ -8,8 +8,10 @@ import plotly.express as px
 import streamlit as st
 
 from src.alpha import calculate_polymarket_alpha
+from src.asof_backtest import run_asof_backtest_result
 from src.backtest import run_backtest
 from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log, save_prediction_snapshot
+from src.blend_sensitivity import run_blend_sensitivity_result
 from src.behavior_driver_report import (
     audit_final_model_inputs,
     calculate_competition_breakdown,
@@ -941,6 +943,34 @@ def load_behavior_backtest_results(
     )
 
 
+@st.cache_data(ttl=600)
+def load_asof_backtest_results(
+    start_date_iso: str,
+    end_date_iso: str,
+    competition: str,
+    refresh_counter: int,
+):
+    return run_asof_backtest_result(
+        start_date=start_date_iso,
+        end_date=end_date_iso,
+        competition=competition or None,
+    )
+
+
+@st.cache_data(ttl=600)
+def load_blend_sensitivity_results(
+    start_date_iso: str,
+    end_date_iso: str,
+    competition: str,
+    refresh_counter: int,
+):
+    return run_blend_sensitivity_result(
+        start_date=start_date_iso,
+        end_date=end_date_iso,
+        competition=competition or None,
+    )
+
+
 def merge_polymarket_inputs(primary: pd.DataFrame, secondary: pd.DataFrame) -> pd.DataFrame:
     frames = [df for df in [primary, secondary] if df is not None and not df.empty]
     if not frames:
@@ -1838,6 +1868,99 @@ for label in selected_labels:
                     hide_index=True,
                     width="stretch",
                 )
+
+            st.write("Strict As-Of-Date Backtest")
+            st.caption(
+                "This is stricter than the first backtest. For each historical match, the model only uses games that happened before that match. "
+                "This avoids look-ahead bias."
+            )
+            asof_result = load_asof_backtest_results(
+                bt_start.isoformat(),
+                bt_end.isoformat(),
+                bt_competition,
+                st.session_state["refresh_counter"],
+            )
+            asof_metrics = asof_result.get("metrics", pd.DataFrame())
+            asof_predictions = asof_result.get("predictions", pd.DataFrame())
+            asof_comparison = asof_result.get("comparison", pd.DataFrame())
+            asof_warning = str(asof_result.get("warning", ""))
+            if asof_warning:
+                st.warning(asof_warning)
+            if isinstance(asof_predictions, pd.DataFrame) and not asof_predictions.empty:
+                lookahead_violations = int((~asof_predictions["lookahead_safe"].astype(bool)).sum()) if "lookahead_safe" in asof_predictions.columns else 0
+                if lookahead_violations:
+                    st.error(f"{lookahead_violations} strict backtest prediction rows used future data. Inspect diagnostics before trusting metrics.")
+            if isinstance(asof_metrics, pd.DataFrame) and not asof_metrics.empty:
+                st.write("Strict v2 summary metrics")
+                st.dataframe(asof_metrics, hide_index=True, width="stretch")
+            if isinstance(asof_comparison, pd.DataFrame) and not asof_comparison.empty:
+                st.write("Strict v2 per-match comparison")
+                asof_comp_cols = [
+                    "date_utc",
+                    "home",
+                    "away",
+                    "score",
+                    "actual_result",
+                    "baseline_actual_prob",
+                    "behavior_asof_actual_prob",
+                    "actual_prob_delta",
+                    "improved_by_behavior_asof",
+                    "notes",
+                ]
+                st.dataframe(
+                    asof_comparison[[col for col in asof_comp_cols if col in asof_comparison.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
+            if isinstance(asof_predictions, pd.DataFrame) and not asof_predictions.empty:
+                st.write("Strict v2 behavior windows")
+                asof_diag_cols = [
+                    "date_utc",
+                    "home",
+                    "away",
+                    "mode",
+                    "home_latest_behavior_match",
+                    "away_latest_behavior_match",
+                    "home_matches_used_recent",
+                    "away_matches_used_recent",
+                    "lookahead_safe",
+                    "warning",
+                ]
+                st.dataframe(
+                    asof_predictions[[col for col in asof_diag_cols if col in asof_predictions.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
+
+            st.write("Behavior Blend Sensitivity")
+            st.caption(
+                "This tests how much recent behavior should influence the model. If 0% behavior is best, behavior should stay diagnostic. "
+                "If a small behavior blend is best, the model should use behavior more cautiously."
+            )
+            run_blend_sensitivity = st.checkbox("Run strict behavior blend sensitivity", value=False, key=f"blend_sensitivity_{bt_key}")
+            if run_blend_sensitivity:
+                blend_result = load_blend_sensitivity_results(
+                    bt_start.isoformat(),
+                    bt_end.isoformat(),
+                    bt_competition,
+                    st.session_state["refresh_counter"],
+                )
+                blend_metrics = blend_result.get("metrics", pd.DataFrame())
+                blend_team = blend_result.get("team_sensitivity", pd.DataFrame())
+                blend_recommendation = str(blend_result.get("recommendation", ""))
+                if blend_recommendation:
+                    st.info(blend_recommendation)
+                if isinstance(blend_metrics, pd.DataFrame) and not blend_metrics.empty:
+                    st.write("Metrics by blend multiplier")
+                    st.dataframe(blend_metrics, hide_index=True, width="stretch")
+                    best_brier = blend_metrics.sort_values("brier_score_1x2").iloc[0]
+                    best_log = blend_metrics.sort_values("log_loss_1x2").iloc[0]
+                    c_brier, c_log = st.columns(2)
+                    c_brier.metric("Best blend by Brier", f"{float(best_brier['blend_multiplier']):.2f}")
+                    c_log.metric("Best blend by log loss", f"{float(best_log['blend_multiplier']):.2f}")
+                if isinstance(blend_team, pd.DataFrame) and not blend_team.empty:
+                    st.write("Team-level helped/hurt")
+                    st.dataframe(blend_team, hide_index=True, width="stretch")
 
     with tabs[7]:
         st.subheader("Team Inputs")

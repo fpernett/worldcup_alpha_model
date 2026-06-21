@@ -45,6 +45,14 @@ ELO_OUTPUT_COLUMNS = [
     "source",
 ]
 
+ELO_ASOF_COLUMNS = [
+    "team",
+    "elo_asof",
+    "matches_used_for_elo",
+    "latest_match_used_for_elo",
+    "as_of_date",
+]
+
 
 def calculate_rolling_elo(matches_df: pd.DataFrame | None, config: EloConfig | None = None) -> pd.DataFrame:
     """Calculate chronological pre/post Elo for long-format team-match rows."""
@@ -142,6 +150,48 @@ def add_elo_to_historical_matches(historical_matches_df: pd.DataFrame | None, co
         out.loc[matched, "last_updated"] = out.loc[matched, "last_updated"].fillna(utc_now_iso())
     out = out.drop(columns=["_elo_key"])
     return out[HISTORICAL_MATCH_COLUMNS].copy()
+
+
+def build_elo_asof(
+    historical_matches_df: pd.DataFrame | None,
+    as_of_date: Any,
+    config: EloConfig | None = None,
+) -> pd.DataFrame:
+    """Return each team's rolling Elo state using only matches before as_of_date."""
+    cfg = config or DEFAULT_ELO_CONFIG
+    if historical_matches_df is None or historical_matches_df.empty:
+        return pd.DataFrame(columns=ELO_ASOF_COLUMNS)
+
+    asof_ts = pd.Timestamp(as_of_date)
+    df = historical_matches_df.copy()
+    if "date_utc" not in df.columns:
+        return pd.DataFrame(columns=ELO_ASOF_COLUMNS)
+    df["date_utc"] = pd.to_datetime(df["date_utc"], errors="coerce")
+    df = df.loc[df["date_utc"] < asof_ts].copy()
+    if df.empty:
+        return pd.DataFrame(columns=ELO_ASOF_COLUMNS)
+
+    elo_rows = calculate_rolling_elo(df, cfg)
+    if elo_rows.empty:
+        return pd.DataFrame(columns=ELO_ASOF_COLUMNS)
+    elo_rows["date_utc"] = pd.to_datetime(elo_rows["date_utc"], errors="coerce")
+    elo_rows = elo_rows.dropna(subset=["date_utc", "team"]).sort_values(["team", "date_utc", "match_id"])
+
+    rows: list[dict[str, Any]] = []
+    for team, group in elo_rows.groupby("team", dropna=False):
+        if group.empty:
+            continue
+        latest = group.iloc[-1]
+        rows.append(
+            {
+                "team": str(team),
+                "elo_asof": round(coerce_float(latest.get("team_elo_post"), cfg.default_elo), 3),
+                "matches_used_for_elo": int(len(group)),
+                "latest_match_used_for_elo": latest["date_utc"].date().isoformat(),
+                "as_of_date": asof_ts.date().isoformat(),
+            }
+        )
+    return pd.DataFrame(rows, columns=ELO_ASOF_COLUMNS).sort_values("team").reset_index(drop=True)
 
 
 def expected_result(home_elo: float, away_elo: float, is_neutral: bool = False, config: EloConfig | None = None) -> float:
