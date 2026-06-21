@@ -1141,6 +1141,93 @@ After importing external priors, rerun:
   --output data/manual_rating_review_sheet.csv
 ```
 
+### FIFA Ranking Import
+
+FIFA Ranking Import v1 reduces manual entry by matching a local FIFA ranking snapshot to the teams required by fixtures and the completed-match backtest window. It does not scrape websites, does not require a login-protected source, and does not invent ranks or points. If official automated downloads are unavailable or brittle, save a public snapshot locally and record its source/date in the CSV.
+
+Prepare a local snapshot:
+
+```text
+data/raw/fifa_rankings_snapshot.csv
+```
+
+Preferred normalized format:
+
+```text
+team,fifa_rank,fifa_points,source,last_updated
+Argentina,1,1877.27,FIFA ranking snapshot,2026-06-21
+```
+
+The importer also accepts flexible column names:
+
+```text
+team column: team, country, name, ranked_team
+rank column: rank, fifa_rank, position
+points column: points, fifa_points, total_points, pts
+optional date/source columns: date, last_updated, source
+```
+
+Team names are matched through `data/team_name_aliases.csv`, including common FIFA variants such as `USA -> United States`, `Korea Republic -> South Korea`, `IR Iran -> Iran`, `Türkiye -> Turkey`, `Congo DR -> DR Congo`, `Czech Republic -> Czechia`, and `Bosnia-Herzegovina -> Bosnia and Herzegovina`.
+
+Create an external-strength file from the FIFA snapshot without modifying priors:
+
+```bash
+.venv/bin/python scripts/import_fifa_rankings.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --output data/raw/external_team_strength_from_fifa.csv
+```
+
+The command prints required teams, FIFA rows loaded, matched teams, missing required teams, unmatched FIFA rows, ambiguous matches, and teams missing rank/points. It also saves:
+
+```text
+reports/fifa_ranking_import_YYYY-MM-DD.csv
+reports/fifa_ranking_import_YYYY-MM-DD.md
+```
+
+To fill blank cells in the missing-team template:
+
+```bash
+.venv/bin/python scripts/import_fifa_rankings.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --output data/raw/external_team_strength_from_fifa.csv \
+  --update-template
+```
+
+Full external benchmark workflow:
+
+```bash
+.venv/bin/python scripts/import_fifa_rankings.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --output data/raw/external_team_strength_from_fifa.csv
+.venv/bin/python scripts/import_external_priors.py \
+  --input data/raw/external_team_strength_from_fifa.csv \
+  --output data/team_rating_external_priors.csv \
+  --write
+.venv/bin/python scripts/calibrate_ratings_from_external.py --write
+.venv/bin/python scripts/audit_external_benchmark_coverage.py
+.venv/bin/python scripts/run_asof_backtest.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+.venv/bin/python scripts/run_blend_sensitivity.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
+
+The importer can also update `data/team_rating_external_priors.csv` directly with an explicit flag:
+
+```bash
+.venv/bin/python scripts/import_fifa_rankings.py \
+  --input data/raw/fifa_rankings_snapshot.csv \
+  --output data/raw/external_team_strength_from_fifa.csv \
+  --write-external-priors
+```
+
+Manual CSV overrides remain available. Edit `data/team_name_aliases.csv` for name mismatches and edit `data/team_rating_external_priors.csv` only when you have source-backed benchmark values.
+
 ### External Benchmark Rating Calibration
 
 External Benchmark Rating Calibration v1 replaces row-by-row manual approval with a transparent benchmark check. It compares internal ratings against independent FIFA/Elo-style overall-strength priors, creates conservative calibrated proposals, and only writes those proposals to `data/team_ratings.csv` when `--write` is passed.

@@ -37,6 +37,7 @@ from src.external_priors import (
     load_review_proposals,
 )
 from src.feature_engineering import load_recent_matches
+from src.fifa_ranking_import import fifa_ranking_import_dashboard_status
 from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
 from src.market_tables import group_market_alpha
@@ -1983,6 +1984,14 @@ for label in selected_labels:
                     hide_index=True,
                     width="stretch",
                 )
+
+            st.write("FIFA Ranking Import")
+            st.caption(
+                "This checks the latest local FIFA ranking snapshot/import report used to fill external benchmark inputs. "
+                "It never fetches login-protected sources or changes model ratings from the dashboard."
+            )
+            fifa_import_status = fifa_ranking_import_dashboard_status()
+            st.dataframe(pd.DataFrame([fifa_import_status]), hide_index=True, width="stretch")
 
             st.write("External Benchmark Coverage")
             st.caption(

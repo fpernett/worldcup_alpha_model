@@ -84,6 +84,22 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "last_updated",
         "notes",
     ],
+    "data/raw/fifa_rankings_snapshot.csv": [
+        "team",
+        "fifa_rank",
+        "fifa_points",
+        "source",
+        "last_updated",
+    ],
+    "data/raw/external_team_strength_from_fifa.csv": [
+        "team",
+        "fifa_rank",
+        "fifa_points",
+        "external_elo",
+        "source",
+        "last_updated",
+        "notes",
+    ],
     "data/historical_matches.csv": [
         "match_id",
         "date_utc",
@@ -321,6 +337,7 @@ MODEL_DEFINITION_FILES: set[str] = {
     "src/external_priors.py",
     "src/external_prior_import.py",
     "src/external_benchmark_calibration.py",
+    "src/fifa_ranking_import.py",
 }
 
 METRIC_DEFINITION_FILES: set[str] = {
@@ -338,6 +355,7 @@ METRIC_DEFINITION_FILES: set[str] = {
     "src/external_priors.py",
     "src/external_prior_import.py",
     "src/external_benchmark_calibration.py",
+    "src/fifa_ranking_import.py",
     "src/report_metrics.py",
     "src/market_tables.py",
     "src/team_behavior.py",
@@ -364,6 +382,7 @@ API_SOURCE_FILES: set[str] = {
     "src/team_names.py",
     "src/team_behavior.py",
     "src/elo.py",
+    "src/fifa_ranking_import.py",
 }
 
 POLYMARKET_MAPPING_FILES: set[str] = {
