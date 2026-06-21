@@ -253,3 +253,66 @@ def test_run_backtest_script_does_not_crash(monkeypatch, capsys) -> None:
     output = capsys.readouterr().out
     assert "completed matches: 1" in output
     assert "Summary metrics" in output
+
+
+def test_run_backtest_returns_qa_tables(monkeypatch) -> None:
+    completed = pd.DataFrame(
+        [
+            {
+                "match_id": "M1",
+                "date_utc": "2026-06-18",
+                "home": "Alpha",
+                "away": "Beta",
+                "home_goals": 2,
+                "away_goals": 1,
+                "competition": "FIFA World Cup",
+            }
+        ]
+    )
+    teams = pd.DataFrame(
+        [
+            {"team": "Alpha", "elo": 1800, "attack": 0.70, "defense": 0.68, "recent_form": 0.65},
+            {"team": "Beta", "elo": 1700, "attack": 0.55, "defense": 0.55, "recent_form": 0.55},
+        ]
+    )
+
+    monkeypatch.setattr(backtest, "load_completed_matches_for_backtest", lambda **kwargs: completed)
+    monkeypatch.setattr(backtest, "_manual_team_ratings", lambda: teams)
+    monkeypatch.setattr(backtest, "get_team_ratings", lambda: teams)
+    monkeypatch.setattr(backtest, "load_team_behavior", lambda: pd.DataFrame([{"team": "Alpha"}, {"team": "Beta"}]))
+    monkeypatch.setattr(backtest, "load_team_name_aliases_df", lambda: pd.DataFrame(columns=["alias", "canonical"]))
+    monkeypatch.setattr(backtest, "load_venues", lambda: pd.DataFrame())
+
+    def fake_run_model_for_backtest_match(match, mode, teams_df, venues_df, odds_df):
+        return {
+            "model_mode": mode,
+            "match_id": "M1",
+            "date_utc": "2026-06-18",
+            "home": "Alpha",
+            "away": "Beta",
+            "home_goals": 2,
+            "away_goals": 1,
+            "competition": "FIFA World Cup",
+            "home_win_prob": 0.6,
+            "draw_prob": 0.25,
+            "away_win_prob": 0.15,
+            "home_xg": 1.7,
+            "away_xg": 0.9,
+            "over_2_5_prob": 0.5,
+            "under_2_5_prob": 0.5,
+            "btts_yes_prob": 0.45,
+            "btts_no_prob": 0.55,
+            "most_likely_result": "home_win",
+            "actual_result": "home_win",
+            "actual_result_prob": 0.6,
+            "baseline_warning": "",
+            "log_loss_1x2": 0.5,
+        }
+
+    monkeypatch.setattr(backtest, "run_model_for_backtest_match", fake_run_model_for_backtest_match)
+
+    result = backtest.run_backtest(start_date="2026-06-18", end_date="2026-06-18")
+
+    assert "qa_rating_coverage" in result
+    assert "qa_match_inputs" in result
+    assert "qa_summary" in result

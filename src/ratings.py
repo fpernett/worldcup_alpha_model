@@ -144,6 +144,38 @@ def neutral_team_rating(team: str) -> pd.Series:
     )
 
 
+def rating_row_for_team(ratings: pd.DataFrame | None, team: str) -> pd.Series:
+    """Return the exact model-join rating row for a team, without fallback."""
+    if ratings is None or ratings.empty or "team" not in ratings.columns:
+        return pd.Series(dtype="object")
+    rows = ratings.loc[ratings["team"].astype(str).str.lower() == str(team).lower()]
+    if rows.empty:
+        return pd.Series(dtype="object")
+    return rows.iloc[0]
+
+
+def has_team_rating(ratings: pd.DataFrame | None, team: str) -> bool:
+    return not rating_row_for_team(ratings, team).empty
+
+
+def is_neutral_fallback_rating(row: pd.Series | dict[str, Any] | None) -> bool:
+    if row is None:
+        return True
+    data = pd.Series(row) if isinstance(row, dict) else row
+    if data.empty:
+        return True
+    text = " ".join(
+        [
+            str(data.get("data_quality", "") or ""),
+            str(data.get("attack_source", "") or ""),
+            str(data.get("defense_source", "") or ""),
+            str(data.get("recent_form_source", "") or ""),
+            str(data.get("notes", "") or ""),
+        ]
+    ).lower()
+    return "neutral_fallback" in text or "neutral_fixture_base" in text
+
+
 def _fetch_ratings_from_api() -> tuple[pd.DataFrame | None, str | None]:
     cfg = get_config()
     if not cfg.ratings_api_url:

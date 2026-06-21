@@ -1615,10 +1615,16 @@ for label in selected_labels:
         bt_metrics = backtest_result.get("metrics", pd.DataFrame())
         bt_comparison = backtest_result.get("comparison", pd.DataFrame())
         bt_calibration = backtest_result.get("calibration", pd.DataFrame())
+        bt_qa_summary = backtest_result.get("qa_summary", {})
+        bt_qa_matches = backtest_result.get("qa_match_inputs", pd.DataFrame())
+        bt_qa_coverage = backtest_result.get("qa_rating_coverage", pd.DataFrame())
+        bt_qa_aliases = backtest_result.get("qa_aliases", pd.DataFrame())
         bt_warning = str(backtest_result.get("warning", ""))
 
         if bt_warning:
             st.warning(bt_warning)
+        if isinstance(bt_qa_summary, dict) and bt_qa_summary.get("qa_warning"):
+            st.warning(bt_qa_summary["qa_warning"])
         st.metric("Completed matches in backtest", f"{len(bt_matches):,}")
         if bt_metrics.empty:
             st.info("No completed matches found for this backtest filter. Widen the date range or clear the competition filter.")
@@ -1647,6 +1653,48 @@ for label in selected_labels:
 
             st.write("Calibration buckets")
             st.dataframe(bt_calibration, hide_index=True, width="stretch")
+
+            st.write("Backtest QA")
+            st.caption(
+                "This section checks whether the backtest is valid. If teams are missing ratings or names do not match, "
+                "the model may use neutral fallback values, which can make probabilities unrealistically flat."
+            )
+            if isinstance(bt_qa_summary, dict) and bt_qa_summary:
+                st.dataframe(pd.DataFrame([bt_qa_summary]), hide_index=True, width="stretch")
+
+            qa_cols = [
+                "date_utc",
+                "home",
+                "away",
+                "score",
+                "baseline_home_prob",
+                "baseline_draw_prob",
+                "baseline_away_prob",
+                "behavior_home_prob",
+                "behavior_draw_prob",
+                "behavior_away_prob",
+                "baseline_actual_prob",
+                "behavior_actual_prob",
+                "rating_coverage_warning",
+                "probability_warning",
+            ]
+            if isinstance(bt_qa_matches, pd.DataFrame) and not bt_qa_matches.empty:
+                st.dataframe(
+                    bt_qa_matches[[col for col in qa_cols if col in bt_qa_matches.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
+            c_qa1, c_qa2 = st.columns(2)
+            with c_qa1:
+                st.write("Teams with rating coverage warnings")
+                if isinstance(bt_qa_coverage, pd.DataFrame) and not bt_qa_coverage.empty:
+                    coverage_warnings = bt_qa_coverage.loc[bt_qa_coverage["warning"].astype(str) != ""]
+                    st.dataframe(coverage_warnings, hide_index=True, width="stretch")
+            with c_qa2:
+                st.write("Possible alias warnings")
+                if isinstance(bt_qa_aliases, pd.DataFrame) and not bt_qa_aliases.empty:
+                    alias_warnings = bt_qa_aliases.loc[bt_qa_aliases["recommendation"].astype(str) != ""]
+                    st.dataframe(alias_warnings, hide_index=True, width="stretch")
 
     with tabs[7]:
         st.subheader("Team Inputs")

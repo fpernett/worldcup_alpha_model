@@ -714,6 +714,43 @@ Inspect the per-match comparison to see where behavior adjustment increased or r
 
 Important v1 limitation: this backtest uses the current `data/team_behavior.csv`. It may have look-ahead bias because behavior metrics are not rebuilt as of each historical match date. Backtesting v2 should rebuild Elo and behavior snapshots as of each match date before scoring that match.
 
+### Backtest QA And Rating Coverage
+
+Before interpreting behavior-adjusted backtest metrics, run the rating coverage audit:
+
+```bash
+.venv/bin/python scripts/audit_backtest_quality.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
+```
+
+The audit writes:
+
+```text
+reports/backtest_quality_audit_YYYY-MM-DD.md
+reports/backtest_quality_matches_YYYY-MM-DD.csv
+```
+
+This QA step checks:
+
+- whether completed-match teams have exact rows in `data/team_ratings.csv`;
+- whether behavior-adjusted ratings and `data/team_behavior.csv` rows exist;
+- whether aliases such as `Curacao` / `Curaçao`, `USA` / `United States`, `Bosnia-H.` / `Bosnia and Herzegovina`, and `Czech Republic` / `Czechia` may be needed;
+- whether the model used neutral fallback inputs;
+- whether 1X2 probabilities look suspiciously flat.
+
+Neutral fallback means the model did not find an exact team row and used default values near `attack=0.55`, `defense=0.55`, and `recent_form=0.55`. This can make mismatched teams look nearly equal and produce unrealistic probabilities. For example, if Germany and Curaçao are missing from the exact rating table used by the model, Germany vs Curaçao can look close to a 36% / 27% / 36% match even though the score and football prior suggest a large gap.
+
+Fixes should be manual and transparent:
+
+- add missing teams to `data/team_ratings.csv`;
+- add aliases to `data/team_name_aliases.csv`;
+- rebuild behavior/Elo after changing historical names if needed;
+- rerun the QA audit until neutral fallback and alias warnings are resolved.
+
+Backtest metrics should not be trusted until the QA section is clean. This is a validation layer only; it does not change the model formula or provide staking, sizing, or trading advice.
+
 ## 12. Weekly Semantic Audit
 
 Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:

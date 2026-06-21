@@ -36,13 +36,22 @@ def main() -> None:
     metrics = _frame(result.get("metrics"))
     comparison = _frame(result.get("comparison"))
     calibration = _frame(result.get("calibration"))
+    qa_coverage = _frame(result.get("qa_rating_coverage"))
+    qa_matches = _frame(result.get("qa_match_inputs"))
+    qa_aliases = _frame(result.get("qa_aliases"))
+    qa_summary = result.get("qa_summary", {})
     warning = str(result.get("warning", ""))
 
     print(f"completed matches: {len(matches):,}")
     if warning:
         print(f"warning: {warning}")
+    if isinstance(qa_summary, dict) and qa_summary.get("qa_warning"):
+        print(f"qa warning: {qa_summary['qa_warning']}")
     print("\nSummary metrics")
     print(_printable(metrics).to_string(index=False) if not metrics.empty else "No metrics available.")
+    if isinstance(qa_summary, dict) and qa_summary:
+        print("\nBacktest QA")
+        print(pd.DataFrame([qa_summary]).to_string(index=False))
 
     if not comparison.empty:
         helped = comparison.loc[comparison["actual_prob_delta"] > 0].sort_values("actual_prob_delta", ascending=False).head(5)
@@ -79,6 +88,22 @@ def main() -> None:
                     "## Calibration",
                     "",
                     _to_markdown(_printable(calibration)),
+                    "",
+                    "## Backtest QA",
+                    "",
+                    _to_markdown(pd.DataFrame([qa_summary]) if isinstance(qa_summary, dict) and qa_summary else pd.DataFrame()),
+                    "",
+                    "### Rating Coverage",
+                    "",
+                    _to_markdown(_printable(qa_coverage)),
+                    "",
+                    "### Alias Warnings",
+                    "",
+                    _to_markdown(_printable(qa_aliases.loc[qa_aliases["recommendation"].astype(str) != ""] if not qa_aliases.empty and "recommendation" in qa_aliases.columns else qa_aliases)),
+                    "",
+                    "### Suspicious Matches",
+                    "",
+                    _to_markdown(_printable(qa_matches.loc[qa_matches["probability_warning"].astype(str) != ""] if not qa_matches.empty and "probability_warning" in qa_matches.columns else qa_matches)),
                     "",
                     "Lower Brier score and log loss are better. Higher probability assigned to the actual result is better.",
                     "This report is evaluation-only and does not provide staking, trade execution, or betting advice.",

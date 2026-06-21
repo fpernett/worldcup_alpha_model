@@ -34,6 +34,10 @@ DEFAULT_TEAM_ALIASES = {
     "cote divoire": "Ivory Coast",
     "cote d ivoire": "Ivory Coast",
     "côte d'ivoire": "Ivory Coast",
+    "bosnia-h.": "Bosnia and Herzegovina",
+    "bosnia h": "Bosnia and Herzegovina",
+    "curacao": "Curaçao",
+    "curaçao": "Curaçao",
 }
 
 
@@ -44,6 +48,32 @@ def normalize_team_name(name: str) -> str:
         return ""
     aliases = load_team_name_aliases()
     return aliases.get(_alias_key(raw), raw)
+
+
+def team_name_key(name: str) -> str:
+    """Return the accent-insensitive comparison key used for aliases."""
+    return _alias_key(name)
+
+
+def load_team_name_aliases_df(include_defaults: bool = True) -> pd.DataFrame:
+    """Return aliases as a dataframe so diagnostics can report name issues."""
+    rows: list[dict[str, str]] = []
+    if include_defaults:
+        rows.extend({"alias": alias, "canonical": canonical} for alias, canonical in DEFAULT_TEAM_ALIASES.items())
+    path = DATA_DIR / "team_name_aliases.csv"
+    df = read_csv_with_columns(path, TEAM_NAME_ALIAS_COLUMNS)
+    if not df.empty:
+        for _, row in df.iterrows():
+            alias = str(row.get("alias", "") or "").strip()
+            canonical = str(row.get("canonical", "") or "").strip()
+            if alias and canonical:
+                rows.append({"alias": alias, "canonical": canonical})
+    out = pd.DataFrame(rows, columns=TEAM_NAME_ALIAS_COLUMNS)
+    if out.empty:
+        return pd.DataFrame(columns=TEAM_NAME_ALIAS_COLUMNS)
+    out["_alias_key"] = out["alias"].map(_alias_key)
+    out = out.drop_duplicates(subset=["_alias_key"], keep="last").drop(columns=["_alias_key"])
+    return out.reset_index(drop=True)
 
 
 @lru_cache(maxsize=1)

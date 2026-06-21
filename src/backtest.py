@@ -6,9 +6,17 @@ from typing import Any
 import pandas as pd
 
 from src.config import DATA_DIR
+from src.backtest_diagnostics import (
+    audit_backtest_match_inputs,
+    audit_backtest_rating_coverage,
+    audit_backtest_team_aliases,
+    build_backtest_qa_summary,
+)
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches
 from src.model import ModelConfig, run_match_model
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings, _normalise_ratings
+from src.team_behavior import load_team_behavior
+from src.team_names import load_team_name_aliases_df
 from src.utils import coerce_bool, coerce_float, read_csv_with_columns
 from src.weather import load_venues
 
@@ -202,6 +210,10 @@ def run_backtest(
             "metrics": pd.DataFrame(columns=BACKTEST_METRIC_COLUMNS),
             "comparison": pd.DataFrame(columns=COMPARISON_COLUMNS),
             "calibration": pd.DataFrame(columns=["model_mode", *CALIBRATION_COLUMNS]),
+            "qa_rating_coverage": pd.DataFrame(),
+            "qa_match_inputs": pd.DataFrame(),
+            "qa_aliases": pd.DataFrame(),
+            "qa_summary": {},
             "warning": BACKTEST_LOOKAHEAD_WARNING,
         }
 
@@ -215,6 +227,8 @@ def run_backtest(
 
     baseline_teams = _manual_team_ratings()
     behavior_teams = get_team_ratings()
+    team_behavior = load_team_behavior()
+    aliases = load_team_name_aliases_df()
     venues = load_venues()
     odds = pd.DataFrame()
 
@@ -233,6 +247,10 @@ def run_backtest(
             table.insert(0, "model_mode", mode)
         calibration_frames.append(table)
     calibration = pd.concat(calibration_frames, ignore_index=True) if calibration_frames else pd.DataFrame(columns=["model_mode", *CALIBRATION_COLUMNS])
+    qa_rating_coverage = audit_backtest_rating_coverage(matches, baseline_teams, behavior_teams, team_behavior, aliases)
+    qa_match_inputs = audit_backtest_match_inputs(predictions, matches, baseline_teams, behavior_teams)
+    qa_aliases = audit_backtest_team_aliases(matches, baseline_teams, aliases)
+    qa_summary = build_backtest_qa_summary(matches, qa_rating_coverage, qa_match_inputs, qa_aliases)
 
     return {
         "matches": matches.reset_index(drop=True),
@@ -240,6 +258,10 @@ def run_backtest(
         "metrics": metrics,
         "comparison": comparison,
         "calibration": calibration,
+        "qa_rating_coverage": qa_rating_coverage,
+        "qa_match_inputs": qa_match_inputs,
+        "qa_aliases": qa_aliases,
+        "qa_summary": qa_summary,
         "warning": warning,
     }
 
