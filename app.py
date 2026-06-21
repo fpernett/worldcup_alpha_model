@@ -34,6 +34,7 @@ from src.rating_coverage import (
     propose_team_aliases,
     rating_coverage_summary,
 )
+from src.rating_review import audit_generated_ratings, rating_review_summary
 from src.recency import calculate_match_weight
 from src.ratings import get_team_ratings
 from src.report_charts import (
@@ -1722,6 +1723,39 @@ for label in selected_labels:
             if not rating_alias_proposals.empty:
                 st.write("Proposed alias fixes")
                 st.dataframe(rating_alias_proposals, hide_index=True, width="stretch")
+
+            st.write("Rating Review")
+            st.caption(
+                "Generated ratings are conservative placeholders created to avoid neutral fallback. "
+                "They are better than missing ratings, but important teams should be manually reviewed before trusting serious predictions."
+            )
+            review_audit = audit_generated_ratings(manual_rating_rows, team_behavior, historical_long_matches, bt_matches)
+            review_summary = rating_review_summary(review_audit)
+            st.dataframe(pd.DataFrame([review_summary]), hide_index=True, width="stretch")
+            if not review_audit.empty:
+                needs_review = review_audit.loc[
+                    review_audit["rating_status"].isin(["generated_from_behavior", "neutral_placeholder", "missing"])
+                    & review_audit["priority"].isin(["high", "medium"])
+                ].copy()
+                review_cols = [
+                    "team",
+                    "rating_status",
+                    "attack",
+                    "defense",
+                    "recent_form",
+                    "behavior_attack_final",
+                    "behavior_defense_final",
+                    "behavior_recent_form",
+                    "backtest_match_count",
+                    "fixture_match_count",
+                    "priority",
+                    "warning",
+                ]
+                st.dataframe(
+                    needs_review[[col for col in review_cols if col in needs_review.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
 
     with tabs[7]:
         st.subheader("Team Inputs")

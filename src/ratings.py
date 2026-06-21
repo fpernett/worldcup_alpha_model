@@ -180,14 +180,31 @@ def is_neutral_fallback_rating(row: pd.Series | dict[str, Any] | None) -> bool:
         return True
     text = " ".join(
         [
-            str(data.get("data_quality", "") or ""),
-            str(data.get("attack_source", "") or ""),
-            str(data.get("defense_source", "") or ""),
-            str(data.get("recent_form_source", "") or ""),
-            str(data.get("notes", "") or ""),
+            _safe_text(data.get("data_quality", "")),
+            _safe_text(data.get("attack_source", "")),
+            _safe_text(data.get("defense_source", "")),
+            _safe_text(data.get("recent_form_source", "")),
+            _safe_text(data.get("notes", "")),
         ]
     ).lower()
     return "neutral_fallback" in text or "neutral_fixture_base" in text
+
+
+def classify_rating_status(row: pd.Series | dict[str, Any] | None) -> str:
+    """Classify a rating row for review/audit workflows."""
+    if row is None:
+        return "missing"
+    data = pd.Series(row) if isinstance(row, dict) else row
+    if data.empty:
+        return "missing"
+    quality = _safe_text(data.get("data_quality", "")).lower()
+    if "manual_reviewed" in quality:
+        return "manual_reviewed"
+    if "generated_neutral" in quality or "neutral_placeholder" in quality or "neutral_fallback" in quality:
+        return "neutral_placeholder"
+    if "generated_from_behavior" in quality or "manual_review_candidate" in quality:
+        return "generated_from_behavior"
+    return "manual_existing"
 
 
 def _fetch_ratings_from_api() -> tuple[pd.DataFrame | None, str | None]:
@@ -475,7 +492,7 @@ def _matching_base_row(df: pd.DataFrame, team: str) -> pd.Series:
 
 
 def _rating_source_label(row: pd.Series) -> str:
-    quality = str(row.get("data_quality", "") or "")
+    quality = _safe_text(row.get("data_quality", ""))
     if "recent_match_history" in quality:
         return "recent_match_history"
     if "api" in quality:
@@ -516,7 +533,7 @@ def _behavior_blend_weights(row: pd.Series) -> dict[str, float] | None:
 
     coverage = coerce_float(row.get("opponent_elo_coverage_recent"), 1.0)
     residual_coverage = coerce_float(row.get("residual_coverage_recent"), 1.0)
-    schedule_label = str(row.get("schedule_strength_label", "") or "").lower()
+    schedule_label = _safe_text(row.get("schedule_strength_label", "")).lower()
     if (
         schedule_label == "unknown"
         or coverage < DEFAULT_BEHAVIOR_CONFIG.min_opponent_elo_coverage
@@ -529,8 +546,8 @@ def _behavior_blend_weights(row: pd.Series) -> dict[str, float] | None:
         weights["attack"] *= 0.50
     residual_warning = " ".join(
         [
-            str(row.get("residual_warning", "") or "").strip(),
-            str(row.get("residual_concentration_warning", "") or "").strip(),
+            _safe_text(row.get("residual_warning", "")).strip(),
+            _safe_text(row.get("residual_concentration_warning", "")).strip(),
         ]
     ).strip()
     if residual_warning:
@@ -599,6 +616,15 @@ def _derive_elo_from_rank(rank: float) -> float:
 def _rank_score(rank: float) -> float:
     rank = clamp(rank, 1.0, 150.0)
     return clamp(0.92 - (rank - 1.0) * 0.0048, 0.24, 0.92)
+
+
+def _safe_text(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
 
 
 def _csv_last_modified(filename: str) -> str:

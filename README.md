@@ -818,6 +818,55 @@ Alias proposals should be reviewed before adding them to `data/team_name_aliases
 
 Backtest metrics should not be trusted while required teams are missing manual rows or using neutral fallback ratings.
 
+### Manual Rating Review
+
+Generated ratings are conservative placeholders created to avoid neutral fallback. They are useful for coverage, but important teams should be reviewed before treating them as expert priors.
+
+Run the review audit:
+
+```bash
+.venv/bin/python scripts/audit_rating_review.py
+```
+
+The audit saves:
+
+```text
+reports/rating_review_audit_YYYY-MM-DD.md
+reports/rating_review_teams_YYYY-MM-DD.csv
+```
+
+Create conservative review proposals for important teams:
+
+```bash
+.venv/bin/python scripts/propose_reviewed_ratings.py \
+  --teams Argentina Brazil France Germany Spain Netherlands Portugal England Uruguay Morocco "United States" Norway
+```
+
+This writes:
+
+```text
+data/team_ratings_review_proposals.csv
+```
+
+The proposal script does **not** modify `data/team_ratings.csv` unless `--write` is passed. With `--write`, it updates only rows where `data_quality == generated_from_behavior`, sets `data_quality = manual_review_candidate`, and preserves rows marked `manual_csv` or `manual_reviewed`.
+
+Rating statuses:
+
+- `manual_reviewed`: human-reviewed prior, preserved by proposal scripts.
+- `manual_existing`: existing manual CSV prior.
+- `generated_from_behavior`: conservative placeholder from behavior/Elo, needs review.
+- `neutral_placeholder`: neutral generated placeholder, highest review risk.
+
+Review proposal formula:
+
+```text
+reviewed_attack = 0.60 * current_attack + 0.25 * behavior_attack_final + 0.15 * elo_scaled_attack
+reviewed_defense = 0.60 * current_defense + 0.25 * behavior_defense_final + 0.15 * elo_scaled_defense
+reviewed_recent_form = 0.60 * current_recent_form + 0.40 * behavior_recent_form
+```
+
+Proposed values are clipped to `0.35-0.90` and remain marked as candidates until a human explicitly promotes them to reviewed priors. The dashboard **Backtesting** tab shows rating review counts next to Rating Coverage so generated rows remain visible during QA.
+
 ## 12. Weekly Semantic Audit
 
 Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:
