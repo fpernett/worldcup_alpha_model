@@ -253,6 +253,7 @@ MODEL_DEFINITION_FILES: set[str] = {
     "src/elo_calibration.py",
     "src/performance_residuals.py",
     "src/environment_response.py",
+    "src/backtest.py",
 }
 
 METRIC_DEFINITION_FILES: set[str] = {
@@ -260,6 +261,7 @@ METRIC_DEFINITION_FILES: set[str] = {
     "src/alpha.py",
     "src/sensitivity.py",
     "src/backtesting.py",
+    "src/backtest.py",
     "src/report_metrics.py",
     "src/market_tables.py",
     "src/team_behavior.py",

@@ -677,6 +677,43 @@ match_id,home,away,home_goals,away_goals,result_home_win,result_draw,result_away
 
 The **Backtesting** tab loads both logs and reports simple Brier score, log loss, mean alpha gap, hit rate by signal strength, and calibration buckets when completed results exist.
 
+### Behavior-Adjusted Completed-Match Backtesting
+
+Behavior-Adjusted Backtesting v1 compares two model modes on completed matches loaded from `data/fixtures.csv` and `data/historical_matches.csv`:
+
+- `baseline_manual`: uses only the manual base ratings in `data/team_ratings.csv`.
+- `behavior_adjusted`: uses the current `get_team_ratings()` output, including conservative historical behavior blending and delta caps.
+
+Run:
+
+```bash
+.venv/bin/python scripts/run_backtest.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
+
+The script writes:
+
+```text
+reports/backtest_predictions_YYYY-MM-DD.csv
+reports/backtest_report_YYYY-MM-DD.md
+```
+
+Key metrics:
+
+- **Brier score 1X2**: squared error across home win, draw, and away win probabilities. Lower is better.
+- **Log loss 1X2**: penalty for assigning low probability to the actual result. Lower is better.
+- **Most-likely result accuracy**: how often the highest-probability 1X2 outcome occurred. Higher is better.
+- **Mean probability assigned to actual result**: average model probability on what actually happened. Higher is better.
+- **Over 2.5 and BTTS Brier**: probability error for goal markets. Lower is better.
+- **Total goals MAE**: absolute error between predicted total xG and actual total goals. Lower is better.
+
+Inspect the per-match comparison to see where behavior adjustment increased or reduced the probability assigned to the actual result. The dashboard **Backtesting** tab shows the same comparison for a selected date window.
+
+Important v1 limitation: this backtest uses the current `data/team_behavior.csv`. It may have look-ahead bias because behavior metrics are not rebuilt as of each historical match date. Backtesting v2 should rebuild Elo and behavior snapshots as of each match date before scoring that match.
+
 ## 12. Weekly Semantic Audit
 
 Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:

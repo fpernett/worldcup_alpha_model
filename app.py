@@ -8,6 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from src.alpha import calculate_polymarket_alpha
+from src.backtest import run_backtest
 from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log, save_prediction_snapshot
 from src.behavior_driver_report import (
     audit_final_model_inputs,
@@ -904,6 +905,21 @@ def load_match_polymarket_inputs(home: str, away: str, date_utc: str, refresh_co
     return get_match_polymarket_markets(home, away, date_utc)
 
 
+@st.cache_data(ttl=600)
+def load_behavior_backtest_results(
+    start_date_iso: str,
+    end_date_iso: str,
+    competition: str,
+    refresh_counter: int,
+):
+    return run_backtest(
+        start_date=start_date_iso,
+        end_date=end_date_iso,
+        competition=competition or None,
+        strict_as_of_date=False,
+    )
+
+
 def merge_polymarket_inputs(primary: pd.DataFrame, secondary: pd.DataFrame) -> pd.DataFrame:
     frames = [df for df in [primary, secondary] if df is not None and not df.empty]
     if not frames:
@@ -1570,6 +1586,67 @@ for label in selected_labels:
             st.dataframe(evaluation, hide_index=True, width="stretch")
         if results_log.empty:
             st.info("Add completed match rows to `data/results_log.csv` to evaluate saved predictions.")
+
+        st.divider()
+        st.subheader("Behavior-Adjusted Backtest")
+        st.caption(
+            "Lower Brier score and log loss are better. Higher probability assigned to the actual result is better. "
+            "This checks whether the historical behavior layer is helping or hurting completed-match predictions."
+        )
+        bt_key = str(match.get("match_id", label)).replace(" ", "_")
+        bt_default_end = utc_today
+        bt_default_start = bt_default_end - timedelta(days=10)
+        c_start, c_end, c_comp = st.columns([1, 1, 2])
+        with c_start:
+            bt_start = st.date_input("Backtest start", value=bt_default_start, key=f"bt_start_{bt_key}")
+        with c_end:
+            bt_end = st.date_input("Backtest end", value=bt_default_end, key=f"bt_end_{bt_key}")
+        with c_comp:
+            bt_competition = st.text_input("Competition filter", value="World Cup", key=f"bt_comp_{bt_key}")
+
+        bt_start, bt_end = sorted((bt_start, bt_end))
+        backtest_result = load_behavior_backtest_results(
+            bt_start.isoformat(),
+            bt_end.isoformat(),
+            bt_competition,
+            st.session_state["refresh_counter"],
+        )
+        bt_matches = backtest_result.get("matches", pd.DataFrame())
+        bt_metrics = backtest_result.get("metrics", pd.DataFrame())
+        bt_comparison = backtest_result.get("comparison", pd.DataFrame())
+        bt_calibration = backtest_result.get("calibration", pd.DataFrame())
+        bt_warning = str(backtest_result.get("warning", ""))
+
+        if bt_warning:
+            st.warning(bt_warning)
+        st.metric("Completed matches in backtest", f"{len(bt_matches):,}")
+        if bt_metrics.empty:
+            st.info("No completed matches found for this backtest filter. Widen the date range or clear the competition filter.")
+        else:
+            st.write("Summary metrics")
+            st.dataframe(bt_metrics, hide_index=True, width="stretch")
+
+            st.write("Per-match comparison")
+            comparison_cols = [
+                "date_utc",
+                "home",
+                "away",
+                "score",
+                "actual_result",
+                "baseline_actual_prob",
+                "behavior_actual_prob",
+                "actual_prob_delta",
+                "improved_by_behavior",
+                "notes",
+            ]
+            st.dataframe(
+                bt_comparison[[col for col in comparison_cols if col in bt_comparison.columns]],
+                hide_index=True,
+                width="stretch",
+            )
+
+            st.write("Calibration buckets")
+            st.dataframe(bt_calibration, hide_index=True, width="stretch")
 
     with tabs[7]:
         st.subheader("Team Inputs")
