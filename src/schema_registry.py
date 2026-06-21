@@ -255,6 +255,7 @@ MODEL_DEFINITION_FILES: set[str] = {
     "src/environment_response.py",
     "src/backtest.py",
     "src/backtest_diagnostics.py",
+    "src/rating_coverage.py",
 }
 
 METRIC_DEFINITION_FILES: set[str] = {
@@ -264,6 +265,7 @@ METRIC_DEFINITION_FILES: set[str] = {
     "src/backtesting.py",
     "src/backtest.py",
     "src/backtest_diagnostics.py",
+    "src/rating_coverage.py",
     "src/report_metrics.py",
     "src/market_tables.py",
     "src/team_behavior.py",

@@ -22,6 +22,7 @@ from src.feature_engineering import (
     load_recent_matches,
 )
 from src.team_behavior import load_team_behavior
+from src.team_names import normalize_team_name
 from src.utils import clamp, coerce_float, read_csv_with_columns, today_iso
 
 
@@ -140,12 +141,25 @@ def neutral_team_rating(team: str) -> pd.Series:
             "behavior_attack_cap_hit": False,
             "behavior_defense_cap_hit": False,
             "behavior_recent_form_cap_hit": False,
+            "used_neutral_fallback": True,
+            "rating_warning": "neutral fallback used",
         }
     )
 
 
 def rating_row_for_team(ratings: pd.DataFrame | None, team: str) -> pd.Series:
-    """Return the exact model-join rating row for a team, without fallback."""
+    """Return the rating row for a team, using aliases before fallback."""
+    row = exact_rating_row_for_team(ratings, team)
+    if not row.empty:
+        return row
+    canonical = normalize_team_name(team)
+    if canonical and canonical != str(team):
+        return exact_rating_row_for_team(ratings, canonical)
+    return pd.Series(dtype="object")
+
+
+def exact_rating_row_for_team(ratings: pd.DataFrame | None, team: str) -> pd.Series:
+    """Return an exact rating row without alias normalization."""
     if ratings is None or ratings.empty or "team" not in ratings.columns:
         return pd.Series(dtype="object")
     rows = ratings.loc[ratings["team"].astype(str).str.lower() == str(team).lower()]
@@ -257,6 +271,8 @@ def _apply_behavior_blend(ratings: pd.DataFrame, manual_base: pd.DataFrame | Non
         "behavior_attack_cap_hit",
         "behavior_defense_cap_hit",
         "behavior_recent_form_cap_hit",
+        "used_neutral_fallback",
+        "rating_warning",
     ]:
         if col not in out.columns:
             out[col] = pd.NA
@@ -283,6 +299,9 @@ def _apply_behavior_blend(ratings: pd.DataFrame, manual_base: pd.DataFrame | Non
         out.at[idx, "behavior_attack_cap_hit"] = False
         out.at[idx, "behavior_defense_cap_hit"] = False
         out.at[idx, "behavior_recent_form_cap_hit"] = False
+        fallback = "neutral_fixture_base" in str(row.get("data_quality", "")).lower() or "neutral_fallback" in str(row.get("data_quality", "")).lower()
+        out.at[idx, "used_neutral_fallback"] = bool(fallback)
+        out.at[idx, "rating_warning"] = "neutral fallback used" if fallback else ""
 
     if behavior.empty or "team" not in behavior.columns:
         return out
@@ -393,6 +412,8 @@ def _append_fixture_behavior_neutral_rows(ratings: pd.DataFrame, behavior: pd.Da
                 "data_quality": "neutral_fixture_base",
                 "last_updated": today_iso(),
                 "notes": "Neutral fixture base because this team is missing from team_ratings.csv; historical behavior may blend conservatively.",
+                "used_neutral_fallback": True,
+                "rating_warning": "neutral fallback used",
             }
         )
     if not rows:
@@ -565,6 +586,8 @@ def _normalise_ratings(df: pd.DataFrame, source_label: str) -> pd.DataFrame:
         out.at[idx, "last_updated"] = row["last_updated"] if pd.notna(row["last_updated"]) else today_iso()
         out.at[idx, "notes"] = row["notes"] if pd.notna(row["notes"]) else "Transparent rating approximation."
 
+    out["used_neutral_fallback"] = False
+    out["rating_warning"] = ""
     return out.sort_values("team").reset_index(drop=True)
 
 

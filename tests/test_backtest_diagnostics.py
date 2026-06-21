@@ -88,7 +88,7 @@ def test_alias_mismatch_detection() -> None:
 
     assert bool(row["exact_match_in_ratings"]) is False
     assert row["possible_alias"] == "Curaçao"
-    assert "Add alias" in row["recommendation"]
+    assert row["recommendation"] == ""
 
 
 def test_flat_probability_warning() -> None:

@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.ratings import is_neutral_fallback_rating, neutral_team_rating, rating_row_for_team
+from src.ratings import exact_rating_row_for_team, is_neutral_fallback_rating, neutral_team_rating, rating_row_for_team
 from src.team_names import load_team_name_aliases_df, normalize_team_name, team_name_key
 from src.utils import coerce_bool, coerce_float
 
@@ -223,11 +223,15 @@ def audit_backtest_team_aliases(
     for team in teams:
         exact = _has_exact_team(ratings, team)
         canonical = _canonical_team(team, aliases)
+        alias_resolved = _alias_resolves_to_rating(team, aliases, ratings)
         key_match = rating_keys.get(team_name_key(team), "")
         canonical_match = rating_keys.get(team_name_key(canonical), "")
         possible = ""
         similarity = 0.0
-        if not exact:
+        if alias_resolved:
+            possible = canonical
+            similarity = 1.0
+        elif not exact:
             possible = canonical_match or key_match
             if possible:
                 similarity = 1.0
@@ -236,9 +240,9 @@ def audit_backtest_team_aliases(
                 if similarity < 0.82:
                     possible = ""
         recommendation = ""
-        if not exact and possible:
+        if not exact and possible and not alias_resolved:
             recommendation = f"Add alias '{team}' -> '{possible}' or align completed-match team name."
-        elif not exact:
+        elif not exact and not alias_resolved:
             recommendation = f"Add a manual rating row for '{team}' or an alias to the canonical team."
 
         rows.append(
@@ -369,7 +373,17 @@ def _team_names(df: pd.DataFrame | None) -> list[str]:
 
 
 def _has_exact_team(df: pd.DataFrame | None, team: str) -> bool:
-    return not rating_row_for_team(df, team).empty
+    return not exact_rating_row_for_team(df, team).empty
+
+
+def _alias_resolves_to_rating(team: str, aliases: pd.DataFrame, ratings: pd.DataFrame) -> bool:
+    if aliases is None or aliases.empty or "alias" not in aliases.columns or "canonical" not in aliases.columns:
+        return False
+    rows = aliases.loc[aliases["alias"].astype(str).map(team_name_key) == team_name_key(team)]
+    if rows.empty:
+        return False
+    canonical = str(rows.iloc[-1].get("canonical", "") or "")
+    return bool(canonical and not exact_rating_row_for_team(ratings, canonical).empty)
 
 
 def _best_similarity(team: str, choices: list[str]) -> tuple[str, float]:

@@ -27,6 +27,13 @@ from src.market_tables import group_market_alpha
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.odds import load_market_odds
 from src.polymarket import get_match_polymarket_markets, get_polymarket_markets, update_polymarket_markets
+from src.rating_coverage import (
+    audit_rating_coverage,
+    collect_required_teams,
+    load_team_ratings_csv,
+    propose_team_aliases,
+    rating_coverage_summary,
+)
 from src.recency import calculate_match_weight
 from src.ratings import get_team_ratings
 from src.report_charts import (
@@ -47,6 +54,7 @@ from src.report_metrics import (
 )
 from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
 from src.team_behavior import load_team_behavior
+from src.team_names import load_team_name_aliases_df
 from src.timeline import calculate_score_timeline
 
 
@@ -1695,6 +1703,25 @@ for label in selected_labels:
                 if isinstance(bt_qa_aliases, pd.DataFrame) and not bt_qa_aliases.empty:
                     alias_warnings = bt_qa_aliases.loc[bt_qa_aliases["recommendation"].astype(str) != ""]
                     st.dataframe(alias_warnings, hide_index=True, width="stretch")
+
+            st.write("Rating Coverage")
+            st.caption(
+                "If a team is missing from the manual ratings file, the model uses neutral fallback values. "
+                "That can make strong and weak teams look too similar."
+            )
+            rating_required = collect_required_teams(fixtures, historical_long_matches, team_behavior, bt_matches)
+            manual_rating_rows = load_team_ratings_csv()
+            rating_aliases = load_team_name_aliases_df(include_defaults=False)
+            rating_audit = audit_rating_coverage(rating_required, manual_rating_rows, rating_aliases)
+            rating_alias_proposals = propose_team_aliases(rating_required, manual_rating_rows, rating_aliases)
+            rating_summary = rating_coverage_summary(rating_audit, rating_alias_proposals)
+            st.dataframe(pd.DataFrame([rating_summary]), hide_index=True, width="stretch")
+            if not rating_audit.empty:
+                rating_warnings = rating_audit.loc[rating_audit["warning"].astype(str) != ""]
+                st.dataframe(rating_warnings, hide_index=True, width="stretch")
+            if not rating_alias_proposals.empty:
+                st.write("Proposed alias fixes")
+                st.dataframe(rating_alias_proposals, hide_index=True, width="stretch")
 
     with tabs[7]:
         st.subheader("Team Inputs")

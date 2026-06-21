@@ -751,6 +751,73 @@ Fixes should be manual and transparent:
 
 Backtest metrics should not be trusted until the QA section is clean. This is a validation layer only; it does not change the model formula or provide staking, sizing, or trading advice.
 
+### Team Rating Coverage Completion
+
+Run a read-only rating coverage audit before interpreting completed-match backtests:
+
+```bash
+.venv/bin/python scripts/audit_rating_coverage.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
+```
+
+The audit saves:
+
+```text
+reports/rating_coverage_audit_YYYY-MM-DD.md
+reports/rating_coverage_teams_YYYY-MM-DD.csv
+```
+
+Generate conservative proposed rows for missing required teams:
+
+```bash
+.venv/bin/python scripts/propose_missing_team_ratings.py \
+  --include-backtest \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
+```
+
+This writes proposals to:
+
+```text
+data/team_ratings_proposed.csv
+data/team_name_aliases_proposed.csv
+```
+
+The proposal script does **not** modify `data/team_ratings.csv` unless `--write` is passed. With `--write`, it appends only missing teams and preserves existing manual rows:
+
+```bash
+.venv/bin/python scripts/propose_missing_team_ratings.py \
+  --include-backtest \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --write
+```
+
+Generated rating rows are transparent priors, not silent model truth:
+
+- If behavior data exists, generated values use `70%` neutral base and `30%` behavior index.
+- If behavior data is missing, generated values stay at neutral `0.55`.
+- Generated rows are clipped to `0.35-0.85`.
+- `data_quality` is marked `generated_from_behavior` or `generated_neutral_placeholder_low`.
+- Notes explicitly say manual review is recommended.
+
+Alias proposals should be reviewed before adding them to `data/team_name_aliases.csv`. To append proposed aliases explicitly:
+
+```bash
+.venv/bin/python scripts/propose_missing_team_ratings.py \
+  --include-backtest \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --write-aliases
+```
+
+Backtest metrics should not be trusted while required teams are missing manual rows or using neutral fallback ratings.
+
 ## 12. Weekly Semantic Audit
 
 Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:

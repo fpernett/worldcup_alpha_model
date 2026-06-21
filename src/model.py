@@ -10,7 +10,7 @@ from scipy.stats import poisson
 
 from src.climate import get_venue_environment, summarize_environment_adjustment
 from src.odds import decimal_odds_or_nan
-from src.ratings import neutral_team_rating
+from src.ratings import neutral_team_rating, rating_row_for_team
 from src.utils import clamp, coerce_bool, coerce_float
 
 
@@ -36,12 +36,10 @@ class ModelConfig:
 
 
 def _team_row(teams: pd.DataFrame, team_name: str) -> pd.Series:
-    if teams is None or teams.empty or "team" not in teams.columns:
-        return neutral_team_rating(team_name)
-    row = teams.loc[teams["team"].astype(str).str.lower() == str(team_name).lower()]
+    row = rating_row_for_team(teams, team_name)
     if row.empty:
         return neutral_team_rating(team_name)
-    return row.iloc[0]
+    return row
 
 
 def _venue_environment(match_row: pd.Series, venues: pd.DataFrame | None) -> dict[str, Any]:

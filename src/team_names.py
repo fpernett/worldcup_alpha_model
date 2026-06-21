@@ -38,6 +38,8 @@ DEFAULT_TEAM_ALIASES = {
     "bosnia h": "Bosnia and Herzegovina",
     "curacao": "Curaçao",
     "curaçao": "Curaçao",
+    "turkiye": "Turkey",
+    "türkiye": "Turkey",
 }
 
 
