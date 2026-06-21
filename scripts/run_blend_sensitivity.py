@@ -20,6 +20,7 @@ from src.blend_sensitivity import (  # noqa: E402
 from src.backtest import load_completed_matches_for_backtest  # noqa: E402
 from src.config import DATA_DIR  # noqa: E402
 from src.historical_data import load_historical_matches  # noqa: E402
+from src.model_policy import get_current_model_policy  # noqa: E402
 from src.ratings import TEAM_RATING_COLUMNS  # noqa: E402
 from src.utils import read_csv_with_columns, today_iso  # noqa: E402
 
@@ -48,6 +49,7 @@ def main() -> None:
     best_brier = _best_metric(metrics, "brier_score_1x2")
     best_log_loss = _best_metric(metrics, "log_loss_1x2")
     beats_baseline = _beats_baseline(metrics)
+    policy = get_current_model_policy()
 
     print(f"completed matches: {len(matches):,}")
     print(f"blend multipliers tested: {', '.join(f'{value:.2f}' for value in multipliers)}")
@@ -85,6 +87,13 @@ def main() -> None:
                     f"Best blend by Brier: `{_blend_label(best_brier)}`",
                     f"Best blend by log loss: `{_blend_label(best_log_loss)}`",
                     f"Any blend beats baseline on both Brier and log loss: `{'yes' if beats_baseline else 'no'}`",
+                    "",
+                    "## Model Policy",
+                    "",
+                    f"Primary model mode: `{policy['primary_model_mode']}`",
+                    f"Behavior status: `{policy['behavior_status']}`",
+                    f"Behavior default blend: `{float(policy['behavior_default_blend']):.2f}`",
+                    f"Strict validation summary: {policy['reason']}",
                     "",
                     f"Recommendation: {recommendation}",
                     "",

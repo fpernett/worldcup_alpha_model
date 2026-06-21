@@ -8,7 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from src.alpha import calculate_polymarket_alpha
-from src.asof_backtest import run_asof_backtest_result
+from src.asof_backtest import get_team_ratings_asof, run_asof_backtest_result
 from src.backtest import run_backtest
 from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log, save_prediction_snapshot
 from src.blend_sensitivity import run_blend_sensitivity_result
@@ -39,6 +39,12 @@ from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
 from src.market_tables import group_market_alpha
 from src.model import ModelConfig, fair_odds, run_match_model
+from src.model_policy import (
+    annotate_decimal_alpha_with_policy,
+    annotate_polymarket_alpha_with_policy,
+    behavior_disagreement_warning,
+    get_current_model_policy,
+)
 from src.odds import load_market_odds
 from src.polymarket import get_match_polymarket_markets, get_polymarket_markets, update_polymarket_markets
 from src.rating_coverage import (
@@ -90,7 +96,13 @@ def odds_fmt(value: float) -> str:
 
 def alpha_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    out["model_prob"] = out["model_prob"].map(pct)
+    for col in ["model_prob", "primary_model_probability", "behavior_diagnostic_probability"]:
+        if col in out.columns:
+            out[col] = out[col].map(lambda x: "" if pd.isna(x) else pct(float(x)))
+    if "behavior_probability_delta" in out.columns:
+        out["behavior_probability_delta"] = out["behavior_probability_delta"].map(
+            lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp"
+        )
     out["fair_odds"] = out["fair_odds"].map(odds_fmt)
     out["market_odds"] = out["market_odds"].map(odds_fmt)
     out["alpha_ev"] = out["alpha_ev"].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
@@ -99,9 +111,13 @@ def alpha_display(df: pd.DataFrame) -> pd.DataFrame:
 
 def polymarket_alpha_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    for col in ["model_probability"]:
+    for col in ["model_probability", "primary_model_probability", "behavior_diagnostic_probability"]:
         if col in out.columns:
             out[col] = out[col].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
+    if "behavior_probability_delta" in out.columns:
+        out["behavior_probability_delta"] = out["behavior_probability_delta"].map(
+            lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp"
+        )
     for col in ["fair_price_cents", "polymarket_price_cents", "alpha_gap_cents"]:
         if col in out.columns:
             out[col] = out[col].map(lambda x: "" if pd.isna(x) else f"{x:.1f}")
@@ -971,6 +987,37 @@ def load_blend_sensitivity_results(
     )
 
 
+def build_behavior_diagnostic_result(
+    match: pd.Series,
+    historical_matches: pd.DataFrame,
+    venues: pd.DataFrame,
+    market_odds: pd.DataFrame,
+    cfg: ModelConfig,
+) -> tuple[dict | None, str]:
+    try:
+        policy = get_current_model_policy()
+        base_ratings = load_team_ratings_csv()
+        teams_asof = get_team_ratings_asof(
+            base_ratings,
+            historical_matches,
+            match.get("date_utc"),
+            teams=[str(match.get("home", "")), str(match.get("away", ""))],
+            mode=str(policy["secondary_model_mode"]),
+            behavior_blend_multiplier=1.0,
+        )
+        diagnostic = run_match_model(
+            match,
+            teams_asof,
+            venues,
+            market_odds,
+            cfg,
+            model_mode=str(policy["secondary_model_mode"]),
+        )
+        return diagnostic, ""
+    except Exception as exc:
+        return None, f"Behavior diagnostic unavailable: {exc}"
+
+
 def merge_polymarket_inputs(primary: pd.DataFrame, secondary: pd.DataFrame) -> pd.DataFrame:
     frames = [df for df in [primary, secondary] if df is not None and not df.empty]
     if not frames:
@@ -998,6 +1045,7 @@ def merge_polymarket_inputs(primary: pd.DataFrame, secondary: pd.DataFrame) -> p
 
 
 st.title("FIFA World Cup Match Alpha Model")
+current_model_policy = get_current_model_policy()
 st.caption(
     "Transparent local model for statistical alpha estimates. It estimates probabilities, fair odds, scorelines, "
     "environmental effects, and alpha EV versus optional market odds. It does not provide staking or investment advice."
@@ -1074,6 +1122,7 @@ with st.sidebar:
     min_alpha_gap = st.slider("Minimum alpha gap (cents)", 0.0, 20.0, 0.0, 0.5)
     show_only_mapped = st.toggle("Show only mapped markets", value=True)
     search_selected_match = st.toggle("Search selected match markets", value=True)
+    show_behavior_diagnostic_probabilities = st.toggle("Show diagnostic behavior probabilities", value=False)
 
     if st.button("Update Polymarket markets", width="stretch"):
         with st.spinner("Refreshing Polymarket markets if an API is configured..."):
@@ -1146,6 +1195,11 @@ with st.sidebar:
             "rows into `data/polymarket_markets.csv`."
         )
 
+    st.header("Model Policy")
+    st.write("Primary model: Baseline external-calibrated")
+    st.write("Behavior layer: Diagnostic only")
+    st.caption(current_model_policy["reason"])
+
 st.subheader("Available Matches")
 if fixtures.empty:
     st.warning("No fixtures found for the selected UTC window. Add rows to `data/fixtures.csv`, widen the date range, or configure a fixture API.")
@@ -1193,10 +1247,31 @@ cfg = ModelConfig(
 
 for label in selected_labels:
     match = fixture_view.loc[fixture_view["match_label"] == label].iloc[0]
-    result = run_match_model(match, teams, venues, market_odds, cfg)
+    result = run_match_model(
+        match,
+        teams,
+        venues,
+        market_odds,
+        cfg,
+        model_mode=str(current_model_policy["primary_model_mode"]),
+    )
+    behavior_diagnostic_result, behavior_diagnostic_error = build_behavior_diagnostic_result(
+        match,
+        historical_long_matches,
+        venues,
+        market_odds,
+        cfg,
+    )
+    behavior_warning = behavior_disagreement_warning(result, behavior_diagnostic_result)
 
     probs = result["probs"]
-    alpha = result["alpha"].copy()
+    behavior_alpha = behavior_diagnostic_result.get("alpha", pd.DataFrame()) if behavior_diagnostic_result else pd.DataFrame()
+    alpha = annotate_decimal_alpha_with_policy(
+        result["alpha"].copy(),
+        behavior_alpha,
+        show_behavior_diagnostic=show_behavior_diagnostic_probabilities,
+        policy=current_model_policy,
+    )
 
     if "odds_source" not in alpha.columns:
         alpha["odds_source"] = ""
@@ -1223,6 +1298,12 @@ for label in selected_labels:
         else pd.DataFrame()
     )
     polymarket_alpha = calculate_polymarket_alpha(result, mapped_markets, min_liquidity=min_liquidity)
+    polymarket_alpha = annotate_polymarket_alpha_with_policy(
+        polymarket_alpha,
+        behavior_diagnostic_result,
+        show_behavior_diagnostic=show_behavior_diagnostic_probabilities,
+        policy=current_model_policy,
+    )
     sensitivity_df = run_sensitivity_analysis(match, teams, venues, market_odds)
     robustness_df = assess_alpha_robustness(polymarket_alpha, sensitivity_df)
     if not polymarket_alpha.empty and not robustness_df.empty:
@@ -1254,6 +1335,19 @@ for label in selected_labels:
         f"{match['competition']} | {match['group']} | "
         f"{match['date_utc']} {match['time_utc']} UTC | {match['venue']}"
     )
+    policy_cols = st.columns(2)
+    policy_cols[0].metric("Primary model", "Baseline external-calibrated")
+    policy_cols[1].metric("Behavior layer", "Diagnostic only")
+    st.info(
+        "The model tested recent historical behavior fairly using only pre-match data. "
+        "In that strict test, recent behavior did not improve both Brier score and log loss. "
+        "The main probabilities and alpha tables therefore use external-calibrated team ratings; "
+        "behavior is shown only as a warning or context signal."
+    )
+    if behavior_diagnostic_error:
+        st.caption(behavior_diagnostic_error)
+    if behavior_warning:
+        st.warning(behavior_warning)
 
     tabs = st.tabs(
         [
@@ -1277,6 +1371,38 @@ for label in selected_labels:
         c2.metric("Draw", pct(probs["draw"]), f"fair {fair_odds(probs['draw']):.2f}")
         c3.metric(f"{result['away']} win", pct(probs["away_win"]), f"fair {fair_odds(probs['away_win']):.2f}")
         c4.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
+
+        if behavior_diagnostic_result:
+            behavior_probs = behavior_diagnostic_result.get("probs", {})
+            diagnostic_summary = pd.DataFrame(
+                [
+                    {
+                        "outcome": f"{result['home']} win",
+                        "primary_probability": probs["home_win"],
+                        "behavior_diagnostic_probability": behavior_probs.get("home_win", pd.NA),
+                    },
+                    {
+                        "outcome": "Draw",
+                        "primary_probability": probs["draw"],
+                        "behavior_diagnostic_probability": behavior_probs.get("draw", pd.NA),
+                    },
+                    {
+                        "outcome": f"{result['away']} win",
+                        "primary_probability": probs["away_win"],
+                        "behavior_diagnostic_probability": behavior_probs.get("away_win", pd.NA),
+                    },
+                ]
+            )
+            diagnostic_summary["delta"] = (
+                pd.to_numeric(diagnostic_summary["behavior_diagnostic_probability"], errors="coerce")
+                - pd.to_numeric(diagnostic_summary["primary_probability"], errors="coerce")
+            )
+            display_diag = diagnostic_summary.copy()
+            for col in ["primary_probability", "behavior_diagnostic_probability"]:
+                display_diag[col] = display_diag[col].map(lambda x: "" if pd.isna(x) else pct(float(x)))
+            display_diag["delta"] = display_diag["delta"].map(lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp")
+            st.dataframe(display_diag, hide_index=True, width="stretch")
+            st.caption("Behavior probabilities are diagnostic-only and do not drive the primary alpha tables.")
 
         st.subheader("Model Confidence")
         st.write(f"**{confidence['label']} confidence**: {', '.join(confidence['reasons'])}.")
@@ -1385,6 +1511,11 @@ for label in selected_labels:
             model_info = pd.DataFrame(
                 [
                     {"Item": "Model version", "Value": "Match report v1 / transparent Poisson xG model"},
+                    {"Item": "Primary model mode", "Value": current_model_policy["primary_model_mode"]},
+                    {"Item": "Behavior status", "Value": current_model_policy["behavior_status"]},
+                    {"Item": "Behavior default blend", "Value": f"{float(current_model_policy['behavior_default_blend']):.2f}"},
+                    {"Item": "Strict validation summary", "Value": current_model_policy["reason"]},
+                    {"Item": "Last validation report", "Value": current_model_policy["last_validated_report"]},
                     {"Item": "Training data match count", "Value": f"{data_support['training_match_count']:,}"},
                     {
                         "Item": "Training data date range",
@@ -1422,13 +1553,27 @@ for label in selected_labels:
 
     with tabs[3]:
         st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
+        market_cols = [
+            "market",
+            "selection",
+            "model_prob",
+            "primary_model_probability",
+            "behavior_diagnostic_probability",
+            "behavior_probability_delta",
+            "model_policy",
+            "edge_source",
+            "fair_odds",
+            "market_odds",
+            "alpha_ev",
+            "odds_source",
+            "odds_last_updated",
+        ]
         st.dataframe(
-            alpha_display(alpha)[
-                ["market", "selection", "model_prob", "fair_odds", "market_odds", "alpha_ev", "odds_source", "odds_last_updated"]
-            ],
+            alpha_display(alpha)[[col for col in market_cols if col in alpha.columns]],
             hide_index=True,
             width="stretch",
         )
+        st.caption("Market alpha uses the primary model probability. Behavior-only differences are diagnostic context, not primary alpha.")
 
     with tabs[4]:
         st.subheader("Candidate Matched Markets")
@@ -1549,6 +1694,11 @@ for label in selected_labels:
                         "market_type",
                         "polymarket_side",
                         "model_probability",
+                        "primary_model_probability",
+                        "behavior_diagnostic_probability",
+                        "behavior_probability_delta",
+                        "model_policy",
+                        "edge_source",
                         "fair_price_cents",
                         "polymarket_price_cents",
                         "alpha_gap_cents",
@@ -2224,9 +2374,8 @@ for label in selected_labels:
         if not impact_display.empty and impact_display["cap_hit"].any():
             st.warning("One or more behavior adjustments reached the configured movement cap; manual ratings remain the base input.")
         st.caption(
-            "Blend rules: high/moderate behavior can move attack and defense up to a 30% blend, and recent form up to 50%. "
-            "Low-quality behavior uses half those weights; insufficient behavior uses manual values only. "
-            "Attack and defense deltas are capped at 0.12, and recent-form deltas are capped at 0.18. "
+            "Current default policy: primary probabilities use baseline external-calibrated ratings with behavior blend 0.00. "
+            "The behavior-adjusted as-of layer remains available here as a diagnostic, with the historical blend rules and caps shown for transparency. "
             "The model remains a statistical alpha screen, not betting advice."
         )
 
@@ -2236,7 +2385,8 @@ for label in selected_labels:
             **Assumptions**
 
             - Expected goals combine Elo, attack, opponent defense, recent form, and conservative environmental adjustments.
-            - Historical behavior, when available with acceptable data quality, is blended conservatively into attack, defense, and recent form.
+            - The primary displayed model uses baseline external-calibrated ratings.
+            - Historical behavior is diagnostic-only by default because strict as-of-date blend sensitivity did not improve both Brier score and log loss.
             - Scorelines come from an independent Poisson goal model and are normalized over the displayed score grid.
             - Fair odds are calculated as `1 / probability`.
             - Alpha EV is calculated as `model_probability x market_decimal_odds - 1`.
@@ -2247,7 +2397,7 @@ for label in selected_labels:
             - This is not a black-box machine learning model and does not account for every lineup, tactical, injury, or motivation factor.
             - Missing market odds leave alpha EV blank.
             - Weather and training climates are approximate when API or recent match data are unavailable.
-            - Historical behavior is descriptive, not causal proof; friendlies may not reflect full competitive strength.
+            - Historical behavior is descriptive, not causal proof; friendlies may not reflect full competitive strength and behavior-only edges are not primary alpha.
             - Opponent quality matters, and environmental response requires enough previous matches to be meaningful.
             - Environmental effects are capped and conservative.
             - Outputs are statistical estimates only and are not staking, bet sizing, or investment recommendations.

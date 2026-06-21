@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.backtest import run_backtest  # noqa: E402
+from src.model_policy import get_current_model_policy  # noqa: E402
 from src.utils import today_iso  # noqa: E402
 
 
@@ -41,6 +42,7 @@ def main() -> None:
     qa_aliases = _frame(result.get("qa_aliases"))
     qa_summary = result.get("qa_summary", {})
     warning = str(result.get("warning", ""))
+    policy = get_current_model_policy()
 
     print(f"completed matches: {len(matches):,}")
     if warning:
@@ -76,6 +78,13 @@ def main() -> None:
                     f"Completed matches used: `{len(matches):,}`",
                     "",
                     f"Warning: {warning}",
+                    "",
+                    "## Model Policy",
+                    "",
+                    f"Primary model mode: `{policy['primary_model_mode']}`",
+                    f"Behavior status: `{policy['behavior_status']}`",
+                    f"Behavior default blend: `{float(policy['behavior_default_blend']):.2f}`",
+                    f"Strict validation summary: {policy['reason']}",
                     "",
                     "## Summary Metrics",
                     "",

@@ -9,6 +9,7 @@ import pandas as pd
 from scipy.stats import poisson
 
 from src.climate import get_venue_environment, summarize_environment_adjustment
+from src.model_policy import get_current_model_policy, model_policy_label
 from src.odds import decimal_odds_or_nan
 from src.ratings import neutral_team_rating, rating_row_for_team
 from src.utils import clamp, coerce_bool, coerce_float
@@ -234,7 +235,10 @@ def alpha_table(
     away_team: str,
     probs: Dict[str, float],
     market_odds: pd.DataFrame,
+    model_mode: str | None = None,
 ) -> pd.DataFrame:
+    policy = get_current_model_policy()
+    active_mode = model_mode or str(policy["primary_model_mode"])
     pmap = market_probability_map(home_team, away_team, probs)
     odds_df = market_odds.copy() if market_odds is not None else pd.DataFrame()
     for col in ["match_id", "market", "selection", "odds", "source", "last_updated"]:
@@ -257,6 +261,11 @@ def alpha_table(
                 "market": market,
                 "selection": selection,
                 "model_prob": p,
+                "primary_model_probability": p,
+                "behavior_diagnostic_probability": pd.NA,
+                "behavior_probability_delta": pd.NA,
+                "model_policy": model_policy_label(policy),
+                "edge_source": "primary_model" if active_mode == policy["primary_model_mode"] else "diagnostic_behavior_view",
                 "fair_odds": fair,
                 "market_odds": odds,
                 "alpha_ev": ev,
@@ -344,8 +353,11 @@ def run_match_model(
     venues: pd.DataFrame,
     market_odds: pd.DataFrame,
     cfg: ModelConfig | None = None,
+    model_mode: str | None = None,
 ) -> Dict[str, Any]:
     cfg = cfg or ModelConfig()
+    policy = get_current_model_policy()
+    active_mode = model_mode or str(getattr(teams, "attrs", {}).get("model_mode", policy["primary_model_mode"]))
     home_name = str(match_row["home"])
     away_name = str(match_row["away"])
     home = _team_row(teams, home_name)
@@ -361,7 +373,7 @@ def run_match_model(
     hxg, axg, components = expected_goals(home, away, env, cfg)
     mat = score_matrix(hxg, axg, cfg.max_goals)
     probs = outcome_probs(mat)
-    alpha = alpha_table(str(match_row["match_id"]), home_name, away_name, probs, odds_df)
+    alpha = alpha_table(str(match_row["match_id"]), home_name, away_name, probs, odds_df, model_mode=active_mode)
     confidence = model_confidence(home, away, env, match_odds)
 
     return {
@@ -379,4 +391,6 @@ def run_match_model(
         "home_inputs": home,
         "away_inputs": away,
         "confidence": confidence,
+        "model_mode": active_mode,
+        "model_policy": policy,
     }

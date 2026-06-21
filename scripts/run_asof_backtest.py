@@ -19,6 +19,7 @@ from src.asof_backtest import (  # noqa: E402
 from src.backtest import calculate_backtest_metrics, load_completed_matches_for_backtest  # noqa: E402
 from src.config import DATA_DIR  # noqa: E402
 from src.historical_data import load_historical_matches  # noqa: E402
+from src.model_policy import get_current_model_policy  # noqa: E402
 from src.ratings import TEAM_RATING_COLUMNS  # noqa: E402
 from src.utils import read_csv_with_columns, today_iso  # noqa: E402
 
@@ -48,6 +49,7 @@ def main() -> None:
     skipped = max(len(matches) - scored_matches, 0)
     lookahead_violations = _lookahead_violations(predictions)
     insufficient = _insufficient_predictions(predictions)
+    policy = get_current_model_policy()
 
     print(f"completed matches used: {len(matches):,}")
     print(f"matches successfully scored: {scored_matches:,}")
@@ -88,6 +90,13 @@ def main() -> None:
                     f"Lookahead violations: `{lookahead_violations:,}`",
                     "",
                     ASOF_BACKTEST_WARNING,
+                    "",
+                    "## Model Policy",
+                    "",
+                    f"Primary model mode: `{policy['primary_model_mode']}`",
+                    f"Behavior status: `{policy['behavior_status']}`",
+                    f"Behavior default blend: `{float(policy['behavior_default_blend']):.2f}`",
+                    f"Strict validation summary: {policy['reason']}",
                     "",
                     "## Strict V2 Metrics",
                     "",

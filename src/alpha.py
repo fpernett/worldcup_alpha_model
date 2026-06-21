@@ -4,6 +4,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.model_policy import get_current_model_policy, model_policy_label
 from src.utils import coerce_bool, coerce_float
 
 
@@ -15,6 +16,11 @@ ALPHA_COLUMNS = [
     "model_side",
     "polymarket_side",
     "model_probability",
+    "primary_model_probability",
+    "behavior_diagnostic_probability",
+    "behavior_probability_delta",
+    "model_policy",
+    "edge_source",
     "fair_price_cents",
     "polymarket_price_cents",
     "alpha_gap_cents",
@@ -35,6 +41,7 @@ def calculate_polymarket_alpha(
     if mapped_markets is None or mapped_markets.empty:
         return pd.DataFrame(columns=ALPHA_COLUMNS)
 
+    policy = get_current_model_policy()
     rows = []
     probs = model_result.get("probs", {})
     for _, mapping in mapped_markets.iterrows():
@@ -75,6 +82,11 @@ def calculate_polymarket_alpha(
                 "model_side": model_side,
                 "polymarket_side": polymarket_side,
                 "model_probability": model_probability,
+                "primary_model_probability": model_probability,
+                "behavior_diagnostic_probability": pd.NA,
+                "behavior_probability_delta": pd.NA,
+                "model_policy": model_policy_label(policy),
+                "edge_source": "primary_model",
                 "fair_price_cents": fair_price,
                 "polymarket_price_cents": market_price,
                 "alpha_gap_cents": alpha_gap,

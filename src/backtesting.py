@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.cache import utc_now_iso
 from src.config import DATA_DIR
+from src.model_policy import get_current_model_policy, policy_export_fields
 from src.storage import append_csv, load_csv
 
 
@@ -23,6 +24,9 @@ PREDICTION_LOG_COLUMNS = [
     "model_side",
     "polymarket_side",
     "model_probability",
+    "primary_model_probability",
+    "behavior_diagnostic_probability",
+    "behavior_probability_delta",
     "fair_price_cents",
     "polymarket_price_cents",
     "alpha_gap_cents",
@@ -31,6 +35,12 @@ PREDICTION_LOG_COLUMNS = [
     "home_xg",
     "away_xg",
     "model_config_name",
+    "model_policy",
+    "primary_model_mode",
+    "behavior_status",
+    "behavior_blend_used",
+    "strict_validation_summary",
+    "edge_source",
     "mapping_confidence",
     "liquidity",
     "volume",
@@ -60,8 +70,12 @@ def save_prediction_snapshot(match_row, model_result: dict, polymarket_alpha_df:
         return
 
     kickoff = f"{match_row.get('date_utc', '')} {match_row.get('time_utc', '')} UTC"
+    policy = model_result.get("model_policy") if isinstance(model_result, dict) else None
+    if not isinstance(policy, dict):
+        policy = get_current_model_policy()
     rows = []
     for _, alpha in polymarket_alpha_df.iterrows():
+        export_policy = policy_export_fields(policy, behavior_blend_used=alpha.get("behavior_blend_used", False))
         rows.append(
             {
                 "timestamp_utc": utc_now_iso(),
@@ -75,6 +89,9 @@ def save_prediction_snapshot(match_row, model_result: dict, polymarket_alpha_df:
                 "model_side": alpha.get("model_side", ""),
                 "polymarket_side": alpha.get("polymarket_side", ""),
                 "model_probability": alpha.get("model_probability", pd.NA),
+                "primary_model_probability": alpha.get("primary_model_probability", alpha.get("model_probability", pd.NA)),
+                "behavior_diagnostic_probability": alpha.get("behavior_diagnostic_probability", pd.NA),
+                "behavior_probability_delta": alpha.get("behavior_probability_delta", pd.NA),
                 "fair_price_cents": alpha.get("fair_price_cents", pd.NA),
                 "polymarket_price_cents": alpha.get("polymarket_price_cents", pd.NA),
                 "alpha_gap_cents": alpha.get("alpha_gap_cents", pd.NA),
@@ -83,6 +100,12 @@ def save_prediction_snapshot(match_row, model_result: dict, polymarket_alpha_df:
                 "home_xg": model_result.get("hxg", pd.NA),
                 "away_xg": model_result.get("axg", pd.NA),
                 "model_config_name": "Dashboard",
+                "model_policy": alpha.get("model_policy", export_policy["model_policy"]),
+                "primary_model_mode": export_policy["primary_model_mode"],
+                "behavior_status": export_policy["behavior_status"],
+                "behavior_blend_used": export_policy["behavior_blend_used"],
+                "strict_validation_summary": export_policy["strict_validation_summary"],
+                "edge_source": alpha.get("edge_source", "primary_model"),
                 "mapping_confidence": alpha.get("mapping_confidence", ""),
                 "liquidity": alpha.get("liquidity", pd.NA),
                 "volume": alpha.get("volume", pd.NA),

@@ -14,6 +14,7 @@ from src.backtest_diagnostics import (
 )
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches
 from src.model import ModelConfig, run_match_model
+from src.model_policy import get_current_model_policy, policy_export_fields
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings, _normalise_ratings
 from src.team_behavior import load_team_behavior
 from src.team_names import load_team_name_aliases_df
@@ -59,6 +60,11 @@ BACKTEST_PREDICTION_COLUMNS = [
     "actual_result_prob",
     "baseline_warning",
     "log_loss_1x2",
+    "model_policy",
+    "primary_model_mode",
+    "behavior_status",
+    "behavior_blend_used",
+    "strict_validation_summary",
 ]
 
 BACKTEST_METRIC_COLUMNS = [
@@ -155,7 +161,10 @@ def run_model_for_backtest_match(
     venues = venues_df if venues_df is not None else load_venues()
     odds = market_odds_df if market_odds_df is not None else pd.DataFrame()
 
-    result = run_match_model(row, teams, venues, odds, cfg or ModelConfig())
+    try:
+        result = run_match_model(row, teams, venues, odds, cfg or ModelConfig(), model_mode=mode)
+    except TypeError:
+        result = run_match_model(row, teams, venues, odds, cfg or ModelConfig())
     probs = result.get("probs", {})
     actual_result = classify_actual_result(row.get("home_goals"), row.get("away_goals"))
     actual_prob = _actual_result_probability(probs, actual_result)
@@ -163,6 +172,10 @@ def run_model_for_backtest_match(
     home_goals = coerce_float(row.get("home_goals"), 0.0)
     away_goals = coerce_float(row.get("away_goals"), 0.0)
 
+    policy_fields = policy_export_fields(
+        get_current_model_policy(),
+        behavior_blend_used=mode in {"behavior_adjusted", "behavior_adjusted_asof"},
+    )
     return {
         "model_mode": mode,
         "match_id": str(row.get("match_id", "")),
@@ -186,6 +199,7 @@ def run_model_for_backtest_match(
         "actual_result_prob": actual_prob,
         "baseline_warning": BACKTEST_LOOKAHEAD_WARNING if mode == "behavior_adjusted" else "",
         "log_loss_1x2": _safe_log_loss(actual_prob),
+        **policy_fields,
     }
 
 
@@ -236,7 +250,7 @@ def run_backtest(
         warning = BACKTEST_LOOKAHEAD_WARNING
 
     baseline_teams = _manual_team_ratings()
-    behavior_teams = get_team_ratings()
+    behavior_teams = _behavior_adjusted_team_ratings()
     team_behavior = load_team_behavior()
     aliases = load_team_name_aliases_df()
     venues = load_venues()
@@ -262,6 +276,7 @@ def run_backtest(
     qa_aliases = audit_backtest_team_aliases(matches, baseline_teams, aliases)
     qa_summary = build_backtest_qa_summary(matches, qa_rating_coverage, qa_match_inputs, qa_aliases)
 
+    predictions = _ensure_columns(predictions, BACKTEST_PREDICTION_COLUMNS)
     return {
         "matches": matches.reset_index(drop=True),
         "predictions": predictions[BACKTEST_PREDICTION_COLUMNS].reset_index(drop=True),
@@ -582,12 +597,27 @@ def _ratings_for_mode(mode: str) -> pd.DataFrame:
     if mode == "baseline_manual":
         return _manual_team_ratings()
     if mode == "behavior_adjusted":
-        return get_team_ratings()
+        return _behavior_adjusted_team_ratings()
     raise ValueError(f"Unknown backtest mode: {mode}")
 
 
 def _manual_team_ratings() -> pd.DataFrame:
     return _normalise_ratings(read_csv_with_columns(DATA_DIR / "team_ratings.csv", TEAM_RATING_COLUMNS), "manual_csv")
+
+
+def _behavior_adjusted_team_ratings() -> pd.DataFrame:
+    try:
+        return get_team_ratings(model_mode="behavior_adjusted", behavior_blend_multiplier=1.0)
+    except TypeError:
+        return get_team_ratings()
+
+
+def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    out = df.copy() if df is not None else pd.DataFrame()
+    for col in columns:
+        if col not in out.columns:
+            out[col] = pd.NA
+    return out
 
 
 def _fallback_match_id(row: pd.Series | dict[str, Any]) -> str:

@@ -15,6 +15,7 @@ from src.backtest import (
 from src.config import DATA_DIR
 from src.elo import ELO_ASOF_COLUMNS, add_elo_to_historical_matches, build_elo_asof, calculate_rolling_elo
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches
+from src.model_policy import get_current_model_policy, policy_export_fields
 from src.ratings import TEAM_RATING_COLUMNS, _apply_behavior_blend, _normalise_ratings, rating_row_for_team
 from src.team_behavior import TEAM_BEHAVIOR_COLUMNS, build_team_behavior_table
 from src.team_names import normalize_team_name
@@ -55,6 +56,11 @@ ASOF_PREDICTION_COLUMNS = [
     "away_matches_used_recent",
     "lookahead_safe",
     "warning",
+    "model_policy",
+    "primary_model_mode",
+    "behavior_status",
+    "behavior_blend_used",
+    "strict_validation_summary",
 ]
 
 ASOF_METRIC_COLUMNS = [
@@ -358,6 +364,10 @@ def _asof_prediction_row(
         if warning:
             warnings.append(warning)
 
+    policy_fields = policy_export_fields(
+        get_current_model_policy(),
+        behavior_blend_used=mode == "behavior_adjusted_asof",
+    )
     return {
         "match_id": prediction.get("match_id", ""),
         "date_utc": prediction.get("date_utc", ""),
@@ -386,6 +396,7 @@ def _asof_prediction_row(
         "away_matches_used_recent": away_matches,
         "lookahead_safe": lookahead_safe,
         "warning": "; ".join(dict.fromkeys([warning for warning in warnings if warning])),
+        **policy_fields,
     }
 
 

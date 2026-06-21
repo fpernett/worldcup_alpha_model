@@ -210,7 +210,7 @@ team,elo,attack,defense,recent_form,fifa_rank_proxy,training_temp_c,training_hum
 
 Attack, defense, and recent form are 0-1 values. If recent match history is later added in `data/recent_matches.csv`, the app can recalculate attack, defense, and form with recency weighting.
 
-Manual ratings remain the base override values. When `data/team_behavior.csv` has acceptable quality, the app conservatively blends behavior into model inputs and exposes `attack_source`, `defense_source`, `recent_form_source`, and `behavior_blend_used` in the dashboard.
+Manual and external-benchmark-calibrated ratings remain the primary override values. The historical behavior layer is preserved as a diagnostic/explanatory layer; default primary predictions use behavior blend `0.00`.
 
 ### Historical Matches
 
@@ -364,7 +364,7 @@ Expected goals are based on:
 
 Attack and defense can be calibrated from recent match history:
 
-- primary behavior uses the latest 4 years only, capped at the latest 40 matches per team;
+- calibrated behavior diagnostics use the latest 4 years only, capped at the latest 40 matches per team;
 - attack = recency- and competition-weighted scoring behavior, with raw, old opponent-adjusted, residual, and final indices retained for diagnostics;
 - defense = recency- and competition-weighted goals conceded behavior, with raw, old opponent-adjusted, residual, and final indices retained for diagnostics;
 - recent form = points, win/draw/loss rates, and capped goal difference with recency weighting.
@@ -427,7 +427,7 @@ The dashboard and audits still show the old opponent-adjusted indices as diagnos
 - `attack_index_adjusted_old` and `defense_index_adjusted_old`: old direct opponent-quality adjustment.
 - `attack_index_residual_raw` and `defense_index_residual_raw`: uncapped performance versus Elo-based expected goals.
 - `attack_index_residual_robust` and `defense_index_residual_robust`: capped, blowout-weighted performance versus Elo-based expected goals.
-- `attack_index_final` and `defense_index_final`: primary behavior inputs used for rating blends.
+- `attack_index_final` and `defense_index_final`: calibrated behavior diagnostics used when inspecting behavior-adjusted blends.
 
 Audit Elo and residual behavior with:
 
@@ -492,7 +492,7 @@ Opponent-quality and residual behavior diagnostics:
 
 - `attack_index_raw` and `defense_index_raw` show behavior before opponent-Elo adjustment.
 - `attack_index_adjusted_old` and `defense_index_adjusted_old` show the old direct opponent-Elo adjustment.
-- `attack_index_final` and `defense_index_final` are the primary model behavior inputs.
+- `attack_index_final` and `defense_index_final` are the calibrated behavior diagnostics used by behavior-adjusted audit modes.
 - scoring against stronger opponents receives slightly more credit;
 - scoring against weaker opponents receives slightly less credit;
 - conceding against stronger opponents is penalized slightly less;
@@ -521,7 +521,7 @@ low = at least 8 recent matches
 insufficient = fewer than 8 recent matches
 ```
 
-Behavior blending into model inputs:
+Behavior diagnostic blend rules:
 
 ```text
 high/moderate: attack and defense blend up to 30%; recent form blends up to 50%
@@ -529,7 +529,7 @@ low: attack and defense blend up to 15%; recent form blends up to 25%
 insufficient: manual values only
 ```
 
-Manual ratings remain the stable base. For fixture teams missing from `data/team_ratings.csv`, the app creates a neutral base row and applies the same capped behavior blend if behavior data exist.
+Manual/external-calibrated ratings remain the stable primary base. Diagnostic behavior-adjusted runs use these same capped blend rules, but the default dashboard probability uses behavior blend `0.00`.
 
 If schedule strength is weak and the old adjusted attack index is below the raw attack index, the attack behavior blend is cut in half. If opponent-Elo or residual coverage is poor, the app uses manual inputs rather than forcing an unreliable behavior blend. If residual warnings are present, behavior blend weights are cut in half.
 
@@ -541,7 +541,7 @@ defense_delta_cap = 0.12
 recent_form_delta_cap = 0.18
 ```
 
-These caps prevent historical behavior from making implausibly large changes to the model inputs.
+These caps prevent historical behavior from making implausibly large changes when the diagnostic behavior-adjusted mode is inspected.
 
 The score matrix uses an independent Poisson model. Probabilities are normalized over the displayed score grid.
 
@@ -682,7 +682,7 @@ The **Backtesting** tab loads both logs and reports simple Brier score, log loss
 Behavior-Adjusted Backtesting v1 compares two model modes on completed matches loaded from `data/fixtures.csv` and `data/historical_matches.csv`:
 
 - `baseline_manual`: uses only the manual base ratings in `data/team_ratings.csv`.
-- `behavior_adjusted`: uses the current `get_team_ratings()` output, including conservative historical behavior blending and delta caps.
+- `behavior_adjusted`: explicitly requests conservative historical behavior blending and delta caps for evaluation.
 
 Run:
 
@@ -765,7 +765,7 @@ Default multipliers:
 Interpretation:
 
 - `0.00`: no behavior adjustment; this should match strict `baseline_manual` or be very close.
-- `1.00`: current default behavior blend.
+- `1.00`: the full historical behavior blend tested as a diagnostic alternative.
 - values below `1.00`: weakened behavior influence.
 
 Run:
@@ -798,10 +798,51 @@ Decision rule:
 
 - If no blend improves both Brier and log loss, keep behavior diagnostic-only.
 - If a weak blend from `0.05` to `0.15` improves both, consider a reduced behavior blend.
-- If `1.00` improves both, keep the current default.
+- If `1.00` improves both, consider promoting the full behavior blend after further QA.
 - Otherwise, investigate before changing defaults.
 
 This sensitivity step should be run before changing model defaults. It is evaluation-only and does not provide staking, sizing, trade execution, or betting advice.
+
+### Default Model Policy
+
+Default Model Policy v1 makes the strict-evidence-supported model the primary dashboard model:
+
+- primary model mode: `baseline_manual`;
+- primary rating inputs: manual or external-benchmark-calibrated rows from `data/team_ratings.csv`;
+- behavior status: `diagnostic_only`;
+- behavior default blend: `0.00`;
+- last validation report: `reports/blend_sensitivity_report_2026-06-21.md`.
+
+Why baseline is primary: strict as-of-date blend sensitivity found that no tested behavior blend improved both Brier score and log loss versus the no-behavior baseline. The full behavior blend (`1.00`) was worse than baseline in that strict test, so the main probability, fair odds, decimal market alpha, and Polymarket alpha use the primary baseline model by default.
+
+Behavior is still preserved as an explanatory layer. The dashboard shows behavior-adjusted as-of probabilities, behavior driver matches, residuals, schedule strength, and disagreement warnings, but behavior-only differences are not labelled as primary alpha.
+
+Market/export fields now distinguish the two layers:
+
+- `primary_model_probability`: probability used for fair odds and alpha by default;
+- `behavior_diagnostic_probability`: behavior-adjusted context probability when available;
+- `behavior_probability_delta`: behavior minus primary probability;
+- `model_policy`: current policy label;
+- `edge_source`: `primary_model` unless the user explicitly toggles diagnostic behavior probability visibility;
+- `primary_model_mode`, `behavior_status`, `behavior_blend_used`, and `strict_validation_summary`: report/export policy metadata.
+
+Evidence needed to promote behavior to primary: rerun strict as-of-date backtesting and blend sensitivity on a larger, clean sample. Behavior should improve both Brier score and log loss, remain lookahead-safe, and avoid unstable team-level helped/hurt patterns before the default blend is increased.
+
+Rerun the strict checks:
+
+```bash
+.venv/bin/python scripts/run_asof_backtest.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+
+.venv/bin/python scripts/run_blend_sensitivity.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
 
 ### Backtest QA And Rating Coverage
 

@@ -21,6 +21,7 @@ from src.feature_engineering import (
     calculate_recent_form,
     load_recent_matches,
 )
+from src.model_policy import get_current_model_policy
 from src.team_behavior import load_team_behavior
 from src.team_names import normalize_team_name
 from src.utils import clamp, coerce_float, read_csv_with_columns, today_iso
@@ -45,7 +46,11 @@ DEFENSE_DELTA_CAP = 0.12
 RECENT_FORM_DELTA_CAP = 0.18
 
 
-def get_team_ratings(force_refresh: bool = False) -> pd.DataFrame:
+def get_team_ratings(
+    force_refresh: bool = False,
+    model_mode: str | None = None,
+    behavior_blend_multiplier: float | None = None,
+) -> pd.DataFrame:
     """Return one row per team with transparent strength inputs.
 
     Hierarchy:
@@ -55,13 +60,23 @@ def get_team_ratings(force_refresh: bool = False) -> pd.DataFrame:
     4. FIFA-rank proxy defaults for missing values.
     """
     cfg = get_config()
+    policy = get_current_model_policy()
+    active_mode = model_mode or str(policy["primary_model_mode"])
+    blend_multiplier = _model_mode_behavior_multiplier(active_mode, behavior_blend_multiplier)
     warning = ""
 
     if cfg.ratings_configured and not force_refresh:
         cached = read_dataframe_cache("team_ratings_latest.csv", max_age_hours=12)
         if cached is not None and not cached.empty:
             return set_source_attrs(
-                _apply_behavior_blend(_normalise_ratings(cached, "ratings_cache")),
+                _with_rating_policy_attrs(
+                    _apply_behavior_blend(
+                        _normalise_ratings(cached, "ratings_cache"),
+                        behavior_blend_multiplier=blend_multiplier,
+                    ),
+                    active_mode,
+                    blend_multiplier,
+                ),
                 SOURCE_CACHE,
                 "data/cache/team_ratings_latest.csv",
                 cache_last_updated("team_ratings_latest.csv"),
@@ -72,14 +87,26 @@ def get_team_ratings(force_refresh: bool = False) -> pd.DataFrame:
         if api_df is not None and not api_df.empty:
             ratings = _normalise_ratings(api_df, "ratings_api")
             write_dataframe_cache(ratings, "team_ratings_latest.csv", "ratings API")
-            ratings = _apply_behavior_blend(ratings)
-            return set_source_attrs(ratings, SOURCE_API, "ratings API", utc_now_iso())
+            ratings = _apply_behavior_blend(ratings, behavior_blend_multiplier=blend_multiplier)
+            return set_source_attrs(
+                _with_rating_policy_attrs(ratings, active_mode, blend_multiplier),
+                SOURCE_API,
+                "ratings API",
+                utc_now_iso(),
+            )
         warning = error or "Ratings API returned no usable rows."
 
         cached = read_dataframe_cache("team_ratings_latest.csv", max_age_hours=None)
         if cached is not None and not cached.empty:
             return set_source_attrs(
-                _apply_behavior_blend(_normalise_ratings(cached, "ratings_cache")),
+                _with_rating_policy_attrs(
+                    _apply_behavior_blend(
+                        _normalise_ratings(cached, "ratings_cache"),
+                        behavior_blend_multiplier=blend_multiplier,
+                    ),
+                    active_mode,
+                    blend_multiplier,
+                ),
                 SOURCE_CACHE,
                 "data/cache/team_ratings_latest.csv",
                 cache_last_updated("team_ratings_latest.csv"),
@@ -91,7 +118,8 @@ def get_team_ratings(force_refresh: bool = False) -> pd.DataFrame:
         "manual_csv",
     )
     ratings = _apply_recent_match_features(local.copy())
-    ratings = _apply_behavior_blend(ratings, manual_base=local)
+    ratings = _apply_behavior_blend(ratings, manual_base=local, behavior_blend_multiplier=blend_multiplier)
+    ratings = _with_rating_policy_attrs(ratings, active_mode, blend_multiplier)
     source_label = SOURCE_LOCAL
     source_detail = "data/team_ratings.csv"
     matches_source = ratings.attrs.get("match_source_label")
@@ -106,6 +134,10 @@ def get_team_ratings(force_refresh: bool = False) -> pd.DataFrame:
         _csv_last_modified("team_ratings.csv"),
         warning=f"Ratings API unavailable; using fallback. {warning}" if warning else None,
     )
+
+
+def get_behavior_adjusted_team_ratings(force_refresh: bool = False) -> pd.DataFrame:
+    return get_team_ratings(force_refresh=force_refresh, model_mode="behavior_adjusted", behavior_blend_multiplier=1.0)
 
 
 def neutral_team_rating(team: str) -> pd.Series:
@@ -357,7 +389,7 @@ def _apply_behavior_blend(
             out.at[idx, "attack"] = round(clamp(manual_attack, 0.0, 1.0), 3)
             out.at[idx, "defense"] = round(clamp(manual_defense, 0.0, 1.0), 3)
             out.at[idx, "recent_form"] = round(clamp(manual_form, 0.0, 1.0), 3)
-            source_label = "manual_base_behavior_multiplier_0" if blend_weights is not None else "manual_base_insufficient_behavior"
+            source_label = "baseline_external_calibrated_policy" if blend_weights is not None else "manual_base_insufficient_behavior"
             out.at[idx, "attack_source"] = source_label
             out.at[idx, "defense_source"] = source_label
             out.at[idx, "recent_form_source"] = source_label
@@ -572,6 +604,24 @@ def apply_behavior_blend_multiplier(config_or_weights, multiplier: float):
     if isinstance(config_or_weights, dict):
         return {key: max(0.0, float(weight) * value) for key, weight in config_or_weights.items()}
     return config_or_weights
+
+
+def _model_mode_behavior_multiplier(model_mode: str, explicit_multiplier: float | None) -> float:
+    if explicit_multiplier is not None:
+        return max(0.0, coerce_float(explicit_multiplier, 0.0))
+    policy = get_current_model_policy()
+    if str(model_mode) == str(policy["primary_model_mode"]):
+        return coerce_float(policy["behavior_default_blend"], 0.0)
+    if str(model_mode) in {"behavior_adjusted", "behavior_adjusted_asof"}:
+        return 1.0
+    return coerce_float(policy["behavior_default_blend"], 0.0)
+
+
+def _with_rating_policy_attrs(ratings: pd.DataFrame, model_mode: str, behavior_blend_multiplier: float) -> pd.DataFrame:
+    ratings.attrs["model_mode"] = model_mode
+    ratings.attrs["behavior_blend_multiplier"] = float(behavior_blend_multiplier)
+    ratings.attrs["behavior_status"] = get_current_model_policy()["behavior_status"]
+    return ratings
 
 
 def _capped_behavior_value(manual_value: float, behavior_value: float, blend_weight: float, delta_cap: float) -> tuple[float, float, bool]:

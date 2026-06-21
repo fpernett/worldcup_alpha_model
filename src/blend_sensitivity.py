@@ -20,6 +20,7 @@ from src.backtest import calculate_backtest_metrics, run_model_for_backtest_matc
 from src.config import DATA_DIR
 from src.elo import add_elo_to_historical_matches, calculate_rolling_elo
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches
+from src.model_policy import get_current_model_policy, policy_export_fields
 from src.ratings import TEAM_RATING_COLUMNS
 from src.utils import coerce_float, read_csv_with_columns
 from src.weather import load_venues
@@ -50,6 +51,11 @@ BLEND_SENSITIVITY_PREDICTION_COLUMNS = [
     "log_loss_1x2",
     "lookahead_safe",
     "warning",
+    "model_policy",
+    "primary_model_mode",
+    "behavior_status",
+    "behavior_blend_used",
+    "strict_validation_summary",
 ]
 
 BLEND_SENSITIVITY_METRIC_COLUMNS = [
@@ -286,6 +292,10 @@ def _sensitivity_prediction_row(
         warning = str(row.get("rating_warning", "") or "")
         if warning:
             warnings.append(warning)
+    policy_fields = policy_export_fields(
+        get_current_model_policy(),
+        behavior_blend_used=float(blend_multiplier) > 0.0,
+    )
     return {
         "match_id": prediction.get("match_id", ""),
         "date_utc": prediction.get("date_utc", match.get("date_utc", "")),
@@ -309,6 +319,7 @@ def _sensitivity_prediction_row(
         "log_loss_1x2": prediction.get("log_loss_1x2", pd.NA),
         "lookahead_safe": lookahead_safe,
         "warning": "; ".join(dict.fromkeys([warning for warning in warnings if warning])),
+        **policy_fields,
     }
 
 

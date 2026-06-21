@@ -245,6 +245,9 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "model_side",
         "polymarket_side",
         "model_probability",
+        "primary_model_probability",
+        "behavior_diagnostic_probability",
+        "behavior_probability_delta",
         "fair_price_cents",
         "polymarket_price_cents",
         "alpha_gap_cents",
@@ -253,6 +256,12 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "home_xg",
         "away_xg",
         "model_config_name",
+        "model_policy",
+        "primary_model_mode",
+        "behavior_status",
+        "behavior_blend_used",
+        "strict_validation_summary",
+        "edge_source",
         "mapping_confidence",
         "liquidity",
         "volume",
@@ -278,6 +287,7 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
 
 MODEL_DEFINITION_FILES: set[str] = {
     "src/model.py",
+    "src/model_policy.py",
     "src/ratings.py",
     "src/climate.py",
     "src/weather.py",
@@ -306,6 +316,7 @@ MODEL_DEFINITION_FILES: set[str] = {
 
 METRIC_DEFINITION_FILES: set[str] = {
     "src/model.py",
+    "src/model_policy.py",
     "src/alpha.py",
     "src/sensitivity.py",
     "src/backtesting.py",
