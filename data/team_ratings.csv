@@ -16,34 +16,34 @@ Qatar,1580.0,0.45,0.43,0.47,70,31.0,60.0,manual_csv,2026-06-17,Heat-adapted prof
 Mexico,1785.0,0.66,0.64,0.66,20,22.0,60.0,manual_csv,2026-06-17,Home-country advantage
 South Korea,1765.0,0.64,0.61,0.64,23,15.0,65.0,manual_csv,2026-06-17,Organized AFC side with strong transition profile
 Algeria,1826.4,0.569,0.576,0.594,55,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Argentina,2058.8,0.597,0.624,0.651,11,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+Argentina,2058.8,0.677,0.704,0.751,11,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
 Australia,1873.2,0.547,0.579,0.585,46,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Austria,1820.5,0.595,0.579,0.614,56,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Belgium,1906.8,0.585,0.564,0.574,39,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Brazil,1969.6,0.573,0.566,0.582,27,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+Brazil,1969.6,0.653,0.646,0.659,27,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
 Cape Verde,1627.3,0.533,0.579,0.533,92,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Curaçao,1583.1,0.554,0.53,0.513,100,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Ecuador,1925.1,0.486,0.612,0.541,36,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Egypt,1760.4,0.531,0.586,0.555,67,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-France,2037.7,0.62,0.558,0.63,15,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Germany,1956.8,0.627,0.557,0.636,30,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+France,2037.7,0.7,0.638,0.73,15,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
+Germany,1956.8,0.707,0.637,0.736,30,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
 Haiti,1629.2,0.529,0.534,0.508,92,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Iran,1851.8,0.583,0.555,0.576,50,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Iraq,1727.1,0.527,0.541,0.544,73,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Ivory Coast,1763.9,0.563,0.621,0.616,66,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Japan,1935.5,0.603,0.573,0.608,34,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Jordan,1725.5,0.567,0.517,0.532,74,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Morocco,1922.8,0.581,0.628,0.64,36,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Netherlands,1938.8,0.615,0.543,0.581,33,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+Morocco,1922.8,0.661,0.708,0.74,36,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
+Netherlands,1938.8,0.695,0.623,0.657,33,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
 New Zealand,1737.7,0.562,0.52,0.527,71,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Norway,1866.6,0.644,0.568,0.638,47,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+Norway,1866.6,0.724,0.638,0.725,47,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
 Paraguay,1807.7,0.528,0.559,0.55,58,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Saudi Arabia,1684.3,0.519,0.552,0.524,81,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Scotland,1792.0,0.548,0.557,0.557,61,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Senegal,1838.8,0.581,0.571,0.59,52,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Spain,2094.3,0.6,0.586,0.622,4,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+Spain,2094.3,0.68,0.666,0.722,4,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
 Sweden,1726.7,0.597,0.492,0.561,73,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Tunisia,1737.0,0.547,0.548,0.537,71,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
 Turkey,1852.7,0.545,0.543,0.567,50,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-United States,1860.8,0.605,0.54,0.601,48,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
-Uruguay,1891.9,0.503,0.587,0.529,42,20.0,60.0,generated_from_behavior,2026-06-21,Generated from historical behavior; manual review recommended.
+United States,1860.8,0.685,0.617,0.679,48,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.
+Uruguay,1891.9,0.57,0.667,0.572,42,20.0,60.0,external_benchmark_calibrated,2026-06-21,Generated from historical behavior; manual review recommended. External benchmark calibrated from FIFA/Elo prior; formula documented; review after backtesting.

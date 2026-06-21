@@ -200,6 +200,8 @@ def classify_rating_status(row: pd.Series | dict[str, Any] | None) -> str:
     quality = _safe_text(data.get("data_quality", "")).lower()
     if "manual_reviewed" in quality:
         return "manual_reviewed"
+    if "external_benchmark_calibrated" in quality:
+        return "external_benchmark_calibrated"
     if "generated_neutral" in quality or "neutral_placeholder" in quality or "neutral_fallback" in quality:
         return "neutral_placeholder"
     if "generated_from_behavior" in quality or "manual_review_candidate" in quality:

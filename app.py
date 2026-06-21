@@ -20,6 +20,18 @@ from src.climate import get_team_training_climate, get_venue_environment, load_v
 from src.config import api_summary
 from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.environment_response import calculate_environment_response
+from src.external_benchmark_calibration import (
+    build_external_calibration_proposals,
+    external_benchmark_calibration_summary,
+    load_external_calibration_proposals,
+)
+from src.external_priors import (
+    compare_ratings_to_external_priors,
+    external_prior_review_summary,
+    load_external_priors,
+    load_manual_rating_review_sheet,
+    load_review_proposals,
+)
 from src.feature_engineering import load_recent_matches
 from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
@@ -1753,6 +1765,76 @@ for label in selected_labels:
                 ]
                 st.dataframe(
                     needs_review[[col for col in review_cols if col in needs_review.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
+
+            st.write("External Prior Review")
+            st.caption(
+                "Generated ratings avoid missing-team fallback, but important teams should be checked against an external or manual prior "
+                "before serious prediction use."
+            )
+            external_priors = load_external_priors()
+            review_proposals = load_review_proposals()
+            manual_review_sheet = load_manual_rating_review_sheet()
+            prior_comparison = compare_ratings_to_external_priors(manual_rating_rows, review_proposals, external_priors)
+            prior_summary = external_prior_review_summary(prior_comparison, manual_review_sheet)
+            st.dataframe(pd.DataFrame([prior_summary]), hide_index=True, width="stretch")
+            if not prior_comparison.empty:
+                prior_warnings = prior_comparison.loc[prior_comparison["overall_warning"].astype(str) != ""]
+                prior_cols = [
+                    "team",
+                    "proposal_attack",
+                    "proposal_defense",
+                    "proposal_recent_form",
+                    "reference_attack",
+                    "reference_defense",
+                    "reference_recent_form",
+                    "attack_disagreement",
+                    "defense_disagreement",
+                    "form_disagreement",
+                    "overall_warning",
+                    "recommended_action",
+                ]
+                st.dataframe(
+                    prior_warnings[[col for col in prior_cols if col in prior_warnings.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
+
+            st.write("External Benchmark Calibration")
+            st.caption(
+                "This compares the model's internal ratings against independent FIFA/Elo strength references. "
+                "It reduces the need for subjective manual football judgement."
+            )
+            calibration_proposals = load_external_calibration_proposals()
+            if calibration_proposals.empty:
+                calibration_proposals = build_external_calibration_proposals(manual_rating_rows, team_behavior, external_priors)
+            calibration_summary = external_benchmark_calibration_summary(calibration_proposals, manual_rating_rows)
+            st.dataframe(pd.DataFrame([calibration_summary]), hide_index=True, width="stretch")
+            if not calibration_proposals.empty:
+                calibration_warning_rows = calibration_proposals.loc[calibration_proposals["warning"].astype(str) != ""]
+                calibration_cols = [
+                    "team",
+                    "current_attack",
+                    "current_defense",
+                    "current_recent_form",
+                    "behavior_attack_final",
+                    "behavior_defense_final",
+                    "behavior_recent_form",
+                    "external_overall_strength",
+                    "calibrated_attack",
+                    "calibrated_defense",
+                    "calibrated_recent_form",
+                    "attack_delta",
+                    "defense_delta",
+                    "recent_form_delta",
+                    "data_quality_current",
+                    "data_quality_proposed",
+                    "warning",
+                ]
+                st.dataframe(
+                    calibration_warning_rows[[col for col in calibration_cols if col in calibration_warning_rows.columns]],
                     hide_index=True,
                     width="stretch",
                 )

@@ -867,6 +867,256 @@ reviewed_recent_form = 0.60 * current_recent_form + 0.40 * behavior_recent_form
 
 Proposed values are clipped to `0.35-0.90` and remain marked as candidates until a human explicitly promotes them to reviewed priors. The dashboard **Backtesting** tab shows rating review counts next to Rating Coverage so generated rows remain visible during QA.
 
+### External Prior Review
+
+External Prior Review v1 adds one more quality-control layer before generated ratings are accepted as reviewed priors. It compares current/generated ratings and review proposals against independent or manually entered reference priors. This is an audit workflow only; it does not change the model formula and does not silently replace ratings.
+
+Reference priors live in:
+
+```text
+data/team_rating_external_priors.csv
+```
+
+Required columns:
+
+```text
+team,reference_attack,reference_defense,reference_recent_form,reference_overall_strength,source,last_updated,notes
+```
+
+Use 0-1 values for the reference fields. Blank reference values are allowed and mean the team has not yet been externally checked. The v1 file is seeded with placeholder rows, not invented ratings. Fill `source`, `last_updated`, and `notes` with enough detail for another reviewer to understand where the prior came from.
+
+Audit external priors:
+
+```bash
+.venv/bin/python scripts/audit_external_priors.py
+```
+
+The audit saves:
+
+```text
+reports/external_prior_audit_YYYY-MM-DD.md
+reports/external_prior_comparison_YYYY-MM-DD.csv
+```
+
+Build the manual review worksheet:
+
+```bash
+.venv/bin/python scripts/build_rating_review_sheet.py \
+  --teams Argentina Brazil France Germany Spain Netherlands Portugal England Uruguay Morocco "United States" Norway \
+  --output data/manual_rating_review_sheet.csv
+```
+
+The worksheet includes current ratings, generated review proposals, external priors, recommended values, and empty human-review fields. If an external prior exists, recommended values blend the proposal with the reference prior:
+
+```text
+recommended_attack = 0.50 * proposal_attack + 0.50 * reference_attack
+recommended_defense = 0.50 * proposal_defense + 0.50 * reference_defense
+recommended_recent_form = 0.60 * proposal_recent_form + 0.40 * reference_recent_form
+```
+
+If no external prior exists, the worksheet keeps the proposal but marks the row as needing external-prior review. To approve a row, edit `review_status` to `approved` after human review, then run:
+
+```bash
+.venv/bin/python scripts/build_rating_review_sheet.py \
+  --output data/manual_rating_review_sheet.csv \
+  --write
+```
+
+With `--write`, only rows marked `review_status = approved` are applied, and only rows currently marked `generated_from_behavior` or `manual_review_candidate` can be updated. Rows marked `manual_reviewed` are never overwritten by this script. Approved rows become `manual_reviewed` in `data/team_ratings.csv`.
+
+This step should happen before strict backtesting v2, because strict as-of-date evaluation is only useful when the manual priors being tested are credible and clearly sourced.
+
+### External Prior Import Helper
+
+External Prior Import Helper v1 fills `data/team_rating_external_priors.csv` from a manually prepared local CSV. It does not scrape websites, does not require login-protected sources, and does not invent values. The helper converts only explicitly supplied rank, points, or Elo fields into `reference_overall_strength`; attack, defense, and recent form stay blank unless the input file explicitly includes those optional columns.
+
+Prepare:
+
+```text
+data/raw/external_team_strength.csv
+```
+
+Required input column:
+
+```text
+team
+```
+
+Recommended input columns:
+
+```text
+team,fifa_rank,fifa_points,external_elo,source,last_updated,notes
+```
+
+Optional direct prior columns:
+
+```text
+reference_attack,reference_defense,reference_recent_form
+```
+
+At least one of `fifa_rank`, `fifa_points`, or `external_elo` should be populated for a team to receive an overall-strength prior. If all three are blank, the helper keeps `reference_overall_strength` blank and reports `missing rank/Elo data`.
+
+Conversion formulas:
+
+```text
+rank_strength = 0.90 - ((rank - 1) / (max_rank - 1)) * 0.55
+points_strength = 0.35 + ((points - min_points) / (max_points - min_points)) * 0.55
+elo_strength = 0.35 + ((external_elo - min_elo) / (max_elo - min_elo)) * 0.55
+reference_overall_strength = average(available strengths)
+```
+
+Defaults:
+
+```text
+max_rank = 210
+min_points = 900
+max_points = 1900
+min_elo = 1200
+max_elo = 2200
+```
+
+All scaled values are clipped to `0.35-0.90`.
+
+Dry run:
+
+```bash
+.venv/bin/python scripts/import_external_priors.py \
+  --input data/raw/external_team_strength.csv \
+  --output data/team_rating_external_priors.csv
+```
+
+Default behavior writes proposed updates only:
+
+```text
+data/team_rating_external_priors_proposed.csv
+```
+
+It does not modify `data/team_rating_external_priors.csv`.
+
+Apply matching, nonblank updates explicitly:
+
+```bash
+.venv/bin/python scripts/import_external_priors.py \
+  --input data/raw/external_team_strength.csv \
+  --output data/team_rating_external_priors.csv \
+  --write
+```
+
+After importing external priors, rerun:
+
+```bash
+.venv/bin/python scripts/audit_external_priors.py
+.venv/bin/python scripts/build_rating_review_sheet.py \
+  --teams Argentina Brazil France Germany Spain Netherlands Portugal England Uruguay Morocco "United States" Norway \
+  --output data/manual_rating_review_sheet.csv
+```
+
+### External Benchmark Rating Calibration
+
+External Benchmark Rating Calibration v1 replaces row-by-row manual approval with a transparent benchmark check. It compares internal ratings against independent FIFA/Elo-style overall-strength priors, creates conservative calibrated proposals, and only writes those proposals to `data/team_ratings.csv` when `--write` is passed.
+
+The benchmark source remains a local CSV snapshot:
+
+```text
+data/raw/external_team_strength.csv
+```
+
+Required columns:
+
+```text
+team,fifa_rank,fifa_points,external_elo,source,last_updated,notes
+```
+
+The import script also works when only `fifa_rank` and `fifa_points` are populated. Optional direct columns `reference_attack`, `reference_defense`, and `reference_recent_form` are preserved if supplied, but the app does not infer those from overall strength.
+
+Import benchmark inputs into the external prior table:
+
+```bash
+.venv/bin/python scripts/import_external_benchmarks.py \
+  --input data/raw/external_team_strength.csv \
+  --output data/team_rating_external_priors.csv
+```
+
+Apply the imported benchmark priors explicitly:
+
+```bash
+.venv/bin/python scripts/import_external_benchmarks.py \
+  --input data/raw/external_team_strength.csv \
+  --output data/team_rating_external_priors.csv \
+  --write
+```
+
+Scaling formulas:
+
+```text
+rank_strength = 0.90 - ((rank - 1) / (210 - 1)) * 0.55
+points_strength = 0.35 + ((points - 900) / (1900 - 900)) * 0.55
+elo_strength = 0.35 + ((external_elo - 1200) / (2200 - 1200)) * 0.55
+external_overall_strength = average(available scaled strengths)
+```
+
+All benchmark strengths are clipped to `0.35-0.90`; missing values stay missing.
+
+Calibration formulas for `generated_from_behavior` rows:
+
+```text
+calibrated_attack = 0.45 * current_attack + 0.25 * behavior_attack_final + 0.30 * external_overall_strength
+calibrated_defense = 0.45 * current_defense + 0.25 * behavior_defense_final + 0.30 * external_overall_strength
+calibrated_recent_form = 0.50 * current_recent_form + 0.30 * behavior_recent_form + 0.20 * external_overall_strength
+```
+
+Calibration formulas for `manual_existing` rows:
+
+```text
+calibrated_attack = 0.70 * current_attack + 0.30 * external_overall_strength
+calibrated_defense = 0.70 * current_defense + 0.30 * external_overall_strength
+calibrated_recent_form = 0.80 * current_recent_form + 0.20 * external_overall_strength
+```
+
+Delta caps keep benchmark calibration conservative:
+
+```text
+attack max change = 0.08
+defense max change = 0.08
+recent_form max change = 0.10
+```
+
+Generate calibrated proposals without modifying ratings:
+
+```bash
+.venv/bin/python scripts/calibrate_ratings_from_external.py
+```
+
+This writes:
+
+```text
+data/team_ratings_external_calibrated_proposed.csv
+```
+
+Write allowed calibrated rows explicitly:
+
+```bash
+.venv/bin/python scripts/calibrate_ratings_from_external.py --write
+```
+
+Default write behavior updates only `generated_from_behavior`, `neutral_placeholder`, and `manual_review_candidate` rows. Use `--include-manual-existing` to update existing manual rows. `manual_reviewed` rows are preserved unless `--include-reviewed` is explicitly passed.
+
+Audit calibration quality:
+
+```bash
+.venv/bin/python scripts/audit_external_benchmark_calibration.py
+```
+
+Then rerun rating coverage, backtest QA, and the backtest:
+
+```bash
+.venv/bin/python scripts/audit_rating_coverage.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup"
+.venv/bin/python scripts/audit_backtest_quality.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup"
+.venv/bin/python scripts/run_backtest.py --start-date 2026-06-11 --end-date 2026-06-21 --competition "World Cup" --save-report
+```
+
+Calibration warnings flag missing benchmarks, large internal-vs-external disagreements, behavior scores that sit far above external benchmarks, preserved reviewed rows, and delta caps. These warnings are audit signals; they do not trigger staking, trade execution, or automatic strategy changes.
+
 ## 12. Weekly Semantic Audit
 
 Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:
