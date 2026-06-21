@@ -25,6 +25,8 @@ class BehaviorConfig:
     strong_opponent_elo: float = 1700.0
     weak_opponent_elo: float = 1350.0
     min_opponent_elo_coverage: float = 0.65
+    min_residual_coverage: float = 0.65
+    residual_disagreement_threshold: float = 0.25
     max_behavior_blend: float = 0.30
     max_form_blend: float = 0.50
 

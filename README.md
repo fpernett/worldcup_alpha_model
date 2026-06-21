@@ -29,7 +29,7 @@ The dashboard opens in your browser. Select a date window, then select one or mo
 
 For each selected match, open the **Full report** tab for a report-style view with Alpha Read, data support, goal distribution, outcome donut, league context, score timeline, scoreline matrix, expected goals, team ratings, climate factors, model information, and grouped market value tables.
 
-Open the **Historical behavior** tab to inspect the calibrated recent-window behavior layer, including attacking/defensive behavior, goal-market rates, recent-vs-all-time diagnostics, environment response samples, warnings, and the before/after impact on model inputs.
+Open the **Historical behavior** tab to inspect the calibrated recent-window behavior layer, including attacking/defensive behavior, schedule strength, expected-performance residuals, goal-market rates, recent-vs-all-time diagnostics, environment response samples, warnings, and the before/after impact on model inputs.
 
 ## 3. Update Data
 
@@ -108,6 +108,15 @@ Audit recent schedule strength:
 ```
 
 The schedule audit prints opponent-Elo diagnostics and saves `reports/schedule_strength_audit_YYYY-MM-DD.md`.
+
+Audit Elo calibration and residual-based behavior:
+
+```bash
+.venv/bin/python scripts/audit_elo_calibration.py
+.venv/bin/python scripts/audit_performance_residuals.py
+```
+
+These audits compare rolling Elo with manual ratings, then show whether recent attack and defense were better or worse than expected given opponent Elo. Reports are saved under `reports/`.
 
 ## 4. Optional API Keys
 
@@ -250,7 +259,7 @@ Examples include `USA -> United States`, `Korea Republic -> South Korea`, and `C
 `data/team_behavior.csv` is rebuilt from historical matches:
 
 ```text
-team,reference_date,behavior_window_start,behavior_window_end,matches_available_all_time,matches_used_recent,oldest_match_used,latest_match_used,behavior_config_name,n_matches,weighted_goals_for,weighted_goals_for_raw,weighted_goals_for_adjusted,weighted_goals_against,weighted_goals_against_raw,weighted_goals_against_adjusted,weighted_goal_difference,all_time_goals_for,all_time_goals_against,attack_index,attack_index_raw,attack_index_adjusted,defense_index,defense_index_raw,defense_index_adjusted,recent_form_index,weighted_btts_rate,weighted_over_2_5_rate,clean_sheet_rate,failed_to_score_rate,environment_response_index,environment_sample_size,attack_data_quality,defense_data_quality,form_data_quality,environment_data_quality,overall_data_quality,behavior_warning,sample_size_warning,staleness_warning,opponent_quality_warning,mean_opponent_elo_recent,median_opponent_elo_recent,min_opponent_elo_recent,max_opponent_elo_recent,opponent_elo_coverage_recent,strong_opponent_match_count,weak_opponent_match_count,schedule_strength_label,schedule_strength_warning,opponent_adjustment_warning,last_updated
+team,reference_date,behavior_window_start,behavior_window_end,matches_available_all_time,matches_used_recent,oldest_match_used,latest_match_used,behavior_config_name,n_matches,weighted_goals_for,weighted_goals_for_raw,weighted_goals_for_adjusted,weighted_goals_against,weighted_goals_against_raw,weighted_goals_against_adjusted,weighted_goal_difference,all_time_goals_for,all_time_goals_against,attack_index,attack_index_raw,attack_index_adjusted_old,attack_index_adjusted,attack_index_residual,attack_index_final,defense_index,defense_index_raw,defense_index_adjusted_old,defense_index_adjusted,defense_index_residual,defense_index_final,weighted_goal_for_residual,weighted_goal_against_residual,weighted_result_residual,residual_coverage_recent,recent_form_index,weighted_btts_rate,weighted_over_2_5_rate,clean_sheet_rate,failed_to_score_rate,environment_response_index,environment_sample_size,attack_data_quality,defense_data_quality,form_data_quality,environment_data_quality,overall_data_quality,behavior_warning,sample_size_warning,staleness_warning,opponent_quality_warning,mean_opponent_elo_recent,median_opponent_elo_recent,min_opponent_elo_recent,max_opponent_elo_recent,opponent_elo_coverage_recent,strong_opponent_match_count,weak_opponent_match_count,schedule_strength_label,schedule_strength_warning,opponent_adjustment_warning,residual_warning,last_updated
 ```
 
 Rebuild it with the sidebar **Update API data** button, the historical API ingestion command, or the generic CSV importer:
@@ -347,8 +356,8 @@ Expected goals are based on:
 Attack and defense can be calibrated from recent match history:
 
 - primary behavior uses the latest 4 years only, capped at the latest 40 matches per team;
-- attack = recency- and competition-weighted scoring behavior, adjusted for opponent quality and capped per-match goal contribution;
-- defense = recency- and competition-weighted goals conceded behavior, adjusted for opponent quality and capped per-match goal contribution;
+- attack = recency- and competition-weighted scoring behavior, with raw, old opponent-adjusted, residual, and final indices retained for diagnostics;
+- defense = recency- and competition-weighted goals conceded behavior, with raw, old opponent-adjusted, residual, and final indices retained for diagnostics;
 - recent form = points, win/draw/loss rates, and capped goal difference with recency weighting.
 
 Historical Behavior Calibration v1 uses `data/historical_matches.csv` to calculate:
@@ -378,6 +387,38 @@ Run it after importing or editing historical results:
 .venv/bin/python scripts/rebuild_elo.py --rebuild-behavior
 ```
 
+Elo Calibration + Expected Performance Residuals v1 validates that rolling Elo is behaving plausibly and uses it to estimate what each team should have done in each match:
+
+```text
+expected_result_score = 1 / (1 + 10 ** ((opponent_elo - adjusted_team_elo) / 400))
+expected_goals_for = 1.35 * exp((team_elo_pre - opponent_elo) / 900)
+```
+
+Expected goals are capped between `0.25` and `3.50`. Result residual is actual result score minus expected result score. Goals-for residual is actual goals for minus expected goals for. Goals-against residual is actual goals against minus expected goals against.
+
+Simple opponent boosting was useful as a first diagnostic, but it could make almost every strong-schedule team look better on both attack and defense. Residual behavior is more discriminative because it asks whether the team actually beat, matched, or missed the Elo-based expectation.
+
+Final behavior indices use residual calibration conservatively:
+
+```text
+attack_index_final = 0.70 * attack_index_raw + 0.30 * attack_index_residual
+defense_index_final = 0.70 * defense_index_raw + 0.30 * defense_index_residual
+```
+
+The dashboard and audits still show the old opponent-adjusted indices as diagnostics:
+
+- `attack_index_raw` and `defense_index_raw`: recent weighted behavior before opponent adjustment.
+- `attack_index_adjusted_old` and `defense_index_adjusted_old`: old direct opponent-quality adjustment.
+- `attack_index_residual` and `defense_index_residual`: performance versus Elo-based expected goals.
+- `attack_index_final` and `defense_index_final`: primary behavior inputs used for rating blends.
+
+Audit Elo and residual behavior with:
+
+```bash
+.venv/bin/python scripts/audit_elo_calibration.py
+.venv/bin/python scripts/audit_performance_residuals.py
+```
+
 All-time behavior remains diagnostic only. Primary attack, defense, form, and goal-market behavior use the recent calibrated window.
 
 Recency weighting:
@@ -400,6 +441,9 @@ continental_weight = 1.25
 world_cup_weight = 1.50
 opponent_adjustment_strength = 0.25
 goal_contribution_cap = 4.00
+min_opponent_elo_coverage = 0.65
+min_residual_coverage = 0.65
+residual_disagreement_threshold = 0.25
 max_behavior_blend = 0.30
 max_form_blend = 0.50
 ```
@@ -417,14 +461,16 @@ other = 0.80
 
 The match weight is recency weight times competition weight. Opponent quality is then applied conservatively to goals-for and goals-against contributions. If `opponent_elo` is missing, the app uses manual team ratings where available, otherwise a transparent recent-results fallback. The opponent modifier is capped between `0.75` and `1.25`.
 
-Opponent-quality behavior diagnostics:
+Opponent-quality and residual behavior diagnostics:
 
 - `attack_index_raw` and `defense_index_raw` show behavior before opponent-Elo adjustment.
-- `attack_index_adjusted` and `defense_index_adjusted` are the primary model behavior inputs.
+- `attack_index_adjusted_old` and `defense_index_adjusted_old` show the old direct opponent-Elo adjustment.
+- `attack_index_final` and `defense_index_final` are the primary model behavior inputs.
 - scoring against stronger opponents receives slightly more credit;
 - scoring against weaker opponents receives slightly less credit;
 - conceding against stronger opponents is penalized slightly less;
 - conceding against weaker opponents is penalized slightly more.
+- residual warnings flag cases where the old opponent adjustment boosted a team but its actual goals or goals allowed were worse than Elo expectation.
 
 Schedule strength:
 
@@ -458,7 +504,7 @@ insufficient: manual values only
 
 Manual ratings remain the stable base. For fixture teams missing from `data/team_ratings.csv`, the app creates a neutral base row and applies the same capped behavior blend if behavior data exist.
 
-If schedule strength is weak and the adjusted attack index is below the raw attack index, the attack behavior blend is cut in half. If opponent-Elo coverage is poor, the app uses manual inputs rather than forcing an unreliable behavior blend.
+If schedule strength is weak and the old adjusted attack index is below the raw attack index, the attack behavior blend is cut in half. If opponent-Elo or residual coverage is poor, the app uses manual inputs rather than forcing an unreliable behavior blend. If residual warnings are present, behavior blend weights are cut in half.
 
 Behavior movement caps:
 
@@ -492,7 +538,7 @@ Report sections:
 - **Expected goals chart**: adjusted xG with simple uncertainty bands.
 - **Team ratings**: attack and defense inputs with percentile labels.
 - **Climate factors**: altitude, temperature, humidity, precipitation, and wind categories with conservative multipliers.
-- **Historical behavior**: recency-weighted team behavior summary, recent long-format match history, environment response, and manual-vs-behavior model input impact.
+- **Historical behavior**: recency-weighted team behavior summary, schedule strength, expected-performance residuals, recent long-format match history, environment response, and manual-vs-behavior model input impact.
 - **Model information**: model version, training data count/range, source status, and backtest placeholder.
 - **Market value tables**: grouped decimal-odds alpha and Polymarket alpha screens.
 
@@ -645,9 +691,11 @@ python -m pytest -q
 .venv/bin/python scripts/rebuild_elo.py --rebuild-behavior
 .venv/bin/python scripts/audit_behavior_calibration.py
 .venv/bin/python scripts/audit_schedule_strength.py
+.venv/bin/python scripts/audit_elo_calibration.py
+.venv/bin/python scripts/audit_performance_residuals.py
 ```
 
-The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, historical CSV import, rolling Elo, opponent-quality adjustment, schedule-strength diagnostics, behavior calibration, rating blend caps, audit-script output, and Full report helper outputs.
+The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, historical CSV import, rolling Elo, Elo calibration, expected-performance residuals, opponent-quality adjustment, schedule-strength diagnostics, behavior calibration, rating blend caps, audit-script output, and Full report helper outputs.
 
 ## 14. Known Limitations
 
@@ -658,6 +706,8 @@ The tests check probability sums, fair odds, score matrix normalization, missing
 - Opponent quality fallback is transparent but approximate when no external Elo exists.
 - Rolling Elo depends on the completeness and ordering of imported historical results.
 - Rolling Elo is not an official FIFA rating and should be treated as an internal schedule-strength estimate.
+- Residual performance is an approximation from Elo and goals, not causal proof of team quality.
+- Expected goals from Elo are transparent and capped, but they are not a substitute for real xG or lineup-level information.
 - Recent behavior can differ sharply from all-time history; the dashboard flags those cases instead of treating them as causal proof.
 - Environmental response requires enough previous matches to be meaningful.
 - Environmental effects are capped and conservative.

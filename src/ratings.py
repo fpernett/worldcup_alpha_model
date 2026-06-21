@@ -462,13 +462,21 @@ def _behavior_blend_weights(row: pd.Series) -> dict[str, float] | None:
         }
 
     coverage = coerce_float(row.get("opponent_elo_coverage_recent"), 1.0)
+    residual_coverage = coerce_float(row.get("residual_coverage_recent"), 1.0)
     schedule_label = str(row.get("schedule_strength_label", "") or "").lower()
-    if schedule_label == "unknown" or coverage < DEFAULT_BEHAVIOR_CONFIG.min_opponent_elo_coverage:
+    if (
+        schedule_label == "unknown"
+        or coverage < DEFAULT_BEHAVIOR_CONFIG.min_opponent_elo_coverage
+        or residual_coverage < DEFAULT_BEHAVIOR_CONFIG.min_residual_coverage
+    ):
         return None
     attack_raw = coerce_float(row.get("attack_index_raw"), float("nan"))
-    attack_adjusted = coerce_float(row.get("attack_index_adjusted", row.get("attack_index")), float("nan"))
+    attack_adjusted = coerce_float(row.get("attack_index_adjusted_old", row.get("attack_index_adjusted")), float("nan"))
     if schedule_label == "weak" and not pd.isna(attack_raw) and not pd.isna(attack_adjusted) and attack_adjusted < attack_raw:
         weights["attack"] *= 0.50
+    residual_warning = str(row.get("residual_warning", "") or "").strip()
+    if residual_warning:
+        weights = {key: value * 0.50 for key, value in weights.items()}
     return weights
 
 

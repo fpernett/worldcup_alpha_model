@@ -89,10 +89,20 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "all_time_goals_against",
         "attack_index",
         "attack_index_raw",
+        "attack_index_adjusted_old",
         "attack_index_adjusted",
+        "attack_index_residual",
+        "attack_index_final",
         "defense_index",
         "defense_index_raw",
+        "defense_index_adjusted_old",
         "defense_index_adjusted",
+        "defense_index_residual",
+        "defense_index_final",
+        "weighted_goal_for_residual",
+        "weighted_goal_against_residual",
+        "weighted_result_residual",
+        "residual_coverage_recent",
         "recent_form_index",
         "weighted_btts_rate",
         "weighted_over_2_5_rate",
@@ -119,6 +129,7 @@ EXPECTED_CSV_SCHEMAS: dict[str, list[str]] = {
         "schedule_strength_label",
         "schedule_strength_warning",
         "opponent_adjustment_warning",
+        "residual_warning",
         "last_updated",
     ],
     "data/venues.csv": [
@@ -226,6 +237,8 @@ MODEL_DEFINITION_FILES: set[str] = {
     "src/recency.py",
     "src/behavior_calibration.py",
     "src/elo.py",
+    "src/elo_calibration.py",
+    "src/performance_residuals.py",
     "src/environment_response.py",
 }
 
@@ -241,6 +254,8 @@ METRIC_DEFINITION_FILES: set[str] = {
     "src/recency.py",
     "src/behavior_calibration.py",
     "src/elo.py",
+    "src/elo_calibration.py",
+    "src/performance_residuals.py",
     "src/historical_ingestion.py",
 }
 

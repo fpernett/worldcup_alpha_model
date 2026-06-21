@@ -440,6 +440,10 @@ def schedule_strength_display(team_behavior: pd.DataFrame, teams: list[str]) -> 
     selected = behavior.loc[behavior["team"].astype(str).str.lower().isin([team.lower() for team in teams])].copy()
     if selected.empty:
         return selected
+    if "attack_index_adjusted_old" not in selected.columns and "attack_index_adjusted" in selected.columns:
+        selected["attack_index_adjusted_old"] = selected["attack_index_adjusted"]
+    if "defense_index_adjusted_old" not in selected.columns and "defense_index_adjusted" in selected.columns:
+        selected["defense_index_adjusted_old"] = selected["defense_index_adjusted"]
     columns = [
         "team",
         "mean_opponent_elo_recent",
@@ -447,9 +451,9 @@ def schedule_strength_display(team_behavior: pd.DataFrame, teams: list[str]) -> 
         "weak_opponent_match_count",
         "schedule_strength_label",
         "attack_index_raw",
-        "attack_index_adjusted",
+        "attack_index_adjusted_old",
         "defense_index_raw",
-        "defense_index_adjusted",
+        "defense_index_adjusted_old",
         "opponent_adjustment_warning",
         "schedule_strength_warning",
     ]
@@ -457,7 +461,13 @@ def schedule_strength_display(team_behavior: pd.DataFrame, teams: list[str]) -> 
         if col not in selected.columns:
             selected[col] = pd.NA
     display = selected[columns].copy()
-    for col in ["mean_opponent_elo_recent", "attack_index_raw", "attack_index_adjusted", "defense_index_raw", "defense_index_adjusted"]:
+    for col in [
+        "mean_opponent_elo_recent",
+        "attack_index_raw",
+        "attack_index_adjusted_old",
+        "defense_index_raw",
+        "defense_index_adjusted_old",
+    ]:
         display[col] = display[col].map(lambda x: behavior_metric_display(x))
     display["warnings"] = display.apply(
         lambda row: "; ".join(
@@ -477,12 +487,103 @@ def schedule_strength_display(team_behavior: pd.DataFrame, teams: list[str]) -> 
             "weak_opponent_match_count",
             "schedule_strength_label",
             "attack_index_raw",
-            "attack_index_adjusted",
+            "attack_index_adjusted_old",
             "defense_index_raw",
-            "defense_index_adjusted",
+            "defense_index_adjusted_old",
             "warnings",
         ]
+    ].rename(
+        columns={
+            "attack_index_adjusted_old": "attack_index_adjusted_old_opponent",
+            "defense_index_adjusted_old": "defense_index_adjusted_old_opponent",
+        }
+    )
+
+
+def expected_performance_display(team_behavior: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+    behavior = team_behavior.copy() if team_behavior is not None else pd.DataFrame()
+    if behavior.empty or "team" not in behavior.columns:
+        return pd.DataFrame()
+    selected = behavior.loc[behavior["team"].astype(str).str.lower().isin([team.lower() for team in teams])].copy()
+    if selected.empty:
+        return selected
+    if "attack_index_adjusted_old" not in selected.columns and "attack_index_adjusted" in selected.columns:
+        selected["attack_index_adjusted_old"] = selected["attack_index_adjusted"]
+    if "defense_index_adjusted_old" not in selected.columns and "defense_index_adjusted" in selected.columns:
+        selected["defense_index_adjusted_old"] = selected["defense_index_adjusted"]
+    columns = [
+        "team",
+        "mean_opponent_elo_recent",
+        "attack_index_raw",
+        "attack_index_adjusted_old",
+        "attack_index_residual",
+        "attack_index_final",
+        "defense_index_raw",
+        "defense_index_adjusted_old",
+        "defense_index_residual",
+        "defense_index_final",
+        "weighted_goal_for_residual",
+        "weighted_goal_against_residual",
+        "weighted_result_residual",
+        "residual_coverage_recent",
+        "residual_warning",
+        "opponent_adjustment_warning",
     ]
+    for col in columns:
+        if col not in selected.columns:
+            selected[col] = pd.NA
+    display = selected[columns].copy()
+    for col in [
+        "mean_opponent_elo_recent",
+        "attack_index_raw",
+        "attack_index_adjusted_old",
+        "attack_index_residual",
+        "attack_index_final",
+        "defense_index_raw",
+        "defense_index_adjusted_old",
+        "defense_index_residual",
+        "defense_index_final",
+    ]:
+        display[col] = display[col].map(lambda x: behavior_metric_display(x))
+    for col in ["weighted_goal_for_residual", "weighted_goal_against_residual", "weighted_result_residual"]:
+        display[col] = display[col].map(lambda x: behavior_delta_display(x))
+    display["residual_coverage_recent"] = display["residual_coverage_recent"].map(
+        lambda x: behavior_metric_display(x, as_pct=True)
+    )
+    display["warnings"] = display.apply(
+        lambda row: "; ".join(
+            [
+                str(row.get(col, "") or "")
+                for col in ["residual_warning", "opponent_adjustment_warning"]
+                if str(row.get(col, "") or "").strip()
+            ]
+        ),
+        axis=1,
+    )
+    return display[
+        [
+            "team",
+            "mean_opponent_elo_recent",
+            "attack_index_raw",
+            "attack_index_adjusted_old",
+            "attack_index_residual",
+            "attack_index_final",
+            "weighted_goal_for_residual",
+            "defense_index_raw",
+            "defense_index_adjusted_old",
+            "defense_index_residual",
+            "defense_index_final",
+            "weighted_goal_against_residual",
+            "weighted_result_residual",
+            "residual_coverage_recent",
+            "warnings",
+        ]
+    ].rename(
+        columns={
+            "attack_index_adjusted_old": "attack_index_adjusted_old_opponent",
+            "defense_index_adjusted_old": "defense_index_adjusted_old_opponent",
+        }
+    )
 
 
 def historical_match_history_display(matches_df: pd.DataFrame, team: str, reference_date, limit: int = 20) -> pd.DataFrame:
@@ -1493,6 +1594,17 @@ for label in selected_labels:
         else:
             st.dataframe(schedule_display, hide_index=True, width="stretch")
             for warning_text in schedule_display.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
+                if warning_text:
+                    st.warning(warning_text)
+
+        st.subheader("Expected Performance vs Actual Performance")
+        st.caption("This checks whether a team performed better or worse than expected given the strength of its opponents.")
+        residual_display = expected_performance_display(team_behavior, [result["home"], result["away"]])
+        if residual_display.empty:
+            st.caption("No residual-based performance diagnostics are available.")
+        else:
+            st.dataframe(residual_display, hide_index=True, width="stretch")
+            for warning_text in residual_display.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
                 if warning_text:
                     st.warning(warning_text)
 
