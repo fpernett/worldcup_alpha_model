@@ -13,6 +13,7 @@ from src.utils import read_csv_with_columns
 TEAM_NAME_ALIAS_COLUMNS = ["alias", "canonical"]
 
 DEFAULT_TEAM_ALIASES = {
+    "col": "Colombia",
     "usa": "United States",
     "u.s.a.": "United States",
     "usmnt": "United States",
@@ -26,6 +27,9 @@ DEFAULT_TEAM_ALIASES = {
     "bosnia and herzegovina": "Bosnia and Herzegovina",
     "bosnia": "Bosnia and Herzegovina",
     "dr congo": "DR Congo",
+    "cdr": "DR Congo",
+    "cod": "DR Congo",
+    "drc": "DR Congo",
     "congo dr": "DR Congo",
     "congo, the democratic republic of the": "DR Congo",
     "democratic republic of congo": "DR Congo",
@@ -38,11 +42,49 @@ DEFAULT_TEAM_ALIASES = {
     "bosnia h": "Bosnia and Herzegovina",
     "curacao": "Curaçao",
     "curaçao": "Curaçao",
+    "cuw": "Curaçao",
+    "cur": "Curaçao",
     "ir iran": "Iran",
+    "iri": "Iran",
     "iran": "Iran",
+    "ksa": "Saudi Arabia",
     "turkiye": "Turkey",
     "türkiye": "Turkey",
+    "tur": "Turkey",
     "turkey": "Turkey",
+    "kor": "South Korea",
+    "cze": "Czechia",
+    "civ": "Ivory Coast",
+}
+
+POLYMARKET_TEAM_CODE_ALIASES = {
+    "CDR": "DR Congo",
+    "COD": "DR Congo",
+    "DRC": "DR Congo",
+    "COL": "Colombia",
+    "USA": "United States",
+    "KOR": "South Korea",
+    "CZE": "Czechia",
+    "CUW": "Curaçao",
+    "CUR": "Curaçao",
+    "CIV": "Ivory Coast",
+    "IRI": "Iran",
+    "IRN": "Iran",
+    "KSA": "Saudi Arabia",
+    "TUR": "Turkey",
+}
+
+POLYMARKET_CANONICAL_TEAM_CODES = {
+    "Colombia": ["COL"],
+    "DR Congo": ["CDR", "COD", "DRC"],
+    "United States": ["USA", "US"],
+    "South Korea": ["KOR", "KR"],
+    "Czechia": ["CZE"],
+    "Curaçao": ["CUW", "CUR"],
+    "Ivory Coast": ["CIV"],
+    "Iran": ["IRI", "IRN"],
+    "Saudi Arabia": ["KSA"],
+    "Turkey": ["TUR"],
 }
 
 
@@ -58,6 +100,28 @@ def normalize_team_name(name: str) -> str:
 def team_name_key(name: str) -> str:
     """Return the accent-insensitive comparison key used for aliases."""
     return _alias_key(name)
+
+
+def normalize_polymarket_team_code(code: str) -> str:
+    """Return canonical team name for a Polymarket sports abbreviation."""
+    value = str(code or "").strip().upper()
+    if not value:
+        return ""
+    return POLYMARKET_TEAM_CODE_ALIASES.get(value, normalize_team_name(value))
+
+
+def polymarket_team_codes(team: str) -> list[str]:
+    """Return Polymarket-specific code variants for a canonical team."""
+    canonical = normalize_team_name(team)
+    configured = POLYMARKET_CANONICAL_TEAM_CODES.get(canonical, [])
+    generic = []
+    raw = str(canonical or "").strip()
+    if raw:
+        letters = re.findall(r"[A-Za-z0-9]+", raw)
+        fallback = "".join(letters)[:3].upper()
+        if fallback:
+            generic.append(fallback)
+    return list(dict.fromkeys([code.upper() for code in [*configured, *generic] if str(code).strip()]))
 
 
 def load_team_name_aliases_df(include_defaults: bool = True) -> pd.DataFrame:

@@ -335,16 +335,143 @@ If Gamma is unavailable or the API call fails, the app uses cache or
 Edit `data/market_mappings.csv` to confirm or override a fuzzy mapping:
 
 ```text
-match_id,market_id,market_type,model_side,polymarket_side,manual_confirmed,notes
+match_id,market_id,market_type,model_side,polymarket_side,manual_confirmed,mapping_confidence,mapping_score,mapping_reason,reject_reason,notes
 ```
 
 Example:
 
 ```text
-66457042,pm_market_id,match_winner_home,home_win,YES,1,England win market confirmed manually
+66457042,pm_market_id,match_winner_home,home_win,YES,1,manual,100,England win market confirmed manually,,England win market confirmed manually
 ```
 
 Manual mappings override automatic fuzzy matching.
+
+### Polymarket Match Search Precision
+
+Country-only Polymarket searches can return unrelated political or macro markets. For example, searching only `Colombia` can return election, president, inflation, or polling markets instead of a football match market.
+
+The selected-match search now builds matchup-specific queries such as:
+
+```text
+Colombia DR Congo
+Colombia vs DR Congo
+Colombia v DR Congo
+COL COD
+World Cup Colombia DR Congo
+FIFA World Cup Colombia DR Congo
+Will Colombia beat DR Congo
+Will DR Congo beat Colombia
+Colombia draw DR Congo
+```
+
+The mapper scores returned markets before they can be used:
+
+- positive signals: both teams or aliases found, matchup words such as `vs` or `beat`, sports terms such as `World Cup`, `FIFA`, `soccer`, `football`, and sports-like category labels;
+- rejection signals: political/non-sports terms such as `election`, `president`, `congress`, `poll`, `vote`, `war`, `tariff`, `inflation`, `crypto`, `bitcoin`, `fed`, and `interest rate`;
+- country-only or one-team-only markets are diagnostics only and are not auto-mapped for selected-match alpha.
+
+Automatic mapping is conservative:
+
+- only `high` confidence candidates are auto-suggested;
+- automatic suggestions always keep `manual_confirmed = False`;
+- medium/low candidates remain visible only as diagnostics;
+- rejected candidates are not used in alpha tables.
+
+Audit a matchup search:
+
+```bash
+.venv/bin/python scripts/audit_polymarket_match_search.py \
+  --home Colombia \
+  --away "DR Congo" \
+  --competition "World Cup"
+```
+
+This writes:
+
+```text
+reports/polymarket_match_search_YYYY-MM-DD.csv
+reports/polymarket_match_search_YYYY-MM-DD.md
+```
+
+To manually confirm a mapping, copy the chosen candidate `market_id` into `data/market_mappings.csv`, set the correct `market_type`, `model_side`, `polymarket_side`, and set `manual_confirmed` to `1`. Manual rows remain the highest-priority override.
+
+### Polymarket Sports Event Discovery
+
+Some football markets are nested under Polymarket Gamma events, series, or tags and may not appear in direct text-query results. The app now uses layered read-only discovery:
+
+1. direct matchup query search;
+2. active Gamma sports, World Cup, FIFA, soccer, or football events when identifiers are discoverable;
+3. broader active Gamma events ordered by volume/date;
+4. local discovery caches.
+
+Nested event markets are flattened and then scored with the same matchup-aware filters described above. Political, macro, crypto, and one-team-only markets are rejected or kept as diagnostics; they are not used in alpha tables.
+
+Broad discovery writes local fallback caches:
+
+```text
+data/polymarket_events_cache.csv
+data/polymarket_markets_cache.csv
+```
+
+Audit broad sports-event discovery for a matchup:
+
+```bash
+.venv/bin/python scripts/audit_polymarket_sports_discovery.py \
+  --home Colombia \
+  --away "DR Congo" \
+  --competition "World Cup" \
+  --fixture-date 2026-06-23
+```
+
+If no candidate is found, it may mean no match market exists yet, the market is closed/resolved, the event was not returned by active filters, the cache is stale, or team wording differs from `data/team_name_aliases.csv`. Try:
+
+```bash
+.venv/bin/python scripts/audit_polymarket_sports_discovery.py \
+  --home Colombia \
+  --away "DR Congo" \
+  --competition "World Cup" \
+  --fixture-date 2026-06-23 \
+  --retrieval-mode all_events
+```
+
+You can also run with `--include-closed` or inspect Polymarket manually and add a confirmed row to `data/market_mappings.csv`.
+
+### Polymarket URL And Slug Resolver
+
+Some Polymarket sports events use abbreviations that differ from FIFA-style country codes. For example, DR Congo may appear as `CDR` in a Polymarket sports slug even though other systems may use `COD`:
+
+```text
+https://polymarket.com/sports/world-cup/fifwc-col-cdr-2026-06-23
+```
+
+The URL/slug resolver parses exact sports event URLs, validates the slug against the selected fixture, fetches the event from Gamma by exact slug, and extracts nested markets for local scoring. This is different from automatic search: automatic search tries to discover possible markets, while the URL resolver starts from a user-supplied event URL or slug.
+
+Supported parsed fields include:
+
+- event slug, such as `fifwc-col-cdr-2026-06-23`;
+- Polymarket team codes, such as `COL` and `CDR`;
+- fixture date hint, such as `2026-06-23`;
+- competition path, such as `sports/world-cup`.
+
+Audit an exact URL:
+
+```bash
+.venv/bin/python scripts/audit_polymarket_url_resolver.py \
+  --url https://polymarket.com/sports/world-cup/fifwc-col-cdr-2026-06-23 \
+  --home Colombia \
+  --away "DR Congo" \
+  --fixture-date 2026-06-23 \
+  --competition "World Cup"
+```
+
+This writes:
+
+```text
+reports/polymarket_url_resolver_YYYY-MM-DD.csv
+reports/polymarket_url_resolver_YYYY-MM-DD.md
+```
+
+In the dashboard, paste the exact URL into **Optional Polymarket event URL or slug**. The extracted markets are added to the candidate mapping pool, but mappings remain `manual_confirmed = False` unless you explicitly add a manual row to `data/market_mappings.csv`.
 
 ## 6. How The Model Works
 

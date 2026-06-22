@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.config import DATA_DIR
 from src.polymarket import POLYMARKET_COLUMNS
+from src.polymarket_match_search import score_polymarket_market_for_match
 from src.storage import load_csv
 
 
@@ -21,7 +22,9 @@ MAPPING_COLUMNS = [
     "model_side",
     "polymarket_side",
     "mapping_confidence",
+    "mapping_score",
     "mapping_reason",
+    "reject_reason",
     "manual_confirmed",
     "yes_price",
     "no_price",
@@ -51,6 +54,10 @@ MANUAL_MAPPING_COLUMNS = [
     "model_side",
     "polymarket_side",
     "manual_confirmed",
+    "mapping_confidence",
+    "mapping_score",
+    "mapping_reason",
+    "reject_reason",
     "notes",
 ]
 
@@ -65,13 +72,13 @@ TEAM_ALIASES = {
     "Croatia": ["cro"],
     "Curacao": ["curaçao", "cuw"],
     "Czechia": ["czech republic", "cze"],
-    "DR Congo": ["congo", "drc", "cod"],
+    "DR Congo": ["congo", "congo dr", "cdr", "drc", "cod"],
     "Ecuador": ["ecu"],
     "England": ["eng"],
     "Germany": ["ger"],
     "Ghana": ["gha"],
     "Haiti": ["hai"],
-    "Iran": ["irn"],
+    "Iran": ["irn", "iri"],
     "Ivory Coast": ["cote d'ivoire", "côte d'ivoire", "civ"],
     "Japan": ["jpn"],
     "Mexico": ["mex"],
@@ -82,6 +89,7 @@ TEAM_ALIASES = {
     "Paraguay": ["par"],
     "Portugal": ["por"],
     "Qatar": ["qat"],
+    "Saudi Arabia": ["ksa"],
     "Scotland": ["sco"],
     "South Africa": ["rsa", "south-africa"],
     "South Korea": ["korea republic", "kor"],
@@ -89,6 +97,7 @@ TEAM_ALIASES = {
     "Switzerland": ["sui", "swiss"],
     "Sweden": ["swe"],
     "Tunisia": ["tun"],
+    "Turkey": ["turkiye", "türkiye", "tur"],
     "Turkiye": ["turkey", "türkiye", "tur"],
     "United States": ["usa", "usmnt", "united states of america"],
     "Uruguay": ["uru"],
@@ -135,8 +144,9 @@ def explain_unmapped_polymarket_markets(match_row: pd.Series, polymarket_df: pd.
     rows = []
     for _, market in polymarket_df.iterrows():
         text = _market_text(market)
-        has_home = _has_team(text, home)
-        has_away = _has_team(text, away)
+        precision = score_polymarket_market_for_match(market, home, away, competition="World Cup")
+        has_home = bool(precision.get("matched_home", False))
+        has_away = bool(precision.get("matched_away", False))
         market_type, _, _, _, _ = _infer_market_type(text, home, away)
         rows.append(
             {
@@ -146,7 +156,11 @@ def explain_unmapped_polymarket_markets(match_row: pd.Series, polymarket_df: pd.
                 "has_home": has_home,
                 "has_away": has_away,
                 "market_type_guess": market_type,
-                "rejection_reason": _unmapped_reason(text, home, away, has_home, has_away, market_type),
+                "rejection_reason": (
+                    _unmapped_reason(text, home, away, has_home, has_away, market_type)
+                    if _is_tournament_outright(text)
+                    else precision.get("reject_reason") or _unmapped_reason(text, home, away, has_home, has_away, market_type)
+                ),
                 "yes_price": market.get("yes_price", pd.NA),
                 "no_price": market.get("no_price", pd.NA),
                 "liquidity": market.get("liquidity", pd.NA),
@@ -182,7 +196,9 @@ def _manual_mappings(match_id: str, markets: pd.DataFrame, home: str, away: str)
                 "model_side": row.get("model_side", ""),
                 "polymarket_side": _normalise_side(row.get("polymarket_side", "YES")),
                 "mapping_confidence": "manual",
+                "mapping_score": row.get("mapping_score", pd.NA),
                 "mapping_reason": f"Manual mapping file. {row.get('notes', '')}".strip(),
+                "reject_reason": "",
                 "manual_confirmed": True,
                 "yes_price": row.get("yes_price", pd.NA),
                 "no_price": row.get("no_price", pd.NA),
@@ -206,30 +222,28 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
 
     for _, market in markets.iterrows():
         text = _market_text(market)
-        score, reasons = _team_match_score(text, home, away)
-        has_home = _has_team(text, home)
-        has_away = _has_team(text, away)
-        if score <= 0:
+        precision = score_polymarket_market_for_match(
+            market,
+            home,
+            away,
+            competition=str(match_row.get("competition", "World Cup") or "World Cup"),
+            fixture_date=str(match_row.get("date_utc", "") or ""),
+        )
+        if precision.get("rejected") or precision.get("confidence") != "high":
             continue
         if _is_tournament_outright(text):
             continue
 
-        proximity_score, proximity_reason = _date_proximity_score(kickoff, market)
-        score += proximity_score
-        if proximity_reason:
-            reasons.append(proximity_reason)
-
         market_type, model_side, polymarket_side, type_reason, type_score = _infer_market_type(text, home, away)
-        score += type_score
-        reasons.append(type_reason)
+        has_home = bool(precision.get("matched_home", False))
+        has_away = bool(precision.get("matched_away", False))
 
         if _is_match_level_market(market_type) and not (has_home and has_away):
             continue
 
-        if market_type == "other" and score < 0.60:
+        if market_type in {"other", "group_winner", "qualification"}:
             continue
 
-        confidence = "high" if score >= 0.70 else "low"
         rows.append(
             {
                 "match_id": match_id,
@@ -240,8 +254,12 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
                 "market_type": market_type,
                 "model_side": model_side,
                 "polymarket_side": polymarket_side,
-                "mapping_confidence": confidence,
-                "mapping_reason": "; ".join(reasons),
+                "mapping_confidence": "high",
+                "mapping_score": precision.get("score", pd.NA),
+                "mapping_reason": "; ".join(
+                    part for part in [precision.get("score_breakdown", ""), type_reason] if str(part).strip()
+                ),
+                "reject_reason": "",
                 "manual_confirmed": False,
                 "yes_price": market.get("yes_price", pd.NA),
                 "no_price": market.get("no_price", pd.NA),

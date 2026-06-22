@@ -243,9 +243,9 @@ def test_selected_match_search_finds_match_market_and_mapper_rejects_outrights(m
 
     def fake_get(url, params=None, timeout=0):
         search = (params or {}).get("search")
-        if search == "England":
+        if search in {"England Croatia", "England vs Croatia", "World Cup England Croatia"}:
             return FakeResponse([match_market, outright_market])
-        if search == "Croatia":
+        if search == "Will England beat Croatia":
             return FakeResponse([match_market])
         return FakeResponse([])
 
@@ -254,7 +254,7 @@ def test_selected_match_search_finds_match_market_and_mapper_rejects_outrights(m
     markets = get_match_polymarket_markets("England", "Croatia")
     mapped = map_match_to_polymarket_markets(sample_match(), markets)
 
-    assert set(markets["market_id"]) == {"PM-ENG-CRO", "PM-ENG-OUTRIGHT"}
+    assert set(markets["market_id"]) == {"PM-ENG-CRO"}
     assert len(mapped) == 1
     assert mapped.iloc[0]["market_id"] == "PM-ENG-CRO"
     assert mapped.iloc[0]["model_side"] == "home_win"

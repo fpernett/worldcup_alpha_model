@@ -16,7 +16,9 @@ from src.cache import (
     write_json_cache,
 )
 from src.config import DATA_DIR, SOURCE_API, SOURCE_CACHE, SOURCE_LOCAL, get_config
+from src.polymarket_match_search import build_polymarket_match_queries
 from src.storage import load_csv
+from src.team_names import normalize_team_name, polymarket_team_codes
 from src.utils import coerce_bool, coerce_float
 
 
@@ -56,7 +58,7 @@ TEAM_SLUG_CODES = {
     "Croatia": "cro",
     "Curacao": ["cuw", "cur"],
     "Czechia": "cze",
-    "DR Congo": "cod",
+    "DR Congo": ["cdr", "cod", "drc"],
     "Ecuador": "ecu",
     "Egypt": "egy",
     "England": "eng",
@@ -87,6 +89,7 @@ TEAM_SLUG_CODES = {
     "Switzerland": "sui",
     "Sweden": "swe",
     "Tunisia": "tun",
+    "Turkey": "tur",
     "Turkiye": ["tur", "tür"],
     "United States": ["usa", "us"],
     "Uruguay": "uru",
@@ -98,7 +101,7 @@ TEAM_SEARCH_ALIASES = {
     "Cape Verde": ["Cabo Verde"],
     "Curacao": ["Curaçao"],
     "Czechia": ["Czech Republic"],
-    "DR Congo": ["Congo", "Congo DR"],
+    "DR Congo": ["Congo", "Congo DR", "CDR", "COD", "DRC"],
     "Ivory Coast": ["Cote d'Ivoire", "Côte d'Ivoire"],
     "South Korea": ["Korea Republic", "Korea"],
     "Turkiye": ["Turkey", "Türkiye"],
@@ -173,6 +176,12 @@ def get_match_polymarket_markets(home: str, away: str, date_utc: Any | None = No
         for query in _match_search_queries(home, away)
     )
     out = _combine_market_frames(frames, fallback_source="selected-match Gamma search")
+    if out.empty:
+        discovered, discovery_warning = _broad_match_market_discovery()
+        if not discovered.empty:
+            out = discovered
+        elif discovery_warning:
+            out.attrs["warning"] = discovery_warning
     if event_error and out.empty:
         out.attrs["warning"] = event_error
     return out
@@ -473,7 +482,7 @@ def _team_slug_code(team: str) -> str:
 
 
 def _team_slug_codes(team: str) -> list[str]:
-    team_text = str(team or "").strip()
+    team_text = normalize_team_name(str(team or "").strip())
     if not team_text:
         return []
     configured = TEAM_SLUG_CODES.get(team_text)
@@ -483,6 +492,7 @@ def _team_slug_codes(team: str) -> list[str]:
         codes = [str(code) for code in configured if str(code).strip()]
     else:
         codes = []
+    codes.extend(code.lower() for code in polymarket_team_codes(team_text))
     letters = re.findall(r"[a-z0-9]+", team_text.lower())
     fallback = "".join(letters)[:3]
     if fallback:
@@ -549,14 +559,7 @@ def _query_tokens(query: str) -> list[str]:
 
 
 def _match_search_queries(home: str, away: str) -> list[str]:
-    home_terms = _team_search_terms(home)
-    away_terms = _team_search_terms(away)
-    values = []
-    if home_terms and away_terms:
-        values.extend([f"{home_terms[0]} {away_terms[0]}", f"{home_terms[0]} vs {away_terms[0]}"])
-    values.extend(home_terms)
-    values.extend(away_terms)
-    return list(dict.fromkeys(value for value in values if value))
+    return build_polymarket_match_queries(home, away, competition="World Cup")
 
 
 def _team_search_terms(team: str) -> list[str]:
@@ -599,6 +602,47 @@ def _combine_market_frames(frames: list[pd.DataFrame], fallback_source: str) -> 
     if out.empty and warnings:
         out.attrs["warning"] = "; ".join(warnings)
     return out
+
+
+def _broad_match_market_discovery() -> tuple[pd.DataFrame, str]:
+    from src.polymarket_sports_discovery import (
+        discover_polymarket_sports_event_markets,
+        flattened_markets_to_polymarket_rows,
+        load_polymarket_markets_cache,
+    )
+
+    diagnostics = []
+    layers_tried = []
+    events_fetched = 0
+    markets_flattened = 0
+    for mode in ["sports_events", "all_events"]:
+        layers_tried.append(mode)
+        markets, meta = discover_polymarket_sports_event_markets(retrieval_mode=mode, write_cache=True)
+        events_fetched += int(meta.get("events_fetched", 0))
+        markets_flattened += int(meta.get("markets_flattened", 0))
+        diagnostics.append(f"{mode}: events={meta.get('events_fetched', 0)}, markets={meta.get('markets_flattened', 0)}")
+        rows = flattened_markets_to_polymarket_rows(markets)
+        if not rows.empty:
+            rows.attrs["source_label"] = f"Gamma {mode}"
+            rows.attrs["last_updated"] = utc_now_iso()
+            rows.attrs["discovery_diagnostics"] = "; ".join(diagnostics)
+            rows.attrs["retrieval_layers_tried"] = layers_tried
+            rows.attrs["events_fetched"] = events_fetched
+            rows.attrs["markets_flattened"] = markets_flattened
+            return rows, ""
+
+    layers_tried.append("cache")
+    cached = load_polymarket_markets_cache()
+    rows = flattened_markets_to_polymarket_rows(cached)
+    if not rows.empty:
+        rows.attrs["source_label"] = "data/polymarket_markets_cache.csv"
+        rows.attrs["last_updated"] = cached.attrs.get("last_updated", "")
+        rows.attrs["discovery_diagnostics"] = "; ".join(diagnostics + ["cache"])
+        rows.attrs["retrieval_layers_tried"] = layers_tried
+        rows.attrs["events_fetched"] = events_fetched
+        rows.attrs["markets_flattened"] = markets_flattened
+        return rows, ""
+    return pd.DataFrame(columns=POLYMARKET_COLUMNS), "; ".join(diagnostics)
 
 
 def _event_title(row: pd.Series) -> str:

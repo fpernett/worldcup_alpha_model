@@ -51,6 +51,14 @@ from src.model_policy import (
 )
 from src.odds import load_market_odds
 from src.polymarket import get_match_polymarket_markets, get_polymarket_markets, update_polymarket_markets
+from src.polymarket_match_search import build_polymarket_match_queries, score_polymarket_markets_for_match
+from src.polymarket_sports_discovery import polymarket_discovery_cache_status
+from src.polymarket_url_resolver import (
+    parse_polymarket_url_or_slug,
+    resolve_polymarket_event_markets_from_url_or_slug,
+    resolved_url_markets_to_polymarket_rows,
+    score_polymarket_event_slug_for_fixture,
+)
 from src.rating_coverage import (
     audit_rating_coverage,
     collect_required_teams,
@@ -949,6 +957,11 @@ def load_match_polymarket_inputs(home: str, away: str, date_utc: str, refresh_co
 
 
 @st.cache_data(ttl=600)
+def load_polymarket_url_or_slug_inputs(value: str, refresh_counter: int):
+    return resolve_polymarket_event_markets_from_url_or_slug(value)
+
+
+@st.cache_data(ttl=600)
 def load_behavior_backtest_results(
     start_date_iso: str,
     end_date_iso: str,
@@ -1126,6 +1139,11 @@ with st.sidebar:
     min_alpha_gap = st.slider("Minimum alpha gap (cents)", 0.0, 20.0, 0.0, 0.5)
     show_only_mapped = st.toggle("Show only mapped markets", value=True)
     search_selected_match = st.toggle("Search selected match markets", value=True)
+    polymarket_event_url_or_slug = st.text_input(
+        "Optional Polymarket event URL or slug",
+        value="",
+        help="Paste a Polymarket sports event URL when automatic search cannot find the selected match.",
+    )
     show_behavior_diagnostic_probabilities = st.toggle("Show diagnostic behavior probabilities", value=False)
 
     if st.button("Update Polymarket markets", width="stretch"):
@@ -1286,6 +1304,10 @@ for label in selected_labels:
     confidence = result["confidence"]
     mapped_markets = map_match_to_polymarket_markets(match, polymarket_markets)
     match_polymarket_markets = pd.DataFrame()
+    url_resolved_markets = pd.DataFrame()
+    url_resolved_market_rows = pd.DataFrame()
+    url_resolver_diagnostics: dict = {}
+    url_slug_score: dict = {}
     mapping_market_pool = polymarket_markets
     if mapped_markets.empty and search_selected_match:
         match_polymarket_markets = load_match_polymarket_inputs(
@@ -1296,10 +1318,39 @@ for label in selected_labels:
         )
         mapping_market_pool = merge_polymarket_inputs(polymarket_markets, match_polymarket_markets)
         mapped_markets = map_match_to_polymarket_markets(match, mapping_market_pool)
+    if polymarket_event_url_or_slug.strip():
+        url_resolved_markets, url_resolver_diagnostics = load_polymarket_url_or_slug_inputs(
+            polymarket_event_url_or_slug.strip(),
+            st.session_state["polymarket_refresh_counter"],
+        )
+        parsed_url = parse_polymarket_url_or_slug(polymarket_event_url_or_slug.strip())
+        url_slug_score = score_polymarket_event_slug_for_fixture(
+            parsed_url.get("slug", ""),
+            str(match.get("home", "")),
+            str(match.get("away", "")),
+            fixture_date=str(match.get("date_utc", "") or ""),
+        )
+        url_resolved_market_rows = resolved_url_markets_to_polymarket_rows(url_resolved_markets)
+        if not url_resolved_market_rows.empty:
+            mapping_market_pool = merge_polymarket_inputs(mapping_market_pool, url_resolved_market_rows)
+            mapped_markets = map_match_to_polymarket_markets(match, mapping_market_pool)
     unmapped_diagnostics = (
         explain_unmapped_polymarket_markets(match, mapping_market_pool)
         if mapped_markets.empty and not mapping_market_pool.empty
         else pd.DataFrame()
+    )
+    polymarket_search_queries = build_polymarket_match_queries(
+        str(match.get("home", "")),
+        str(match.get("away", "")),
+        str(match.get("competition", "World Cup") or "World Cup"),
+    )
+    polymarket_search_diagnostics = score_polymarket_markets_for_match(
+        mapping_market_pool,
+        str(match.get("home", "")),
+        str(match.get("away", "")),
+        fixture_date=str(match.get("date_utc", "") or ""),
+        competition=str(match.get("competition", "World Cup") or "World Cup"),
+        include_rejected=True,
     )
     polymarket_alpha = calculate_polymarket_alpha(result, mapped_markets, min_liquidity=min_liquidity)
     polymarket_alpha = annotate_polymarket_alpha_with_policy(
@@ -1593,6 +1644,122 @@ for label in selected_labels:
         )
         if pm_warning:
             st.warning(pm_warning)
+        st.write("Polymarket market search diagnostics")
+        st.caption(
+            "The app searches by the full matchup, not by country alone. This prevents unrelated political markets "
+            "from being treated as football match markets."
+        )
+        discovery_cache_status = polymarket_discovery_cache_status()
+        discovery_summary = {
+            "retrieval_layers_tried": ", ".join(match_polymarket_markets.attrs.get("retrieval_layers_tried", []))
+            if not match_polymarket_markets.empty
+            else "",
+            "events_fetched": match_polymarket_markets.attrs.get("events_fetched", 0),
+            "nested_markets_scanned": match_polymarket_markets.attrs.get("markets_flattened", 0),
+            "cache_markets_rows": discovery_cache_status.get("markets_cache_rows", 0),
+            "cache_last_updated": discovery_cache_status.get("markets_cache_last_updated", ""),
+            "no_match_explanation": ""
+            if not mapped_markets.empty
+            else "No high-confidence match market was mapped. The market may not exist yet, may be closed, may use different team names, or the API/cache may be stale.",
+        }
+        st.dataframe(pd.DataFrame([discovery_summary]), hide_index=True, width="stretch")
+        if polymarket_event_url_or_slug.strip():
+            st.write("Polymarket URL / slug resolver")
+            st.caption(
+                "If automatic search cannot find a match, paste the Polymarket sports event URL here. "
+                "The app parses the event slug, checks it against the selected fixture, and extracts nested markets. "
+                "Resolved mappings are still unconfirmed by default."
+            )
+            parsed_url = url_resolver_diagnostics.get("parsed", parse_polymarket_url_or_slug(polymarket_event_url_or_slug.strip()))
+            url_summary = {
+                "input_slug": parsed_url.get("slug", ""),
+                "parsed_team_codes": ", ".join(
+                    part for part in [parsed_url.get("team_code_1", ""), parsed_url.get("team_code_2", "")] if part
+                ),
+                "canonical_slug_teams": ", ".join(
+                    part for part in [url_slug_score.get("slug_team_1", ""), url_slug_score.get("slug_team_2", "")] if part
+                ),
+                "matched_home": url_slug_score.get("matched_home", False),
+                "matched_away": url_slug_score.get("matched_away", False),
+                "matched_date": url_slug_score.get("matched_date", False),
+                "mapping_confidence": url_slug_score.get("confidence", ""),
+                "event_title": url_resolver_diagnostics.get("event_title", ""),
+                "markets_extracted": len(url_resolved_markets),
+                "market_types_found": ", ".join(url_resolver_diagnostics.get("market_types_found", [])),
+                "warning": "; ".join(
+                    part
+                    for part in [
+                        parsed_url.get("warning", ""),
+                        url_resolver_diagnostics.get("warning", ""),
+                        url_slug_score.get("warning", ""),
+                    ]
+                    if part
+                ),
+            }
+            st.dataframe(pd.DataFrame([url_summary]), hide_index=True, width="stretch")
+            if not url_resolved_markets.empty:
+                url_cols = [
+                    "market_id",
+                    "question",
+                    "market_type",
+                    "yes_price",
+                    "no_price",
+                    "liquidity",
+                    "volume",
+                    "extraction_method",
+                ]
+                st.dataframe(
+                    url_resolved_markets[[col for col in url_cols if col in url_resolved_markets.columns]],
+                    hide_index=True,
+                    width="stretch",
+                )
+                st.caption("To manually confirm any row, add its market_id and side mapping to data/market_mappings.csv.")
+        if polymarket_search_queries:
+            st.dataframe(pd.DataFrame({"search_queries_used": polymarket_search_queries}), hide_index=True, width="stretch")
+        if not polymarket_search_diagnostics.empty:
+            best_candidate = polymarket_search_diagnostics.loc[
+                ~polymarket_search_diagnostics["rejected"].astype(bool)
+            ].head(1)
+            if not best_candidate.empty:
+                st.write("Best match-search candidate")
+                st.dataframe(
+                    best_candidate[
+                        [
+                            "market_id",
+                            "question",
+                            "score",
+                            "confidence",
+                            "matched_home",
+                            "matched_away",
+                            "matched_sports_terms",
+                            "score_breakdown",
+                        ]
+                    ],
+                    hide_index=True,
+                    width="stretch",
+                )
+            accepted_search = polymarket_search_diagnostics.loc[
+                ~polymarket_search_diagnostics["rejected"].astype(bool)
+            ].head(10)
+            rejected_search = polymarket_search_diagnostics.loc[
+                polymarket_search_diagnostics["rejected"].astype(bool)
+            ].head(10)
+            diag_cols = [
+                "market_id",
+                "question",
+                "event_title",
+                "category",
+                "score",
+                "confidence",
+                "reject_reason",
+                "score_breakdown",
+            ]
+            if not accepted_search.empty:
+                st.write("Accepted search candidates")
+                st.dataframe(accepted_search[[col for col in diag_cols if col in accepted_search.columns]], hide_index=True, width="stretch")
+            if not rejected_search.empty:
+                st.write("Rejected search candidates")
+                st.dataframe(rejected_search[[col for col in diag_cols if col in rejected_search.columns]], hide_index=True, width="stretch")
         if mapping_market_pool.empty:
             st.warning(
                 "No Polymarket market data is loaded, so there is nothing to map for this match. "
@@ -1667,7 +1834,9 @@ for label in selected_labels:
                         "model_side",
                         "polymarket_side",
                         "mapping_confidence",
+                        "mapping_score",
                         "mapping_reason",
+                        "reject_reason",
                         "manual_confirmed",
                         "yes_price",
                         "no_price",

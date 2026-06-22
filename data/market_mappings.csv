@@ -1,1 +1,1 @@
-match_id,market_id,market_type,model_side,polymarket_side,manual_confirmed,notes
+match_id,market_id,market_type,model_side,polymarket_side,manual_confirmed,mapping_confidence,mapping_score,mapping_reason,reject_reason,notes
