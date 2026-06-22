@@ -15,6 +15,7 @@ from src.backtest import (
 from src.config import DATA_DIR
 from src.elo import ELO_ASOF_COLUMNS, add_elo_to_historical_matches, build_elo_asof, calculate_rolling_elo
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches
+from src.model import ModelConfig
 from src.model_policy import get_current_model_policy, policy_export_fields
 from src.ratings import TEAM_RATING_COLUMNS, _apply_behavior_blend, _normalise_ratings, rating_row_for_team
 from src.team_behavior import TEAM_BEHAVIOR_COLUMNS, build_team_behavior_table
@@ -208,6 +209,7 @@ def run_asof_backtest(
     historical_matches_df: pd.DataFrame | None,
     mode: str = "both",
     behavior_blend_multiplier: float = 1.0,
+    cfg: ModelConfig | None = None,
 ) -> pd.DataFrame:
     matches = _normalise_completed_matches(completed_matches_df)
     if matches.empty:
@@ -239,7 +241,7 @@ def run_asof_backtest(
                     behavior_blend_multiplier=behavior_blend_multiplier,
                 )
             teams_asof = ratings_cache[cache_key]
-            prediction = run_model_for_backtest_match(match, selected_mode, teams_asof, venues, pd.DataFrame())
+            prediction = run_model_for_backtest_match(match, selected_mode, teams_asof, venues, pd.DataFrame(), cfg=cfg)
             rows.append(_asof_prediction_row(prediction, match, teams_asof, selected_mode))
 
     return pd.DataFrame(rows, columns=ASOF_PREDICTION_COLUMNS)

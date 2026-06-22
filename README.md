@@ -1529,7 +1529,76 @@ Then rerun rating coverage, backtest QA, and the backtest:
 
 Calibration warnings flag missing benchmarks, large internal-vs-external disagreements, behavior scores that sit far above external benchmarks, preserved reviewed rows, and delta caps. These warnings are audit signals; they do not trigger staking, trade execution, or automatic strategy changes.
 
-## 12. Weekly Semantic Audit
+## 12. Post-Mortem Model Training Loop
+
+The post-mortem loop improves the model from completed matches without tuning to one result or copying any external model output. It has two persistent ledgers:
+
+- `data/prediction_ledger.csv`: append-only pre-match prediction snapshots by model version and parameter set.
+- `data/results_ledger.csv`: completed match results with outcome, totals, and BTTS flags.
+
+Snapshot predictions before kickoff:
+
+```bash
+.venv/bin/python scripts/snapshot_upcoming_predictions.py \
+  --start-date 2026-06-22 \
+  --end-date 2026-06-27 \
+  --competition "World Cup"
+```
+
+Import final results after matches complete:
+
+```bash
+.venv/bin/python scripts/import_completed_results.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup"
+```
+
+Run post-mortem analysis:
+
+```bash
+.venv/bin/python scripts/run_postmortem.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
+
+The report shows Brier score, log loss, accuracy, actual-result probability, totals/BTTS errors, worst misses, best calls, draw calibration, team-level errors, and model-version comparisons.
+
+Candidate model training uses walk-forward validation:
+
+```bash
+.venv/bin/python scripts/train_model_candidates.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-21 \
+  --competition "World Cup" \
+  --save-report
+```
+
+The model does not learn only from World Cup games. It also uses recent qualifiers, continental matches, Nations League-style matches, friendlies, and other senior national-team games before the prediction date. These matches are relevance-weighted:
+
+- recent World Cup and World Cup qualifying matches receive the highest weight;
+- recent friendlies are included with moderate weight;
+- old friendlies and older-cycle matches receive low weight;
+- future matches are never included.
+
+The transparent relevance score is:
+
+```text
+final_relevance_weight =
+  competition_type_weight
+  x recency_multiplier
+  x tournament_cycle_multiplier
+```
+
+It is clipped between `0.10` and `2.00`. Training reports include total matches used, World Cup matches, qualifiers, friendlies, weighted match count, mean relevance weight, latest match used, and oldest match used.
+
+Candidate parameter sets are stored in `data/model_parameter_sets.csv`. A candidate is promoted only if it improves strict out-of-sample 1X2 Brier score and log loss, does not worsen over 2.5 Brier by more than 5%, has at least 30 evaluated matches, and has no look-ahead violations. If no candidate clears that rule, the external-calibrated baseline remains the primary model.
+
+Small samples should not be overinterpreted. These outputs are evaluation-only and do not provide staking, trade execution, Kelly sizing, or betting advice.
+
+## 13. Weekly Semantic Audit
 
 Run a lightweight local audit when you want to check whether the code, CSV schemas, dashboard outputs, or semantic-layer documentation have drifted:
 
@@ -1558,7 +1627,7 @@ The audit does not require internet access, API keys, a cloud scheduler, or Poly
 
 `data/cache/` and `.env` remain ignored. Small Markdown reports under `reports/semantic_audits/` are allowed through `.gitignore` so they can be tracked if useful.
 
-## 13. Validate The Model
+## 14. Validate The Model
 
 Run:
 
@@ -1578,7 +1647,7 @@ python -m pytest -q
 
 The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, historical CSV import, rolling Elo, Elo calibration, expected-performance residuals, opponent-quality adjustment, behavior driver reports, final model input audits, schedule-strength diagnostics, behavior calibration, rating blend caps, audit-script output, and Full report helper outputs.
 
-## 14. Known Limitations
+## 15. Known Limitations
 
 - Ratings are transparent priors unless connected to a real ratings API or recent match-history file.
 - Historical behavior is descriptive, not causal proof.
@@ -1590,6 +1659,9 @@ The tests check probability sums, fair odds, score matrix normalization, missing
 - Residual performance is an approximation from Elo and goals, not causal proof of team quality.
 - Expected goals from Elo are transparent and capped, but they are not a substitute for real xG or lineup-level information.
 - Recent behavior can differ sharply from all-time history; the dashboard flags those cases instead of treating them as causal proof.
+- Post-mortem training depends on saved pre-kickoff prediction snapshots; predictions saved after kickoff are excluded from scored post-mortems.
+- Candidate training uses transparent parameter grids and walk-forward validation, not black-box machine learning.
+- Candidate promotion requires strict out-of-sample improvement; otherwise the current baseline remains primary.
 - Environmental response requires enough previous matches to be meaningful.
 - Environmental effects are capped and conservative.
 - Manual ratings remain available as overrides and are the base for behavior blending.

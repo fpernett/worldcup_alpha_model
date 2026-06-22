@@ -59,6 +59,8 @@ from src.polymarket_url_resolver import (
     resolved_url_markets_to_polymarket_rows,
     score_polymarket_event_slug_for_fixture,
 )
+from src.postmortem import build_postmortem_report, calculate_prediction_errors, join_predictions_to_results
+from src.prediction_ledger import load_prediction_ledger, load_results_ledger
 from src.rating_coverage import (
     audit_rating_coverage,
     collect_required_teams,
@@ -1417,6 +1419,7 @@ for label in selected_labels:
             "Venue/environment",
             "Historical behavior",
             "Model notes",
+            "Post-mortem Training",
         ]
     )
 
@@ -2608,4 +2611,70 @@ for label in selected_labels:
             - Environmental effects are capped and conservative.
             - Outputs are statistical estimates only and are not staking, bet sizing, or investment recommendations.
             """
+        )
+
+    with tabs[11]:
+        st.subheader("Post-mortem Training")
+        st.caption(
+            "This section evaluates saved pre-match predictions after results are known. "
+            "It supports evidence-based model improvement without tuning to one match or copying another model."
+        )
+        ledger = load_prediction_ledger()
+        results_ledger = load_results_ledger()
+        joined_pm = join_predictions_to_results(ledger, results_ledger)
+        errors_pm = calculate_prediction_errors(joined_pm)
+        report_pm = build_postmortem_report(errors_pm, joined_pm)
+
+        pm1, pm2, pm3 = st.columns(3)
+        pm1.metric("Prediction ledger rows", f"{len(ledger):,}")
+        pm2.metric("Completed result rows", f"{len(results_ledger):,}")
+        pm3.metric("Scored pre-kickoff predictions", f"{len(errors_pm):,}")
+
+        if errors_pm.empty:
+            st.info(
+                "No scored pre-kickoff predictions are available yet. Run "
+                "`scripts/snapshot_upcoming_predictions.py` before matches and "
+                "`scripts/import_completed_results.py` after results are known."
+            )
+        else:
+            summary_pm = report_pm.get("summary_metrics", pd.DataFrame())
+            st.write("Post-mortem metrics")
+            st.dataframe(summary_pm, hide_index=True, width="stretch")
+            c_best, c_worst = st.columns(2)
+            with c_worst:
+                st.write("Worst misses")
+                st.dataframe(report_pm.get("worst_misses", pd.DataFrame()).head(10), hide_index=True, width="stretch")
+            with c_best:
+                st.write("Best calls")
+                st.dataframe(report_pm.get("best_calls", pd.DataFrame()).head(10), hide_index=True, width="stretch")
+
+        st.divider()
+        st.write("Candidate model leaderboard")
+        training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
+        if training_reports:
+            latest_training = training_reports[-1]
+            try:
+                leaderboard = pd.read_csv(latest_training)
+            except Exception:
+                leaderboard = pd.DataFrame()
+            st.caption(f"Latest saved candidate report: `{latest_training.name}`")
+            if leaderboard.empty:
+                st.info("Latest candidate report could not be read.")
+            else:
+                st.dataframe(leaderboard.head(20), hide_index=True, width="stretch")
+                if "promotion_status" in leaderboard.columns:
+                    promoted = leaderboard.loc[leaderboard["promotion_status"].astype(str) == "promotion_candidate"]
+                else:
+                    promoted = pd.DataFrame()
+                if promoted.empty:
+                    st.info("No candidate is currently promoted; baseline external-calibrated remains the primary model.")
+                else:
+                    st.success("A candidate met the promotion rule in the latest saved report. Review it before changing model policy.")
+        else:
+            st.info("No candidate training report exists yet. Run `scripts/train_model_candidates.py --save-report`.")
+
+        st.caption(
+            "Training uses walk-forward validation. Historical senior national-team games before each prediction date are included with relevance weights: "
+            "recent qualifiers and tournament matches carry more weight; old friendlies carry less. "
+            "This is evaluation-only and does not provide staking, trade execution, Kelly sizing, or betting advice."
         )

@@ -33,6 +33,12 @@ class ModelConfig:
     form_weight: float = 0.20
     environment_weight: float = 0.010
     neutral_home_bias: float = 0.00
+    draw_inflation_factor: float = 1.00
+    favorite_strength_scale: float = 1.00
+    underdog_resistance_scale: float = 1.00
+    external_prior_weight: float = 0.00
+    rating_gap_to_xg_scale: float = 1.00
+    goal_correlation_adjustment: float = 0.00
     max_goals: int = MAX_GOALS
 
 
@@ -137,7 +143,7 @@ def expected_goals(
 
     h_log = (
         cfg.neutral_home_bias
-        + cfg.elo_xg_weight * elo_diff
+        + cfg.elo_xg_weight * cfg.rating_gap_to_xg_scale * elo_diff
         + cfg.attack_weight * home_attack
         - cfg.defense_weight * away_def
         + cfg.form_weight * home_form
@@ -146,7 +152,7 @@ def expected_goals(
 
     a_log = (
         -cfg.neutral_home_bias
-        - cfg.elo_xg_weight * elo_diff
+        - cfg.elo_xg_weight * cfg.rating_gap_to_xg_scale * elo_diff
         + cfg.attack_weight * away_attack
         - cfg.defense_weight * home_def
         + cfg.form_weight * away_form
@@ -162,7 +168,14 @@ def expected_goals(
 
     components: Dict[str, Any] = {
         "elo_diff": elo_diff,
+        "elo_xg_weight": cfg.elo_xg_weight,
+        "rating_gap_to_xg_scale": cfg.rating_gap_to_xg_scale,
         "base_total_goals": cfg.base_total_goals,
+        "draw_inflation_factor": cfg.draw_inflation_factor,
+        "favorite_strength_scale": cfg.favorite_strength_scale,
+        "underdog_resistance_scale": cfg.underdog_resistance_scale,
+        "external_prior_weight": cfg.external_prior_weight,
+        "goal_correlation_adjustment": cfg.goal_correlation_adjustment,
         "adjusted_total_goals": adjusted_total,
         "home_attack_input": coerce_float(home.get("attack"), 0.55),
         "away_attack_input": coerce_float(away.get("attack"), 0.55),
