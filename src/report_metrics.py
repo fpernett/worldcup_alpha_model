@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.historical_binding import audit_historical_binding_for_match
 from src.utils import coerce_bool, coerce_float
 
 
@@ -22,10 +23,13 @@ LEAGUE_BASELINES = {
 def build_data_support(match_row: pd.Series, historical_matches_df: pd.DataFrame | None) -> dict[str, Any]:
     home = str(match_row.get("home", ""))
     away = str(match_row.get("away", ""))
+    as_of_date = str(match_row.get("date_utc", "") or "") or None
     matches = _normalise_history(historical_matches_df)
 
     if matches.empty:
         return {
+            "home_canonical": home,
+            "away_canonical": away,
             "home_team_match_count": 0,
             "away_team_match_count": 0,
             "h2h_match_count": 0,
@@ -37,28 +41,43 @@ def build_data_support(match_row: pd.Series, historical_matches_df: pd.DataFrame
             "warnings": ["Historical match data missing; report uses baseline context where needed."],
         }
 
-    home_mask = _team_mask(matches, home)
-    away_mask = _team_mask(matches, away)
-    h2h_mask = home_mask & away_mask
-    h2h = matches.loc[h2h_mask].sort_values("date_utc")
+    binding = audit_historical_binding_for_match(
+        home,
+        away,
+        historical_matches_df if historical_matches_df is not None else pd.DataFrame(),
+        as_of_date=as_of_date,
+    )
 
-    if h2h.empty:
+    h2h_count = int(binding["h2h_rows_before_asof"] if as_of_date else binding["h2h_rows_total"])
+    if h2h_count == 0:
         h2h_note = "First meeting in training data"
         last_h2h_date = ""
     else:
-        last_h2h_date = _date_label(h2h["date_utc"].max())
-        h2h_note = f"{len(h2h)} meeting(s) in training data"
+        h2h_rows = _canonical_h2h_rows(matches, binding["home_canonical"], binding["away_canonical"])
+        if as_of_date:
+            h2h_rows = h2h_rows.loc[h2h_rows["date_utc"] < pd.Timestamp(as_of_date)]
+        last_h2h_date = _date_label(h2h_rows["date_utc"].max()) if not h2h_rows.empty else ""
+        h2h_note = f"{h2h_count} long-format meeting row(s) in training data"
+
+    team_rows_before = int(binding["home_historical_rows_before_asof"]) + int(binding["away_historical_rows_before_asof"])
+    team_dates = matches.loc[
+        _team_mask(matches, binding["home_canonical"]) | _team_mask(matches, binding["away_canonical"])
+    ].copy()
+    if as_of_date and not team_dates.empty:
+        team_dates = team_dates.loc[team_dates["date_utc"] < pd.Timestamp(as_of_date)]
 
     return {
-        "home_team_match_count": int(home_mask.sum()),
-        "away_team_match_count": int(away_mask.sum()),
-        "h2h_match_count": int(h2h_mask.sum()),
+        "home_canonical": binding["home_canonical"],
+        "away_canonical": binding["away_canonical"],
+        "home_team_match_count": int(binding["home_historical_rows_before_asof"]),
+        "away_team_match_count": int(binding["away_historical_rows_before_asof"]),
+        "h2h_match_count": h2h_count,
         "last_h2h_date": last_h2h_date,
         "h2h_note": h2h_note,
-        "training_data_start": _date_label(matches["date_utc"].min()),
-        "training_data_end": _date_label(matches["date_utc"].max()),
-        "training_match_count": int(len(matches)),
-        "warnings": [],
+        "training_data_start": _date_label(team_dates["date_utc"].min()) if not team_dates.empty else "",
+        "training_data_end": _date_label(team_dates["date_utc"].max()) if not team_dates.empty else "",
+        "training_match_count": team_rows_before,
+        "warnings": [binding["warning"]] if binding.get("warning") else [],
     }
 
 
@@ -243,6 +262,14 @@ def _normalise_history(historical_matches_df: pd.DataFrame | None) -> pd.DataFra
     if historical_matches_df is None or historical_matches_df.empty:
         return pd.DataFrame(columns=["date_utc", "home", "away", "home_goals", "away_goals"])
     out = historical_matches_df.copy()
+    if "home" not in out.columns and "team" in out.columns:
+        out["home"] = out["team"]
+    if "away" not in out.columns and "opponent" in out.columns:
+        out["away"] = out["opponent"]
+    if "home_goals" not in out.columns and "team_goals" in out.columns:
+        out["home_goals"] = out["team_goals"]
+    if "away_goals" not in out.columns and "opponent_goals" in out.columns:
+        out["away_goals"] = out["opponent_goals"]
     for col in ["date_utc", "home", "away", "home_goals", "away_goals"]:
         if col not in out.columns:
             out[col] = pd.NA
@@ -256,6 +283,21 @@ def _normalise_history(historical_matches_df: pd.DataFrame | None) -> pd.DataFra
 def _team_mask(matches: pd.DataFrame, team: str) -> pd.Series:
     team_l = str(team).lower()
     return (matches["home"].astype(str).str.lower() == team_l) | (matches["away"].astype(str).str.lower() == team_l)
+
+
+def _canonical_h2h_rows(matches: pd.DataFrame, home: str, away: str) -> pd.DataFrame:
+    home_l = str(home).lower()
+    away_l = str(away).lower()
+    return matches.loc[
+        (
+            (matches["home"].astype(str).str.lower() == home_l)
+            & (matches["away"].astype(str).str.lower() == away_l)
+        )
+        | (
+            (matches["home"].astype(str).str.lower() == away_l)
+            & (matches["away"].astype(str).str.lower() == home_l)
+        )
+    ].copy()
 
 
 def _date_label(value: Any) -> str:

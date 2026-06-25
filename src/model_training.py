@@ -115,8 +115,8 @@ def calculate_match_relevance_weight(
     """Estimate how informative a historical national-team match is for a target fixture."""
     row = pd.Series(historical_match_row)
     competition_type = str(row.get("competition_type", "") or "").strip().lower()
-    match_date = pd.to_datetime(row.get("date_utc"), errors="coerce")
-    prediction_ts = _as_naive_timestamp(prediction_date)
+    match_date = _as_naive_datetime(row.get("date_utc"))
+    prediction_ts = _as_naive_datetime(prediction_date)
     if pd.isna(match_date) or match_date >= prediction_ts:
         return 0.0
     days = max((prediction_ts - match_date).days, 0)
@@ -726,3 +726,10 @@ def _max_date_label(values: pd.Series) -> str:
 def _min_date_label(values: pd.Series) -> str:
     dates = pd.to_datetime(values, errors="coerce").dropna()
     return "" if dates.empty else dates.min().date().isoformat()
+
+
+def _as_naive_datetime(value: Any) -> pd.Timestamp:
+    ts = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(ts):
+        return pd.NaT
+    return ts.tz_convert("UTC").tz_localize(None)

@@ -92,6 +92,7 @@ def test_snapshot_predictions_for_fixtures_appends(monkeypatch, tmp_path) -> Non
         }
 
     monkeypatch.setattr(prediction_ledger, "run_match_model", fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
 
     snapshots = prediction_ledger.snapshot_predictions_for_fixtures(
         fixtures,

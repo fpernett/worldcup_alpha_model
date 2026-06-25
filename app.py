@@ -37,6 +37,8 @@ from src.external_priors import (
     load_review_proposals,
 )
 from src.feature_engineering import load_recent_matches
+from src.fixture_diagnostics import audit_fixture_availability
+from src.historical_binding import audit_historical_binding_for_match, audit_historical_file_status
 from src.fifa_ranking_import import fifa_ranking_import_dashboard_status
 from src.fifa_snapshot_validation import fifa_snapshot_validation_dashboard_status
 from src.historical_data import load_historical_matches
@@ -91,6 +93,7 @@ from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
 from src.team_behavior import load_team_behavior
 from src.team_names import load_team_name_aliases_df
 from src.timeline import calculate_score_timeline
+from src.tournament_learning import filter_tournament_learning_asof, load_tournament_learning_ledger
 
 
 st.set_page_config(page_title="World Cup Alpha Model", layout="wide")
@@ -106,6 +109,15 @@ def odds_fmt(value: float) -> str:
     if value == float("inf"):
         return "inf"
     return f"{value:.2f}"
+
+
+def _first_value(df: pd.DataFrame, column: str, default: str = ""):
+    if df is None or df.empty or column not in df.columns:
+        return default
+    value = df[column].iloc[0]
+    if pd.isna(value):
+        return default
+    return value
 
 
 def alpha_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -931,9 +943,16 @@ def load_inputs(
     horizon_hours: float | None,
     include_past: bool,
 ):
-    fixtures = get_upcoming_fixtures(start_date, end_date)
+    raw_fixtures = get_upcoming_fixtures(start_date, end_date)
+    fixture_audit, fixture_audit_summary = audit_fixture_availability(
+        raw_fixtures,
+        start_date=start_date,
+        end_date=end_date,
+        hide_past=not include_past,
+        now_utc=now_utc_iso,
+    )
     fixtures = filter_future_fixtures(
-        fixtures,
+        raw_fixtures,
         now_utc=now_utc_iso,
         horizon_hours=horizon_hours,
         include_past=include_past,
@@ -945,7 +964,18 @@ def load_inputs(
     historical_long_matches = load_historical_matches()
     team_behavior = load_team_behavior()
     status = build_source_status(fixtures, teams, venues, odds, historical_long_matches, team_behavior)
-    return fixtures, teams, venues, odds, recent_matches, historical_long_matches, team_behavior, status
+    return (
+        fixtures,
+        teams,
+        venues,
+        odds,
+        recent_matches,
+        historical_long_matches,
+        team_behavior,
+        status,
+        fixture_audit,
+        fixture_audit_summary,
+    )
 
 
 @st.cache_data(ttl=600)
@@ -1180,7 +1210,18 @@ with st.sidebar:
     form_weight = st.slider("Recent form weight", 0.00, 0.40, 0.20, 0.02)
     env_weight = st.slider("Environment weight", 0.000, 0.030, 0.010, 0.001)
 
-fixtures, teams, venues, market_odds, recent_matches, historical_long_matches, team_behavior, source_status = load_inputs(
+(
+    fixtures,
+    teams,
+    venues,
+    market_odds,
+    recent_matches,
+    historical_long_matches,
+    team_behavior,
+    source_status,
+    fixture_audit,
+    fixture_audit_summary,
+) = load_inputs(
     start_date,
     end_date,
     st.session_state["refresh_counter"],
@@ -1218,6 +1259,36 @@ with st.sidebar:
             "the selected query found no matches, or the request failed. You can also paste fallback "
             "rows into `data/polymarket_markets.csv`."
         )
+
+    st.header("Data Health")
+    st.write("Fixture availability")
+    fa = fixture_audit_summary
+    st.caption(
+        f"Loaded: {fa.get('total_fixtures_loaded', 0)} | "
+        f"Visible: {fa.get('fixtures_visible', 0)} | "
+        f"Hidden as past: {fa.get('fixtures_hidden_as_past', 0)}"
+    )
+    st.caption(
+        f"Current UTC: {fa.get('current_utc', '')} | "
+        f"Selected UTC: {fa.get('selected_start_utc', '')} to {fa.get('selected_end_utc', '')}"
+    )
+    st.caption(
+        f"Earliest fixture: {fa.get('earliest_kickoff_utc', '') or 'n/a'} | "
+        f"Latest fixture: {fa.get('latest_kickoff_utc', '') or 'n/a'}"
+    )
+    if fa.get("warning"):
+        st.warning(fa["warning"])
+
+    historical_status = audit_historical_file_status(historical_long_matches)
+    st.write("Historical data file")
+    st.caption(
+        f"Rows: {historical_status.get('rows_loaded', 0):,} | "
+        f"Teams: {historical_status.get('unique_teams', 0)} | "
+        f"Range: {historical_status.get('earliest_date', '') or 'n/a'} to "
+        f"{historical_status.get('latest_date', '') or 'n/a'}"
+    )
+    if historical_status.get("warning"):
+        st.warning(historical_status["warning"])
 
     st.header("Model Policy")
     st.write("Primary model: Baseline external-calibrated")
@@ -1377,7 +1448,7 @@ for label in selected_labels:
         ]
 
     venue_env = result.get("environment", {})
-    data_support = build_data_support(match, recent_matches)
+    data_support = build_data_support(match, historical_long_matches)
     goal_distribution = calculate_goal_distribution(result.get("score_matrix"), max_goals=14)
     league_context = calculate_league_context(recent_matches, result)
     score_timeline = calculate_score_timeline(result["hxg"], result["axg"])
@@ -1405,6 +1476,72 @@ for label in selected_labels:
         st.caption(behavior_diagnostic_error)
     if behavior_warning:
         st.warning(behavior_warning)
+
+    aliases_df = load_team_name_aliases_df()
+    selected_binding = audit_historical_binding_for_match(
+        result["home"],
+        result["away"],
+        historical_long_matches,
+        team_behavior_df=team_behavior,
+        team_ratings_df=teams,
+        aliases_df=aliases_df,
+        as_of_date=str(match.get("date_utc", "") or ""),
+    )
+    with st.expander("Data Health", expanded=False):
+        st.caption(
+            "This checks whether fixture names bind correctly to historical matches, ratings, "
+            "and external benchmarks before the report interprets missing data."
+        )
+        dh_cols = st.columns(4)
+        dh_cols[0].metric("Canonical home", selected_binding["home_canonical"])
+        dh_cols[1].metric("Canonical away", selected_binding["away_canonical"])
+        dh_cols[2].metric("Home historical rows", selected_binding["home_historical_rows_before_asof"])
+        dh_cols[3].metric("Away historical rows", selected_binding["away_historical_rows_before_asof"])
+        dh_cols2 = st.columns(4)
+        dh_cols2[0].metric("H2H rows", selected_binding["h2h_rows_before_asof"])
+        dh_cols2[1].metric("Latest home match", selected_binding["home_latest_match"] or "n/a")
+        dh_cols2[2].metric("Latest away match", selected_binding["away_latest_match"] or "n/a")
+        dh_cols2[3].metric("Binding status", selected_binding["data_binding_status"])
+
+        rating_rows = teams.copy()
+        if "team" in rating_rows.columns:
+            rating_rows["_team_key"] = rating_rows["team"].astype(str).str.lower()
+        home_rating = rating_rows.loc[rating_rows.get("_team_key", pd.Series(dtype=str)) == selected_binding["home_canonical"].lower()]
+        away_rating = rating_rows.loc[rating_rows.get("_team_key", pd.Series(dtype=str)) == selected_binding["away_canonical"].lower()]
+        external_priors = load_external_priors()
+        if "team" in external_priors.columns:
+            external_priors["_team_key"] = external_priors["team"].astype(str).str.lower()
+        home_external = external_priors.loc[
+            external_priors.get("_team_key", pd.Series(dtype=str)) == selected_binding["home_canonical"].lower()
+        ]
+        away_external = external_priors.loc[
+            external_priors.get("_team_key", pd.Series(dtype=str)) == selected_binding["away_canonical"].lower()
+        ]
+        st.write("Selected match source binding")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "team": selected_binding["home_canonical"],
+                        "rating_found": selected_binding["home_rating_found"],
+                        "behavior_found": selected_binding["home_behavior_found"],
+                        "rating_source": _first_value(home_rating, "data_quality"),
+                        "external_benchmark": _first_value(home_external, "reference_overall_strength"),
+                    },
+                    {
+                        "team": selected_binding["away_canonical"],
+                        "rating_found": selected_binding["away_rating_found"],
+                        "behavior_found": selected_binding["away_behavior_found"],
+                        "rating_source": _first_value(away_rating, "data_quality"),
+                        "external_benchmark": _first_value(away_external, "reference_overall_strength"),
+                    },
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        if selected_binding.get("warning"):
+            st.warning(selected_binding["warning"])
 
     tabs = st.tabs(
         [
@@ -1950,27 +2087,37 @@ for label in selected_labels:
 
     with tabs[6]:
         st.subheader("Backtesting")
-        prediction_log = load_prediction_log()
-        results_log = load_results_log()
-        evaluation = evaluate_predictions(prediction_log, results_log)
+        st.caption(
+            "Backtesting and QA can be slow, so these diagnostics run only when requested. "
+            "This keeps match selection responsive and avoids parsing local ledgers unless needed."
+        )
+        bt_key = str(match.get("match_id", label)).replace(" ", "_")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Saved predictions", f"{len(prediction_log):,}")
-        if not evaluation.empty:
-            eval_row = evaluation.iloc[0]
-            c2.metric("Brier score", "" if pd.isna(eval_row["brier_score"]) else f"{eval_row['brier_score']:.4f}")
-            c3.metric("Log loss", "" if pd.isna(eval_row["log_loss"]) else f"{eval_row['log_loss']:.4f}")
-            st.dataframe(evaluation, hide_index=True, width="stretch")
-        if results_log.empty:
-            st.info("Add completed match rows to `data/results_log.csv` to evaluate saved predictions.")
+        if st.checkbox("Load saved prediction-log evaluation", value=False, key=f"load_prediction_log_{bt_key}"):
+            prediction_log = load_prediction_log()
+            results_log = load_results_log()
+            if prediction_log.attrs.get("warning"):
+                st.warning(prediction_log.attrs["warning"])
+                st.caption("Run `.venv/bin/python scripts/repair_prediction_log.py` to quarantine and rebuild the malformed log.")
+            evaluation = evaluate_predictions(prediction_log, results_log)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Saved predictions", f"{len(prediction_log):,}")
+            if not evaluation.empty:
+                eval_row = evaluation.iloc[0]
+                c2.metric("Brier score", "" if pd.isna(eval_row["brier_score"]) else f"{eval_row['brier_score']:.4f}")
+                c3.metric("Log loss", "" if pd.isna(eval_row["log_loss"]) else f"{eval_row['log_loss']:.4f}")
+                st.dataframe(evaluation, hide_index=True, width="stretch")
+            if results_log.empty:
+                st.info("Add completed match rows to `data/results_log.csv` to evaluate saved predictions.")
+        else:
+            st.info("Saved prediction-log evaluation is idle. Enable it here if you want to inspect legacy prediction snapshots.")
 
         st.divider()
         st.subheader("Behavior-Adjusted Backtest")
         st.caption(
             "Lower Brier score and log loss are better. Higher probability assigned to the actual result is better. "
-            "This checks whether the historical behavior layer is helping or hurting completed-match predictions."
+            "Run this only when you want to evaluate completed-match predictions."
         )
-        bt_key = str(match.get("match_id", label)).replace(" ", "_")
         bt_default_end = utc_today
         bt_default_start = bt_default_end - timedelta(days=10)
         c_start, c_end, c_comp = st.columns([1, 1, 2])
@@ -1980,104 +2127,84 @@ for label in selected_labels:
             bt_end = st.date_input("Backtest end", value=bt_default_end, key=f"bt_end_{bt_key}")
         with c_comp:
             bt_competition = st.text_input("Competition filter", value="World Cup", key=f"bt_comp_{bt_key}")
-
         bt_start, bt_end = sorted((bt_start, bt_end))
-        backtest_result = load_behavior_backtest_results(
-            bt_start.isoformat(),
-            bt_end.isoformat(),
-            bt_competition,
-            st.session_state["refresh_counter"],
-        )
-        bt_matches = backtest_result.get("matches", pd.DataFrame())
-        bt_metrics = backtest_result.get("metrics", pd.DataFrame())
-        bt_comparison = backtest_result.get("comparison", pd.DataFrame())
-        bt_calibration = backtest_result.get("calibration", pd.DataFrame())
-        bt_qa_summary = backtest_result.get("qa_summary", {})
-        bt_qa_matches = backtest_result.get("qa_match_inputs", pd.DataFrame())
-        bt_qa_coverage = backtest_result.get("qa_rating_coverage", pd.DataFrame())
-        bt_qa_aliases = backtest_result.get("qa_aliases", pd.DataFrame())
-        bt_warning = str(backtest_result.get("warning", ""))
 
-        if bt_warning:
-            st.warning(bt_warning)
-        if isinstance(bt_qa_summary, dict) and bt_qa_summary.get("qa_warning"):
-            st.warning(bt_qa_summary["qa_warning"])
-        st.metric("Completed matches in backtest", f"{len(bt_matches):,}")
-        if bt_metrics.empty:
-            st.info("No completed matches found for this backtest filter. Widen the date range or clear the competition filter.")
-        else:
-            st.write("Summary metrics")
-            st.dataframe(bt_metrics, hide_index=True, width="stretch")
-
-            st.write("Per-match comparison")
-            comparison_cols = [
-                "date_utc",
-                "home",
-                "away",
-                "score",
-                "actual_result",
-                "baseline_actual_prob",
-                "behavior_actual_prob",
-                "actual_prob_delta",
-                "improved_by_behavior",
-                "notes",
-            ]
-            st.dataframe(
-                bt_comparison[[col for col in comparison_cols if col in bt_comparison.columns]],
-                hide_index=True,
-                width="stretch",
+        run_behavior_backtest = st.checkbox("Run behavior-adjusted backtest", value=False, key=f"run_behavior_backtest_{bt_key}")
+        bt_matches = pd.DataFrame()
+        if run_behavior_backtest:
+            backtest_result = load_behavior_backtest_results(
+                bt_start.isoformat(),
+                bt_end.isoformat(),
+                bt_competition,
+                st.session_state["refresh_counter"],
             )
+            bt_matches = backtest_result.get("matches", pd.DataFrame())
+            bt_metrics = backtest_result.get("metrics", pd.DataFrame())
+            bt_comparison = backtest_result.get("comparison", pd.DataFrame())
+            bt_calibration = backtest_result.get("calibration", pd.DataFrame())
+            bt_qa_summary = backtest_result.get("qa_summary", {})
+            bt_qa_matches = backtest_result.get("qa_match_inputs", pd.DataFrame())
+            bt_warning = str(backtest_result.get("warning", ""))
 
-            st.write("Calibration buckets")
-            st.dataframe(bt_calibration, hide_index=True, width="stretch")
+            if bt_warning:
+                st.warning(bt_warning)
+            if isinstance(bt_qa_summary, dict) and bt_qa_summary.get("qa_warning"):
+                st.warning(bt_qa_summary["qa_warning"])
+            st.metric("Completed matches in backtest", f"{len(bt_matches):,}")
+            if bt_metrics.empty:
+                st.info("No completed matches found for this backtest filter. Widen the date range or clear the competition filter.")
+            else:
+                st.write("Summary metrics")
+                st.dataframe(bt_metrics, hide_index=True, width="stretch")
 
-            st.write("Backtest QA")
-            st.caption(
-                "This section checks whether the backtest is valid. If teams are missing ratings or names do not match, "
-                "the model may use neutral fallback values, which can make probabilities unrealistically flat."
-            )
-            if isinstance(bt_qa_summary, dict) and bt_qa_summary:
-                st.dataframe(pd.DataFrame([bt_qa_summary]), hide_index=True, width="stretch")
-
-            qa_cols = [
-                "date_utc",
-                "home",
-                "away",
-                "score",
-                "baseline_home_prob",
-                "baseline_draw_prob",
-                "baseline_away_prob",
-                "behavior_home_prob",
-                "behavior_draw_prob",
-                "behavior_away_prob",
-                "baseline_actual_prob",
-                "behavior_actual_prob",
-                "rating_coverage_warning",
-                "probability_warning",
-            ]
-            if isinstance(bt_qa_matches, pd.DataFrame) and not bt_qa_matches.empty:
+                st.write("Per-match comparison")
+                comparison_cols = [
+                    "date_utc",
+                    "home",
+                    "away",
+                    "score",
+                    "actual_result",
+                    "baseline_actual_prob",
+                    "behavior_actual_prob",
+                    "actual_prob_delta",
+                    "improved_by_behavior",
+                    "notes",
+                ]
                 st.dataframe(
-                    bt_qa_matches[[col for col in qa_cols if col in bt_qa_matches.columns]],
+                    bt_comparison[[col for col in comparison_cols if col in bt_comparison.columns]],
                     hide_index=True,
                     width="stretch",
                 )
-            c_qa1, c_qa2 = st.columns(2)
-            with c_qa1:
-                st.write("Teams with rating coverage warnings")
-                if isinstance(bt_qa_coverage, pd.DataFrame) and not bt_qa_coverage.empty:
-                    coverage_warnings = bt_qa_coverage.loc[bt_qa_coverage["warning"].astype(str) != ""]
-                    st.dataframe(coverage_warnings, hide_index=True, width="stretch")
-            with c_qa2:
-                st.write("Possible alias warnings")
-                if isinstance(bt_qa_aliases, pd.DataFrame) and not bt_qa_aliases.empty:
-                    alias_warnings = bt_qa_aliases.loc[bt_qa_aliases["recommendation"].astype(str) != ""]
-                    st.dataframe(alias_warnings, hide_index=True, width="stretch")
 
+                st.write("Calibration buckets")
+                st.dataframe(bt_calibration, hide_index=True, width="stretch")
+
+                if isinstance(bt_qa_summary, dict) and bt_qa_summary:
+                    st.write("Backtest QA summary")
+                    st.dataframe(pd.DataFrame([bt_qa_summary]), hide_index=True, width="stretch")
+                if isinstance(bt_qa_matches, pd.DataFrame) and not bt_qa_matches.empty:
+                    qa_cols = [
+                        "date_utc",
+                        "home",
+                        "away",
+                        "score",
+                        "baseline_home_prob",
+                        "baseline_draw_prob",
+                        "baseline_away_prob",
+                        "behavior_home_prob",
+                        "behavior_draw_prob",
+                        "behavior_away_prob",
+                        "baseline_actual_prob",
+                        "behavior_actual_prob",
+                        "rating_coverage_warning",
+                        "probability_warning",
+                    ]
+                    st.dataframe(bt_qa_matches[[col for col in qa_cols if col in bt_qa_matches.columns]], hide_index=True, width="stretch")
+        else:
+            st.info("Behavior-adjusted backtest is idle. Enable it to run the completed-match evaluation.")
+
+        if st.checkbox("Run rating/external benchmark diagnostics", value=False, key=f"run_rating_diagnostics_{bt_key}"):
             st.write("Rating Coverage")
-            st.caption(
-                "If a team is missing from the manual ratings file, the model uses neutral fallback values. "
-                "That can make strong and weak teams look too similar."
-            )
             rating_required = collect_required_teams(fixtures, historical_long_matches, team_behavior, bt_matches)
             manual_rating_rows = load_team_ratings_csv()
             rating_aliases = load_team_name_aliases_df(include_defaults=False)
@@ -2086,153 +2213,30 @@ for label in selected_labels:
             rating_summary = rating_coverage_summary(rating_audit, rating_alias_proposals)
             st.dataframe(pd.DataFrame([rating_summary]), hide_index=True, width="stretch")
             if not rating_audit.empty:
-                rating_warnings = rating_audit.loc[rating_audit["warning"].astype(str) != ""]
-                st.dataframe(rating_warnings, hide_index=True, width="stretch")
-            if not rating_alias_proposals.empty:
-                st.write("Proposed alias fixes")
-                st.dataframe(rating_alias_proposals, hide_index=True, width="stretch")
+                st.dataframe(rating_audit.loc[rating_audit["warning"].astype(str) != ""], hide_index=True, width="stretch")
 
             st.write("Rating Review")
-            st.caption(
-                "Generated ratings are conservative placeholders created to avoid neutral fallback. "
-                "They are better than missing ratings, but important teams should be manually reviewed before trusting serious predictions."
-            )
             review_audit = audit_generated_ratings(manual_rating_rows, team_behavior, historical_long_matches, bt_matches)
-            review_summary = rating_review_summary(review_audit)
-            st.dataframe(pd.DataFrame([review_summary]), hide_index=True, width="stretch")
-            if not review_audit.empty:
-                needs_review = review_audit.loc[
-                    review_audit["rating_status"].isin(["generated_from_behavior", "neutral_placeholder", "missing"])
-                    & review_audit["priority"].isin(["high", "medium"])
-                ].copy()
-                review_cols = [
-                    "team",
-                    "rating_status",
-                    "attack",
-                    "defense",
-                    "recent_form",
-                    "behavior_attack_final",
-                    "behavior_defense_final",
-                    "behavior_recent_form",
-                    "backtest_match_count",
-                    "fixture_match_count",
-                    "priority",
-                    "warning",
-                ]
-                st.dataframe(
-                    needs_review[[col for col in review_cols if col in needs_review.columns]],
-                    hide_index=True,
-                    width="stretch",
-                )
+            st.dataframe(pd.DataFrame([rating_review_summary(review_audit)]), hide_index=True, width="stretch")
 
-            st.write("External Prior Review")
-            st.caption(
-                "Generated ratings avoid missing-team fallback, but important teams should be checked against an external or manual prior "
-                "before serious prediction use."
-            )
+            st.write("External Prior / Benchmark Review")
             external_priors = load_external_priors()
             review_proposals = load_review_proposals()
             manual_review_sheet = load_manual_rating_review_sheet()
             prior_comparison = compare_ratings_to_external_priors(manual_rating_rows, review_proposals, external_priors)
-            prior_summary = external_prior_review_summary(prior_comparison, manual_review_sheet)
-            st.dataframe(pd.DataFrame([prior_summary]), hide_index=True, width="stretch")
-            if not prior_comparison.empty:
-                prior_warnings = prior_comparison.loc[prior_comparison["overall_warning"].astype(str) != ""]
-                prior_cols = [
-                    "team",
-                    "proposal_attack",
-                    "proposal_defense",
-                    "proposal_recent_form",
-                    "reference_attack",
-                    "reference_defense",
-                    "reference_recent_form",
-                    "attack_disagreement",
-                    "defense_disagreement",
-                    "form_disagreement",
-                    "overall_warning",
-                    "recommended_action",
-                ]
-                st.dataframe(
-                    prior_warnings[[col for col in prior_cols if col in prior_warnings.columns]],
-                    hide_index=True,
-                    width="stretch",
-                )
-
-            st.write("FIFA Snapshot Validation")
-            st.caption(
-                "This loads the latest saved validation report for the local FIFA ranking snapshot. "
-                "Run the validation script before importing snapshot data into external priors."
-            )
-            fifa_validation_status = fifa_snapshot_validation_dashboard_status()
-            st.dataframe(pd.DataFrame([fifa_validation_status]), hide_index=True, width="stretch")
-
-            st.write("FIFA Ranking Import")
-            st.caption(
-                "This checks the latest local FIFA ranking snapshot/import report used to fill external benchmark inputs. "
-                "It never fetches login-protected sources or changes model ratings from the dashboard."
-            )
-            fifa_import_status = fifa_ranking_import_dashboard_status()
-            st.dataframe(pd.DataFrame([fifa_import_status]), hide_index=True, width="stretch")
-
-            st.write("External Benchmark Coverage")
-            st.caption(
-                "External benchmarks are independent strength references such as FIFA ranking points or Elo. "
-                "More complete benchmark coverage makes the primary model less dependent on generated placeholders."
-            )
+            st.dataframe(pd.DataFrame([external_prior_review_summary(prior_comparison, manual_review_sheet)]), hide_index=True, width="stretch")
             benchmark_coverage = audit_external_benchmark_coverage(rating_required, external_priors, manual_rating_rows)
-            benchmark_summary = external_benchmark_coverage_summary(benchmark_coverage)
-            st.dataframe(pd.DataFrame([benchmark_summary]), hide_index=True, width="stretch")
-            if not benchmark_coverage.empty:
-                missing_benchmarks = benchmark_coverage.loc[~benchmark_coverage["has_external_benchmark"].astype(bool)]
-                high_priority_missing = missing_benchmarks.loc[missing_benchmarks["priority"].astype(str) == "high"]
-                if not high_priority_missing.empty:
-                    st.write("High-priority teams missing external benchmarks")
-                    st.dataframe(high_priority_missing, hide_index=True, width="stretch")
-                else:
-                    st.caption("No high-priority required teams are missing external benchmarks.")
-
-            st.write("External Benchmark Calibration")
-            st.caption(
-                "This compares the model's internal ratings against independent FIFA/Elo strength references. "
-                "It reduces the need for subjective manual football judgement."
-            )
+            st.dataframe(pd.DataFrame([external_benchmark_coverage_summary(benchmark_coverage)]), hide_index=True, width="stretch")
             calibration_proposals = load_external_calibration_proposals()
             if calibration_proposals.empty:
                 calibration_proposals = build_external_calibration_proposals(manual_rating_rows, team_behavior, external_priors)
-            calibration_summary = external_benchmark_calibration_summary(calibration_proposals, manual_rating_rows)
-            st.dataframe(pd.DataFrame([calibration_summary]), hide_index=True, width="stretch")
-            if not calibration_proposals.empty:
-                calibration_warning_rows = calibration_proposals.loc[calibration_proposals["warning"].astype(str) != ""]
-                calibration_cols = [
-                    "team",
-                    "current_attack",
-                    "current_defense",
-                    "current_recent_form",
-                    "behavior_attack_final",
-                    "behavior_defense_final",
-                    "behavior_recent_form",
-                    "external_overall_strength",
-                    "calibrated_attack",
-                    "calibrated_defense",
-                    "calibrated_recent_form",
-                    "attack_delta",
-                    "defense_delta",
-                    "recent_form_delta",
-                    "data_quality_current",
-                    "data_quality_proposed",
-                    "warning",
-                ]
-                st.dataframe(
-                    calibration_warning_rows[[col for col in calibration_cols if col in calibration_warning_rows.columns]],
-                    hide_index=True,
-                    width="stretch",
-                )
+            st.dataframe(pd.DataFrame([external_benchmark_calibration_summary(calibration_proposals, manual_rating_rows)]), hide_index=True, width="stretch")
 
+            st.write("FIFA Snapshot / Ranking Import Status")
+            st.dataframe(pd.DataFrame([fifa_snapshot_validation_dashboard_status(), fifa_ranking_import_dashboard_status()]), hide_index=True, width="stretch")
+
+        if st.checkbox("Run strict as-of-date backtest", value=False, key=f"run_asof_backtest_{bt_key}"):
             st.write("Strict As-Of-Date Backtest")
-            st.caption(
-                "This is stricter than the first backtest. For each historical match, the model only uses games that happened before that match. "
-                "This avoids look-ahead bias."
-            )
             asof_result = load_asof_backtest_results(
                 bt_start.isoformat(),
                 bt_end.isoformat(),
@@ -2245,35 +2249,12 @@ for label in selected_labels:
             asof_warning = str(asof_result.get("warning", ""))
             if asof_warning:
                 st.warning(asof_warning)
-            if isinstance(asof_predictions, pd.DataFrame) and not asof_predictions.empty:
-                lookahead_violations = int((~asof_predictions["lookahead_safe"].astype(bool)).sum()) if "lookahead_safe" in asof_predictions.columns else 0
-                if lookahead_violations:
-                    st.error(f"{lookahead_violations} strict backtest prediction rows used future data. Inspect diagnostics before trusting metrics.")
             if isinstance(asof_metrics, pd.DataFrame) and not asof_metrics.empty:
-                st.write("Strict v2 summary metrics")
                 st.dataframe(asof_metrics, hide_index=True, width="stretch")
             if isinstance(asof_comparison, pd.DataFrame) and not asof_comparison.empty:
-                st.write("Strict v2 per-match comparison")
-                asof_comp_cols = [
-                    "date_utc",
-                    "home",
-                    "away",
-                    "score",
-                    "actual_result",
-                    "baseline_actual_prob",
-                    "behavior_asof_actual_prob",
-                    "actual_prob_delta",
-                    "improved_by_behavior_asof",
-                    "notes",
-                ]
-                st.dataframe(
-                    asof_comparison[[col for col in asof_comp_cols if col in asof_comparison.columns]],
-                    hide_index=True,
-                    width="stretch",
-                )
+                st.dataframe(asof_comparison, hide_index=True, width="stretch")
             if isinstance(asof_predictions, pd.DataFrame) and not asof_predictions.empty:
-                st.write("Strict v2 behavior windows")
-                asof_diag_cols = [
+                diag_cols = [
                     "date_utc",
                     "home",
                     "away",
@@ -2285,41 +2266,26 @@ for label in selected_labels:
                     "lookahead_safe",
                     "warning",
                 ]
-                st.dataframe(
-                    asof_predictions[[col for col in asof_diag_cols if col in asof_predictions.columns]],
-                    hide_index=True,
-                    width="stretch",
-                )
+                st.dataframe(asof_predictions[[col for col in diag_cols if col in asof_predictions.columns]], hide_index=True, width="stretch")
 
-            st.write("Behavior Blend Sensitivity")
-            st.caption(
-                "This tests how much recent behavior should influence the model. If 0% behavior is best, behavior should stay diagnostic. "
-                "If a small behavior blend is best, the model should use behavior more cautiously."
+        if st.checkbox("Run strict behavior blend sensitivity", value=False, key=f"blend_sensitivity_{bt_key}"):
+            blend_result = load_blend_sensitivity_results(
+                bt_start.isoformat(),
+                bt_end.isoformat(),
+                bt_competition,
+                st.session_state["refresh_counter"],
             )
-            run_blend_sensitivity = st.checkbox("Run strict behavior blend sensitivity", value=False, key=f"blend_sensitivity_{bt_key}")
-            if run_blend_sensitivity:
-                blend_result = load_blend_sensitivity_results(
-                    bt_start.isoformat(),
-                    bt_end.isoformat(),
-                    bt_competition,
-                    st.session_state["refresh_counter"],
-                )
-                blend_metrics = blend_result.get("metrics", pd.DataFrame())
-                blend_team = blend_result.get("team_sensitivity", pd.DataFrame())
-                blend_recommendation = str(blend_result.get("recommendation", ""))
-                if blend_recommendation:
-                    st.info(blend_recommendation)
-                if isinstance(blend_metrics, pd.DataFrame) and not blend_metrics.empty:
-                    st.write("Metrics by blend multiplier")
-                    st.dataframe(blend_metrics, hide_index=True, width="stretch")
-                    best_brier = blend_metrics.sort_values("brier_score_1x2").iloc[0]
-                    best_log = blend_metrics.sort_values("log_loss_1x2").iloc[0]
-                    c_brier, c_log = st.columns(2)
-                    c_brier.metric("Best blend by Brier", f"{float(best_brier['blend_multiplier']):.2f}")
-                    c_log.metric("Best blend by log loss", f"{float(best_log['blend_multiplier']):.2f}")
-                if isinstance(blend_team, pd.DataFrame) and not blend_team.empty:
-                    st.write("Team-level helped/hurt")
-                    st.dataframe(blend_team, hide_index=True, width="stretch")
+            blend_metrics = blend_result.get("metrics", pd.DataFrame())
+            blend_team = blend_result.get("team_sensitivity", pd.DataFrame())
+            blend_recommendation = str(blend_result.get("recommendation", ""))
+            if blend_recommendation:
+                st.info(blend_recommendation)
+            if isinstance(blend_metrics, pd.DataFrame) and not blend_metrics.empty:
+                st.write("Metrics by blend multiplier")
+                st.dataframe(blend_metrics, hide_index=True, width="stretch")
+            if isinstance(blend_team, pd.DataFrame) and not blend_team.empty:
+                st.write("Team-level helped/hurt")
+                st.dataframe(blend_team, hide_index=True, width="stretch")
 
     with tabs[7]:
         st.subheader("Team Inputs")
@@ -2474,55 +2440,63 @@ for label in selected_labels:
             "This section explains whether a team's high score comes from consistent performance, weak opponents, "
             "friendlies, or a few large wins."
         )
-        for selected_team in [result["home"], result["away"]]:
-            with st.expander(f"{selected_team} behavior drivers", expanded=False):
-                d1, d2 = st.columns(2)
-                with d1:
-                    st.markdown("**Top attack driver matches**")
-                    attack_drivers = behavior_driver_matches_display(
-                        historical_long_matches,
-                        selected_team,
-                        match.get("date_utc"),
-                        sort_by="attack",
-                        limit=10,
-                    )
-                    if attack_drivers.empty:
-                        st.caption("No attack driver rows are available.")
-                    else:
-                        st.dataframe(attack_drivers, hide_index=True, width="stretch")
-                with d2:
-                    st.markdown("**Top defense driver matches**")
-                    defense_drivers = behavior_driver_matches_display(
-                        historical_long_matches,
-                        selected_team,
-                        match.get("date_utc"),
-                        sort_by="defense",
-                        limit=10,
-                    )
-                    if defense_drivers.empty:
-                        st.caption("No defense driver rows are available.")
-                    else:
-                        st.dataframe(defense_drivers, hide_index=True, width="stretch")
+        run_behavior_drivers = st.checkbox(
+            "Run behavior driver diagnostics",
+            value=False,
+            key=f"run_behavior_drivers_{str(match.get('match_id', label)).replace(' ', '_')}",
+        )
+        if run_behavior_drivers:
+            for selected_team in [result["home"], result["away"]]:
+                with st.expander(f"{selected_team} behavior drivers", expanded=False):
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        st.markdown("**Top attack driver matches**")
+                        attack_drivers = behavior_driver_matches_display(
+                            historical_long_matches,
+                            selected_team,
+                            match.get("date_utc"),
+                            sort_by="attack",
+                            limit=10,
+                        )
+                        if attack_drivers.empty:
+                            st.caption("No attack driver rows are available.")
+                        else:
+                            st.dataframe(attack_drivers, hide_index=True, width="stretch")
+                    with d2:
+                        st.markdown("**Top defense driver matches**")
+                        defense_drivers = behavior_driver_matches_display(
+                            historical_long_matches,
+                            selected_team,
+                            match.get("date_utc"),
+                            sort_by="defense",
+                            limit=10,
+                        )
+                        if defense_drivers.empty:
+                            st.caption("No defense driver rows are available.")
+                        else:
+                            st.dataframe(defense_drivers, hide_index=True, width="stretch")
 
-                b1, b2 = st.columns(2)
-                with b1:
-                    st.markdown("**Opponent tier breakdown**")
-                    opponent_breakdown = behavior_breakdown_display(
-                        calculate_opponent_tier_breakdown(historical_long_matches, selected_team, match.get("date_utc"))
-                    )
-                    if opponent_breakdown.empty:
-                        st.caption("No opponent-tier breakdown is available.")
-                    else:
-                        st.dataframe(opponent_breakdown, hide_index=True, width="stretch")
-                with b2:
-                    st.markdown("**Competition breakdown**")
-                    competition_breakdown = behavior_breakdown_display(
-                        calculate_competition_breakdown(historical_long_matches, selected_team, match.get("date_utc"))
-                    )
-                    if competition_breakdown.empty:
-                        st.caption("No competition breakdown is available.")
-                    else:
-                        st.dataframe(competition_breakdown, hide_index=True, width="stretch")
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        st.markdown("**Opponent tier breakdown**")
+                        opponent_breakdown = behavior_breakdown_display(
+                            calculate_opponent_tier_breakdown(historical_long_matches, selected_team, match.get("date_utc"))
+                        )
+                        if opponent_breakdown.empty:
+                            st.caption("No opponent-tier breakdown is available.")
+                        else:
+                            st.dataframe(opponent_breakdown, hide_index=True, width="stretch")
+                    with b2:
+                        st.markdown("**Competition breakdown**")
+                        competition_breakdown = behavior_breakdown_display(
+                            calculate_competition_breakdown(historical_long_matches, selected_team, match.get("date_utc"))
+                        )
+                        if competition_breakdown.empty:
+                            st.caption("No competition breakdown is available.")
+                        else:
+                            st.dataframe(competition_breakdown, hide_index=True, width="stretch")
+        else:
+            st.info("Behavior driver diagnostics are idle. Enable them to scan historical match drivers and breakdowns.")
 
         st.subheader("Final Model Input Impact")
         input_audit = final_model_input_audit_display(teams, team_behavior, [result["home"], result["away"]])
@@ -2619,62 +2593,95 @@ for label in selected_labels:
             "This section evaluates saved pre-match predictions after results are known. "
             "It supports evidence-based model improvement without tuning to one match or copying another model."
         )
-        ledger = load_prediction_ledger()
-        results_ledger = load_results_ledger()
-        joined_pm = join_predictions_to_results(ledger, results_ledger)
-        errors_pm = calculate_prediction_errors(joined_pm)
-        report_pm = build_postmortem_report(errors_pm, joined_pm)
-
-        pm1, pm2, pm3 = st.columns(3)
-        pm1.metric("Prediction ledger rows", f"{len(ledger):,}")
-        pm2.metric("Completed result rows", f"{len(results_ledger):,}")
-        pm3.metric("Scored pre-kickoff predictions", f"{len(errors_pm):,}")
-
-        if errors_pm.empty:
-            st.info(
-                "No scored pre-kickoff predictions are available yet. Run "
-                "`scripts/snapshot_upcoming_predictions.py` before matches and "
-                "`scripts/import_completed_results.py` after results are known."
+        pm_key = str(match.get("match_id", label)).replace(" ", "_")
+        if not st.checkbox("Load post-mortem diagnostics", value=False, key=f"load_postmortem_{pm_key}"):
+            st.info("Post-mortem diagnostics are idle. Enable them to load ledgers, candidate reports, and rolling tournament learning state.")
+            st.caption(
+                "Training uses walk-forward validation. Historical senior national-team games before each prediction date are included with relevance weights. "
+                "This is evaluation-only and does not provide staking, trade execution, Kelly sizing, or betting advice."
             )
         else:
-            summary_pm = report_pm.get("summary_metrics", pd.DataFrame())
-            st.write("Post-mortem metrics")
-            st.dataframe(summary_pm, hide_index=True, width="stretch")
-            c_best, c_worst = st.columns(2)
-            with c_worst:
-                st.write("Worst misses")
-                st.dataframe(report_pm.get("worst_misses", pd.DataFrame()).head(10), hide_index=True, width="stretch")
-            with c_best:
-                st.write("Best calls")
-                st.dataframe(report_pm.get("best_calls", pd.DataFrame()).head(10), hide_index=True, width="stretch")
+            ledger = load_prediction_ledger()
+            results_ledger = load_results_ledger()
+            joined_pm = join_predictions_to_results(ledger, results_ledger)
+            errors_pm = calculate_prediction_errors(joined_pm)
+            report_pm = build_postmortem_report(errors_pm, joined_pm)
 
-        st.divider()
-        st.write("Candidate model leaderboard")
-        training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
-        if training_reports:
-            latest_training = training_reports[-1]
-            try:
-                leaderboard = pd.read_csv(latest_training)
-            except Exception:
-                leaderboard = pd.DataFrame()
-            st.caption(f"Latest saved candidate report: `{latest_training.name}`")
-            if leaderboard.empty:
-                st.info("Latest candidate report could not be read.")
+            pm1, pm2, pm3 = st.columns(3)
+            pm1.metric("Prediction ledger rows", f"{len(ledger):,}")
+            pm2.metric("Completed result rows", f"{len(results_ledger):,}")
+            pm3.metric("Scored pre-kickoff predictions", f"{len(errors_pm):,}")
+
+            st.divider()
+            st.write("Rolling tournament learning")
+            learning_ledger = load_tournament_learning_ledger()
+            target_kickoff_for_learning = pd.to_datetime(match.get("date_utc"), errors="coerce", utc=True)
+            if pd.isna(target_kickoff_for_learning):
+                target_kickoff_for_learning = pd.Timestamp.utcnow()
+            learning_used, learning_diag = filter_tournament_learning_asof(
+                learning_ledger,
+                target_kickoff_for_learning,
+                target_match_id=str(match.get("match_id", "")),
+            )
+            l1, l2, l3, l4 = st.columns(4)
+            l1.metric("Completed WC matches available", f"{learning_diag.get('completed_world_cup_matches_available', 0):,}")
+            l2.metric("Eligible before selected kickoff", f"{learning_diag.get('completed_world_cup_matches_used', 0):,}")
+            l3.metric("Latest match used", str(learning_diag.get("latest_completed_match_used", "") or "n/a"))
+            l4.metric("Lookahead safe", "yes" if learning_diag.get("lookahead_safe", True) else "no")
+            st.caption(
+                "After each match finishes, the model can learn from that result for future games. "
+                "It does not use a game's result to predict itself."
+            )
+            if not learning_used.empty:
+                display_cols = ["date_utc", "home", "away", "actual_result", "eligible_after_utc", "source"]
+                st.dataframe(
+                    learning_used[[col for col in display_cols if col in learning_used.columns]].tail(20),
+                    hide_index=True,
+                    width="stretch",
+                )
+
+            if errors_pm.empty:
+                st.info(
+                    "No scored pre-kickoff predictions are available yet. Run "
+                    "`scripts/snapshot_upcoming_predictions.py` before matches and "
+                    "`scripts/import_completed_results.py` after results are known."
+                )
             else:
-                st.dataframe(leaderboard.head(20), hide_index=True, width="stretch")
-                if "promotion_status" in leaderboard.columns:
-                    promoted = leaderboard.loc[leaderboard["promotion_status"].astype(str) == "promotion_candidate"]
-                else:
-                    promoted = pd.DataFrame()
-                if promoted.empty:
-                    st.info("No candidate is currently promoted; baseline external-calibrated remains the primary model.")
-                else:
-                    st.success("A candidate met the promotion rule in the latest saved report. Review it before changing model policy.")
-        else:
-            st.info("No candidate training report exists yet. Run `scripts/train_model_candidates.py --save-report`.")
+                summary_pm = report_pm.get("summary_metrics", pd.DataFrame())
+                st.write("Post-mortem metrics")
+                st.dataframe(summary_pm, hide_index=True, width="stretch")
+                c_best, c_worst = st.columns(2)
+                with c_worst:
+                    st.write("Worst misses")
+                    st.dataframe(report_pm.get("worst_misses", pd.DataFrame()).head(10), hide_index=True, width="stretch")
+                with c_best:
+                    st.write("Best calls")
+                    st.dataframe(report_pm.get("best_calls", pd.DataFrame()).head(10), hide_index=True, width="stretch")
 
-        st.caption(
-            "Training uses walk-forward validation. Historical senior national-team games before each prediction date are included with relevance weights: "
-            "recent qualifiers and tournament matches carry more weight; old friendlies carry less. "
-            "This is evaluation-only and does not provide staking, trade execution, Kelly sizing, or betting advice."
-        )
+            st.divider()
+            st.write("Candidate model leaderboard")
+            training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
+            if training_reports:
+                latest_training = training_reports[-1]
+                try:
+                    leaderboard = pd.read_csv(latest_training)
+                except Exception:
+                    leaderboard = pd.DataFrame()
+                st.caption(f"Latest saved candidate report: `{latest_training.name}`")
+                if leaderboard.empty:
+                    st.info("Latest candidate report could not be read.")
+                else:
+                    st.dataframe(leaderboard.head(20), hide_index=True, width="stretch")
+                    promoted = leaderboard.loc[leaderboard["promotion_status"].astype(str) == "promotion_candidate"] if "promotion_status" in leaderboard.columns else pd.DataFrame()
+                    if promoted.empty:
+                        st.info("No candidate is currently promoted; baseline external-calibrated remains the primary model.")
+                    else:
+                        st.success("A candidate met the promotion rule in the latest saved report. Review it before changing model policy.")
+            else:
+                st.info("No candidate training report exists yet. Run `scripts/train_model_candidates.py --save-report`.")
+
+            st.caption(
+                "Training uses walk-forward validation. Historical senior national-team games before each prediction date are included with relevance weights: "
+                "recent qualifiers and tournament matches carry more weight; old friendlies carry less. "
+                "This is evaluation-only and does not provide staking, trade execution, Kelly sizing, or betting advice."
+            )

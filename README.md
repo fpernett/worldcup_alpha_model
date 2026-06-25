@@ -200,6 +200,19 @@ match_id,date_utc,time_utc,competition,group,home,away,venue,city,country
 
 Use UTC dates and times. The `home`, `away`, and `venue` names should match `data/team_ratings.csv` and `data/venues.csv` where possible.
 
+Fixture visibility can be audited without changing model inputs:
+
+```bash
+.venv/bin/python scripts/audit_fixture_availability.py \
+  --start-date 2026-06-22 \
+  --end-date 2026-06-29 \
+  --hide-past
+```
+
+The audit explains which fixtures are loaded, inside the selected UTC window, hidden as past kickoffs, or excluded. The dashboard also shows fixture availability diagnostics so a selected range such as upcoming 48 hours or next 7 days is not confused with a today-only fixture list.
+
+If the loaded fixture source ends before the selected range, the app shows a Data Health warning instead of silently looking like a today-only app. Refresh API/cache or update `data/fixtures.csv`; the app does not fabricate future fixtures while offline.
+
 ### Team Ratings
 
 Edit `data/team_ratings.csv`:
@@ -231,6 +244,17 @@ Required v1 result fields are date, teams, opponents, goals, and competition whe
 - `temperature_c`, `humidity_pct`, `wind_kmh`, `precipitation_mm`, `roof_closed`
 
 Manual rows are preserved during ingestion when `source = manual`. New API rows are deduplicated by `match_id + team + opponent`; if `match_id` is missing, the fallback key uses date, team, opponent, and score.
+
+Historical data binding can be audited for a selected match:
+
+```bash
+.venv/bin/python scripts/audit_historical_binding.py \
+  --home Jordan \
+  --away Algeria \
+  --as-of-date 2026-06-23
+```
+
+The audit canonicalizes team names through `data/team_name_aliases.csv`, counts historical rows for both teams, counts head-to-head rows, checks rating and behavior rows, and reports close-name suggestions when a canonical team is not found. The app uses this binding audit in the report so imported long-format historical rows are not mistaken for missing data.
 
 ### Generic Historical Results CSV Import
 
@@ -802,7 +826,15 @@ Required result columns:
 match_id,home,away,home_goals,away_goals,result_home_win,result_draw,result_away_win,over_2_5,under_2_5,btts_yes,btts_no,completed,result_source,last_updated
 ```
 
-The **Backtesting** tab loads both logs and reports simple Brier score, log loss, mean alpha gap, hit rate by signal strength, and calibration buckets when completed results exist.
+The **Backtesting** tab can load both logs and report simple Brier score, log loss, mean alpha gap, hit rate by signal strength, and calibration buckets when completed results exist. These diagnostics are opt-in so normal match selection does not parse heavy logs or run expensive backtests automatically.
+
+If `data/prediction_log.csv` becomes unreadable because old and new dashboard schemas were appended into the same file, quarantine and rebuild it with:
+
+```bash
+.venv/bin/python scripts/repair_prediction_log.py
+```
+
+The script preserves the malformed file as `data/prediction_log_corrupt_backup_YYYY-MM-DD_HHMMSS.csv` and recreates `data/prediction_log.csv` with the current schema.
 
 ### Behavior-Adjusted Completed-Match Backtesting
 
@@ -1535,8 +1567,14 @@ The post-mortem loop improves the model from completed matches without tuning to
 
 - `data/prediction_ledger.csv`: append-only pre-match prediction snapshots by model version and parameter set.
 - `data/results_ledger.csv`: completed match results with outcome, totals, and BTTS flags.
+- `data/tournament_learning_ledger.csv`: completed tournament matches that are eligible for future calibration only after their `eligible_after_utc`.
 
-Snapshot predictions before kickoff:
+The app uses two learning loops:
+
+- Before-match fast loop: for a selected upcoming match, build a match-specific calibration set from historical senior national-team matches and already-completed World Cup matches available before kickoff. It can recommend a match-specific parameter set, but it does not change the global primary model.
+- After-match post-mortem loop: after results are imported, join final scores to saved pre-kickoff predictions, calculate errors, update the candidate leaderboard, and make completed matches available for future calibration only.
+
+Before games, snapshot predictions before kickoff:
 
 ```bash
 .venv/bin/python scripts/snapshot_upcoming_predictions.py \
@@ -1545,7 +1583,36 @@ Snapshot predictions before kickoff:
   --competition "World Cup"
 ```
 
-Import final results after matches complete:
+After games finish, run the rolling update:
+
+```bash
+.venv/bin/python scripts/update_after_completed_games.py \
+  --start-date 2026-06-11 \
+  --end-date 2026-06-27 \
+  --competition "World Cup"
+```
+
+This imports completed results, updates `data/tournament_learning_ledger.csv`, runs post-mortem scoring, refreshes the candidate leaderboard, and writes:
+
+```text
+reports/tournament_learning_update_YYYY-MM-DD.md
+reports/tournament_learning_update_YYYY-MM-DD.csv
+```
+
+Before analyzing one upcoming match, build its match-specific calibration evidence:
+
+```bash
+.venv/bin/python scripts/run_match_specific_calibration.py \
+  --home Jordan \
+  --away Algeria \
+  --prediction-date 2026-06-23 \
+  --competition "World Cup" \
+  --save-report
+```
+
+Completed World Cup games are included only when `eligible_after_utc < target_kickoff_utc`. The target match itself is excluded. This means Match A can train Match B after Match A finishes, but Match B cannot use its own result before evaluation.
+
+You can still import final results directly:
 
 ```bash
 .venv/bin/python scripts/import_completed_results.py \
@@ -1660,6 +1727,8 @@ The tests check probability sums, fair odds, score matrix normalization, missing
 - Expected goals from Elo are transparent and capped, but they are not a substitute for real xG or lineup-level information.
 - Recent behavior can differ sharply from all-time history; the dashboard flags those cases instead of treating them as causal proof.
 - Post-mortem training depends on saved pre-kickoff prediction snapshots; predictions saved after kickoff are excluded from scored post-mortems.
+- Rolling tournament learning only uses completed matches after `eligible_after_utc`; a match result is never used to calibrate that same match before evaluation.
+- Match-specific calibration recommendations are diagnostic-only and do not change the global primary model.
 - Candidate training uses transparent parameter grids and walk-forward validation, not black-box machine learning.
 - Candidate promotion requires strict out-of-sample improvement; otherwise the current baseline remains primary.
 - Environmental response requires enough previous matches to be meaningful.

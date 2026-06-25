@@ -19,6 +19,7 @@ from src.historical_data import build_historical_matches_from_results, load_hist
 from src.odds import ODDS_COLUMNS, load_market_odds, update_market_odds_for_fixtures
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
 from src.team_behavior import rebuild_team_behavior_csv
+from src.team_names import team_name_key
 from src.utils import csv_status, parse_date, read_csv_with_columns
 from src.weather import VENUE_COLUMNS, fetch_weather_for_fixtures
 
@@ -44,6 +45,18 @@ RESULT_COLUMNS = [
     "away_goals",
     "home_elo",
     "away_elo",
+]
+
+INTERNATIONAL_RESULTS_FIXTURE_COLUMNS = [
+    "date",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    "tournament",
+    "city",
+    "country",
+    "neutral",
 ]
 
 
@@ -85,13 +98,16 @@ def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool 
                 warning=f"API failed; using cached fixtures. {warning}",
             )
 
-    local = _normalise_fixtures(read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS))
+    local = _load_local_fixture_pool()
     return _with_fixture_source(
         _filter_fixture_window(local, start, end),
         SOURCE_LOCAL,
-        "data/fixtures.csv",
+        local.attrs.get("source_detail", "data/fixtures.csv"),
         _csv_last_modified("fixtures.csv"),
-        warning=f"API unavailable; using local CSV. {warning}" if warning else None,
+        warning=_combine_warnings(
+            f"API unavailable; using local CSV. {warning}" if warning else "",
+            local.attrs.get("warning", ""),
+        ),
     )
 
 
@@ -138,6 +154,92 @@ def filter_future_fixtures(
     filtered = out.loc[mask].sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
     filtered.attrs = attrs
     return filtered
+
+
+def _load_local_fixture_pool() -> pd.DataFrame:
+    """Load local fixtures plus date-only future rows from international_results.csv.
+
+    `data/fixtures.csv` remains the authoritative local schedule. The imported
+    international results snapshot can contain future tournament rows with blank
+    scores; those rows are useful as a fallback when the curated fixture file is
+    incomplete. Because that source has no kickoff time or stadium, fallback rows
+    use `23:59` UTC and city-as-venue so they remain selectable but visibly carry
+    a source warning.
+    """
+    curated = _normalise_fixtures(read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS))
+    supplemental = _future_fixtures_from_international_results()
+    if supplemental.empty:
+        return curated
+
+    combined = pd.concat([curated, supplemental], ignore_index=True)
+    combined["_dedupe_key"] = combined.apply(_fixture_dedupe_key, axis=1)
+    combined["_priority"] = combined["match_id"].astype(str).str.startswith("intl_").astype(int)
+    combined = (
+        combined.sort_values(["_dedupe_key", "_priority"])
+        .drop_duplicates(subset=["_dedupe_key"], keep="first")
+        .drop(columns=["_dedupe_key", "_priority"])
+    )
+    combined = _normalise_fixtures(combined)
+    if len(combined) > len(curated):
+        combined.attrs["source_detail"] = "data/fixtures.csv + data/international_results.csv"
+        combined.attrs["warning"] = (
+            "Some fixtures came from data/international_results.csv because data/fixtures.csv is incomplete. "
+            "Those fallback rows have date-only kickoff placeholders at 23:59 UTC and city-as-venue."
+        )
+    else:
+        combined.attrs["source_detail"] = "data/fixtures.csv"
+    return combined
+
+
+def _future_fixtures_from_international_results() -> pd.DataFrame:
+    source = read_csv_with_columns(DATA_DIR / "international_results.csv", INTERNATIONAL_RESULTS_FIXTURE_COLUMNS)
+    if source.empty:
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+    out = source.copy()
+    out["date_utc"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+    out = out.dropna(subset=["date_utc", "home_team", "away_team"]).copy()
+    out = out.loc[
+        out["home_score"].isna()
+        & out["away_score"].isna()
+        & out["tournament"].astype(str).str.contains("World Cup", case=False, na=False)
+    ].copy()
+    if out.empty:
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+
+    out["match_id"] = out.apply(_supplemental_fixture_id, axis=1)
+    out["time_utc"] = "23:59"
+    out["competition"] = out["tournament"].fillna("FIFA World Cup")
+    out["group"] = ""
+    out["home"] = out["home_team"]
+    out["away"] = out["away_team"]
+    out["venue"] = out["city"].fillna("")
+    out["city"] = out["city"].fillna("")
+    out["country"] = out["country"].fillna("")
+    return _normalise_fixtures(out[FIXTURE_COLUMNS])
+
+
+def _supplemental_fixture_id(row: pd.Series) -> str:
+    parts = [
+        "intl",
+        str(row.get("date_utc", "")),
+        _slug_part(row.get("home_team", "")),
+        _slug_part(row.get("away_team", "")),
+    ]
+    return "_".join(part for part in parts if part)
+
+
+def _fixture_dedupe_key(row: pd.Series) -> str:
+    date_key = str(pd.to_datetime(row.get("date_utc"), errors="coerce").date())
+    return "|".join([date_key, team_name_key(row.get("home", "")), team_name_key(row.get("away", ""))])
+
+
+def _slug_part(value: Any) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value or "").strip()).strip("_")
+
+
+def _combine_warnings(*warnings: str) -> str | None:
+    parts = [str(warning).strip() for warning in warnings if str(warning or "").strip()]
+    return " ".join(parts) if parts else None
 
 
 def fetch_football_results(

@@ -5,11 +5,12 @@ import math
 from typing import Any
 
 import pandas as pd
+from pandas.errors import ParserError
 
 from src.cache import utc_now_iso
-from src.config import DATA_DIR
 from src.model_policy import get_current_model_policy, policy_export_fields
-from src.storage import append_csv, load_csv
+from src.prediction_log_repair import empty_prediction_log_with_warning, inspect_prediction_log_schema
+from src.storage import append_csv, data_path, load_csv
 
 
 PREDICTION_LOG_COLUMNS = [
@@ -115,7 +116,16 @@ def save_prediction_snapshot(match_row, model_result: dict, polymarket_alpha_df:
 
 
 def load_prediction_log() -> pd.DataFrame:
-    return load_csv("prediction_log.csv", PREDICTION_LOG_COLUMNS)
+    diagnostics = inspect_prediction_log_schema(data_path("prediction_log.csv"), PREDICTION_LOG_COLUMNS)
+    if diagnostics.get("is_corrupt"):
+        return empty_prediction_log_with_warning(PREDICTION_LOG_COLUMNS, str(diagnostics.get("warning", "")))
+    try:
+        return load_csv("prediction_log.csv", PREDICTION_LOG_COLUMNS)
+    except (ParserError, ValueError) as exc:
+        return empty_prediction_log_with_warning(
+            PREDICTION_LOG_COLUMNS,
+            f"prediction_log.csv could not be parsed and was ignored for this session: {exc}",
+        )
 
 
 def load_results_log() -> pd.DataFrame:
