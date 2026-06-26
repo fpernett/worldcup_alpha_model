@@ -43,7 +43,6 @@ from src.fifa_ranking_import import fifa_ranking_import_dashboard_status
 from src.fifa_snapshot_validation import fifa_snapshot_validation_dashboard_status
 from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
-from src.market_tables import group_market_alpha
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.model_policy import (
     annotate_decimal_alpha_with_policy,
@@ -60,6 +59,14 @@ from src.polymarket_url_resolver import (
     resolve_polymarket_event_markets_from_url_or_slug,
     resolved_url_markets_to_polymarket_rows,
     score_polymarket_event_slug_for_fixture,
+)
+from src.polymarket_slug_join import (
+    build_polymarket_sports_slug_candidates,
+    joined_market_groups,
+    join_polymarket_prices_to_model_markets,
+    load_polymarket_event_markets_by_slug,
+    polymarket_alpha_rows,
+    resolve_polymarket_slug_for_fixture,
 )
 from src.postmortem import build_postmortem_report, calculate_prediction_errors, join_predictions_to_results
 from src.prediction_ledger import load_prediction_ledger, load_results_ledger
@@ -994,6 +1001,11 @@ def load_polymarket_url_or_slug_inputs(value: str, refresh_counter: int):
 
 
 @st.cache_data(ttl=600)
+def load_polymarket_event_markets_for_slug(slug: str, refresh_counter: int):
+    return load_polymarket_event_markets_by_slug(slug)
+
+
+@st.cache_data(ttl=600)
 def load_behavior_backtest_results(
     start_date_iso: str,
     end_date_iso: str,
@@ -1375,6 +1387,32 @@ for label in selected_labels:
         alpha["odds_last_updated"] = ""
 
     confidence = result["confidence"]
+    slug_candidates = build_polymarket_sports_slug_candidates(
+        str(match.get("home", "")),
+        str(match.get("away", "")),
+        str(match.get("date_utc", "")),
+        str(match.get("competition", "World Cup") or "World Cup"),
+    )
+    slug_resolution = resolve_polymarket_slug_for_fixture(
+        str(match.get("home", "")),
+        str(match.get("away", "")),
+        str(match.get("date_utc", "")),
+        str(match.get("competition", "World Cup") or "World Cup"),
+        user_supplied_slug_or_url=polymarket_event_url_or_slug.strip() or None,
+    )
+    resolved_event_markets = pd.DataFrame()
+    if slug_resolution.get("resolved_slug"):
+        resolved_event_markets = load_polymarket_event_markets_for_slug(
+            str(slug_resolution.get("resolved_slug", "")),
+            st.session_state["polymarket_refresh_counter"],
+        )
+    joined_polymarket_markets = join_polymarket_prices_to_model_markets(
+        alpha,
+        resolved_event_markets,
+        str(match.get("home", "")),
+        str(match.get("away", "")),
+    )
+    joined_polymarket_alpha_rows = polymarket_alpha_rows(joined_polymarket_markets)
     mapped_markets = map_match_to_polymarket_markets(match, polymarket_markets)
     match_polymarket_markets = pd.DataFrame()
     url_resolved_markets = pd.DataFrame()
@@ -1455,7 +1493,7 @@ for label in selected_labels:
     expected_goals_df = build_expected_goals_df(result)
     rating_percentiles = calculate_team_rating_percentiles(teams, result["home"], result["away"])
     climate_factors = build_climate_factor_table(result, venue_env)
-    market_groups = group_market_alpha(alpha, polymarket_alpha)
+    market_groups = joined_market_groups(joined_polymarket_markets)
 
     st.divider()
     st.header(f"{result['home']} vs {result['away']}")
@@ -1723,12 +1761,25 @@ for label in selected_labels:
             st.dataframe(model_info, hide_index=True, width="stretch")
 
         st.subheader("Market Value Tables")
+        markets_loaded_count = len(resolved_event_markets)
+        markets_joined_count = int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0
+        if slug_resolution.get("resolution_status") != "resolved":
+            st.warning("No Polymarket event resolved for this fixture.")
+        elif markets_loaded_count == 0:
+            st.warning("Polymarket event resolved, but no nested market prices were loaded.")
+        elif markets_joined_count == 0:
+            st.warning("Polymarket event resolved, but no matching market prices were found for the local market groups.")
         for group_name, group_df in market_groups.items():
             st.markdown(f"**{group_name}**")
             if group_df.empty:
-                st.caption("No rows available for this group.")
+                if slug_resolution.get("resolution_status") != "resolved":
+                    st.caption("No Polymarket event resolved for this fixture.")
+                else:
+                    st.caption("Polymarket event resolved, but no matching market prices were found for this market group.")
             else:
                 st.dataframe(group_df, hide_index=True, width="stretch")
+                if "Odds / Price" in group_df.columns and not group_df["Odds / Price"].astype(str).str.strip().any():
+                    st.caption("Polymarket event resolved, but no matching market prices were found for this market group.")
 
     with tabs[2]:
         mat = result["score_matrix"].copy()
@@ -1782,6 +1833,24 @@ for label in selected_labels:
             f"Candidate Polymarket markets: {len(mapping_market_pool)} from {pm_source} | "
             f"Sidebar rows: {len(polymarket_markets)}{match_search_note}"
         )
+        slug_summary = {
+            "slug_resolution_status": slug_resolution.get("resolution_status", ""),
+            "resolved_slug": slug_resolution.get("resolved_slug", ""),
+            "confidence": slug_resolution.get("confidence", ""),
+            "matched_home": slug_resolution.get("matched_home", False),
+            "matched_away": slug_resolution.get("matched_away", False),
+            "matched_date": slug_resolution.get("matched_date", False),
+            "team_order": slug_resolution.get("team_order", ""),
+            "markets_loaded_count": len(resolved_event_markets),
+            "markets_joined_count": int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0,
+            "source": slug_resolution.get("source", ""),
+            "warning": slug_resolution.get("warning", ""),
+        }
+        st.write("Polymarket sports slug resolution")
+        st.dataframe(pd.DataFrame([slug_summary]), hide_index=True, width="stretch")
+        if slug_candidates:
+            with st.expander("Slug candidates tried", expanded=False):
+                st.dataframe(pd.DataFrame({"slug_candidate": slug_candidates}), hide_index=True, width="stretch")
         if pm_warning:
             st.warning(pm_warning)
         st.write("Polymarket market search diagnostics")
@@ -1989,39 +2058,44 @@ for label in selected_labels:
             )
 
         st.subheader("Polymarket Alpha")
-        if mapping_market_pool.empty:
-            st.info("Polymarket alpha needs loaded market rows with YES/NO prices before it can calculate fair-price gaps.")
-        elif mapped_markets.empty:
-            st.info("Polymarket alpha needs at least one mapped market for this selected match.")
-        elif polymarket_alpha.empty:
-            st.info("Mapped markets were found, but prices were missing or invalid, so no alpha rows could be calculated.")
-        elif filtered_polymarket_alpha.empty:
-            st.info("Alpha rows exist, but none match the current liquidity and alpha-gap filters.")
-        else:
-            display_pm = polymarket_alpha_display(filtered_polymarket_alpha)
+        if joined_polymarket_alpha_rows.empty:
+            if slug_resolution.get("resolution_status") != "resolved":
+                reason_no_rows = "No Polymarket event resolved for this fixture."
+            elif resolved_event_markets.empty:
+                reason_no_rows = "Polymarket event resolved, but no nested market prices were loaded."
+            else:
+                reason_no_rows = "Polymarket event resolved, but no matching market prices were found for local model markets."
+            st.info(reason_no_rows)
             st.dataframe(
-                display_pm[
+                pd.DataFrame(
                     [
-                        "market_id",
-                        "question",
-                        "market_type",
-                        "polymarket_side",
+                        {
+                            "slug_resolution_status": slug_resolution.get("resolution_status", ""),
+                            "resolved_slug": slug_resolution.get("resolved_slug", ""),
+                            "candidates_tried": ", ".join(slug_resolution.get("candidates_tried", [])),
+                            "markets_loaded_count": len(resolved_event_markets),
+                            "markets_joined_count": int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0,
+                            "reason_no_rows": reason_no_rows,
+                        }
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.dataframe(
+                joined_polymarket_alpha_rows[
+                    [
+                        "market",
                         "model_probability",
-                        "primary_model_probability",
-                        "behavior_diagnostic_probability",
-                        "behavior_probability_delta",
-                        "model_policy",
-                        "edge_source",
                         "fair_price_cents",
-                        "polymarket_price_cents",
+                        "market_price_cents",
                         "alpha_gap_cents",
-                        "alpha_ev",
-                        "liquidity",
-                        "volume",
+                        "score",
+                        "signal",
+                        "polymarket_question",
                         "mapping_confidence",
-                        "signal_strength",
-                        "robustness",
-                        "warning",
+                        "event_slug",
                     ]
                 ],
                 hide_index=True,

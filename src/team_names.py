@@ -58,6 +58,11 @@ DEFAULT_TEAM_ALIASES = {
 }
 
 POLYMARKET_TEAM_CODE_ALIASES = {
+    "URY": "Uruguay",
+    "URU": "Uruguay",
+    "ESP": "Spain",
+    "CVI": "Cape Verde",
+    "CPV": "Cape Verde",
     "CDR": "DR Congo",
     "COD": "DR Congo",
     "DRC": "DR Congo",
@@ -72,9 +77,15 @@ POLYMARKET_TEAM_CODE_ALIASES = {
     "IRN": "Iran",
     "KSA": "Saudi Arabia",
     "TUR": "Turkey",
+    "DZA": "Algeria",
+    "ALG": "Algeria",
+    "JOR": "Jordan",
 }
 
 POLYMARKET_CANONICAL_TEAM_CODES = {
+    "Uruguay": ["URY", "URU"],
+    "Spain": ["ESP"],
+    "Cape Verde": ["CVI", "CPV"],
     "Colombia": ["COL"],
     "DR Congo": ["CDR", "COD", "DRC"],
     "United States": ["USA", "US"],
@@ -85,6 +96,8 @@ POLYMARKET_CANONICAL_TEAM_CODES = {
     "Iran": ["IRI", "IRN"],
     "Saudi Arabia": ["KSA"],
     "Turkey": ["TUR"],
+    "Algeria": ["DZA", "ALG"],
+    "Jordan": ["JOR"],
 }
 
 

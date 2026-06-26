@@ -52,7 +52,7 @@ TEAM_SLUG_CODES = {
     "Belgium": "bel",
     "Bosnia and Herzegovina": "bih",
     "Brazil": "bra",
-    "Cape Verde": "cpv",
+    "Cape Verde": ["cvi", "cpv"],
     "Canada": "can",
     "Colombia": "col",
     "Croatia": "cro",
@@ -66,7 +66,7 @@ TEAM_SLUG_CODES = {
     "Germany": "ger",
     "Ghana": "gha",
     "Haiti": "hai",
-    "Iran": "irn",
+    "Iran": ["iri", "irn"],
     "Iraq": "irq",
     "Ivory Coast": "civ",
     "Japan": "jpn",
@@ -92,7 +92,7 @@ TEAM_SLUG_CODES = {
     "Turkey": "tur",
     "Turkiye": ["tur", "tür"],
     "United States": ["usa", "us"],
-    "Uruguay": "uru",
+    "Uruguay": ["ury", "uru"],
     "Uzbekistan": "uzb",
 }
 
