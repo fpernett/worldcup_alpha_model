@@ -719,7 +719,7 @@ Report sections:
 - **Historical behavior**: recency-weighted team behavior summary, schedule strength, expected-performance residuals, behavior driver matches, opponent/competition breakdowns, recent long-format match history, environment response, and manual-vs-behavior model input impact.
 - **Model information**: model version, training data count/range, source status, and backtest placeholder.
 - **Market value tables**: grouped decimal-odds alpha and Polymarket alpha screens.
-- **Tournament context**: group-stage incentive diagnostics, current standings as of kickoff, and capped context-adjusted probabilities shown separately from the baseline model.
+- **Tournament context**: experimental/off by default; retained for offline audits, not active dashboard alpha.
 
 Real metrics in v1:
 
@@ -782,7 +782,11 @@ These labels are not staking advice.
 
 ### Tournament Context Layer v1
 
-Tournament Context Layer v1 estimates transparent qualification incentives from completed group results and remaining fixtures. It is designed for cases where one team can probably accept a draw while the other likely needs to win.
+Tournament Context Layer v1 is experimental and off by default in the dashboard. It remains in the codebase for audit and backtesting work, but the active dashboard, Market Value Tables, Top Alpha Signals, and Polymarket Alpha tab use baseline model probabilities only.
+
+The feature was disabled from the active selected-match view after local standings inputs proved incomplete for a last group-stage fixture. Do not use context-adjusted probabilities as active alpha inputs until the standings ledger and strict as-of validation are reliable.
+
+When enabled for offline audit, Tournament Context Layer v1 estimates transparent qualification incentives from completed group results and remaining fixtures. It is designed for cases where one team can probably accept a draw while the other likely needs to win.
 
 The layer:
 

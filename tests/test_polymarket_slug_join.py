@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import pandas as pd
+from pathlib import Path
 
 from src.polymarket_slug_join import (
+    build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
     get_polymarket_team_code_variants,
+    joined_market_groups,
     join_polymarket_prices_to_model_markets,
     load_polymarket_event_markets_by_slug,
     polymarket_alpha_rows,
     resolve_polymarket_slug_for_fixture,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _model_markets() -> pd.DataFrame:
@@ -138,7 +144,9 @@ def test_dr_congo_slug_generation_includes_cdr_and_cod() -> None:
     assert "CDR" in codes
     assert "COD" in codes
     assert "fifwc-col-cdr-2026-06-23" in candidates
+    assert "fifwc-cdr-col-2026-06-23" in candidates
     assert "fifwc-col-cod-2026-06-23" in candidates
+    assert "fifwc-cod-col-2026-06-23" in candidates
 
 
 def test_user_supplied_slug_is_parsed_and_validated() -> None:
@@ -212,8 +220,109 @@ def test_polymarket_alpha_table_not_empty_when_markets_match() -> None:
     assert "market_price_cents" in alpha_rows.columns
 
 
+def test_tournament_context_not_displayed_in_dashboard_by_default() -> None:
+    app_source = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
+
+    assert "Tournament Context" not in app_source
+    assert "tournament_context" not in app_source
+
+
+def test_market_value_tables_do_not_require_context_columns() -> None:
+    joined = join_polymarket_prices_to_model_markets(_model_markets(), _event_markets(), "Uruguay", "Spain")
+    groups = joined_market_groups(joined)
+
+    all_columns = {column for group in groups.values() for column in group.columns}
+    assert "Odds / Price" in all_columns
+    assert "EV / Alpha Gap" in all_columns
+    assert "Score" in all_columns
+    assert "Signal" in all_columns
+    assert not any(column.startswith("Context") for column in all_columns)
+
+
+def test_build_alpha_for_fixture_user_supplied_slug_overrides_search(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
+        lambda *_args, **_kwargs: (_synthetic_event(), {"method": "synthetic", "warnings": []}),
+    )
+
+    joined, diagnostics = build_polymarket_alpha_for_fixture(
+        "Uruguay",
+        "Spain",
+        "2026-06-26",
+        "World Cup",
+        _model_markets(),
+        user_supplied_slug_or_url="https://polymarket.com/sports/world-cup/fifwc-ury-esp-2026-06-26",
+    )
+
+    assert diagnostics["user_supplied_slug"] == "fifwc-ury-esp-2026-06-26"
+    assert diagnostics["resolved_slug"] == "fifwc-ury-esp-2026-06-26"
+    assert diagnostics["slug_resolution_status"] == "resolved"
+    assert diagnostics["event_markets_loaded_count"] > 0
+    assert diagnostics["joined_markets_count"] > 0
+    assert joined["market_price_cents"].notna().any()
+
+
+def test_top_alpha_and_polymarket_alpha_not_empty_when_prices_join(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
+        lambda *_args, **_kwargs: (_synthetic_event(), {"method": "synthetic", "warnings": []}),
+    )
+
+    joined, diagnostics = build_polymarket_alpha_for_fixture(
+        "Uruguay",
+        "Spain",
+        "2026-06-26",
+        "World Cup",
+        _model_markets(),
+        user_supplied_slug_or_url="fifwc-ury-esp-2026-06-26",
+    )
+    alpha_rows = polymarket_alpha_rows(joined)
+
+    assert diagnostics["top_alpha_rows_count"] == len(alpha_rows)
+    assert not alpha_rows.empty
+    assert diagnostics["reason_no_alpha_rows"] == ""
+
+
+def test_empty_alpha_returns_diagnostics_instead_of_silent_no_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
+        lambda *_args, **_kwargs: (None, {"method": "synthetic", "warnings": ["No event found for slug."]}),
+    )
+
+    joined, diagnostics = build_polymarket_alpha_for_fixture(
+        "Uruguay",
+        "Spain",
+        "2026-06-26",
+        "World Cup",
+        _model_markets(),
+        user_supplied_slug_or_url="fifwc-ury-esp-2026-06-26",
+    )
+    alpha_rows = polymarket_alpha_rows(joined)
+
+    assert alpha_rows.empty
+    assert diagnostics["slug_resolution_status"] == "resolved"
+    assert diagnostics["event_markets_loaded_count"] == 0
+    assert diagnostics["joined_markets_count"] == 0
+    assert diagnostics["reason_no_alpha_rows"] == "Polymarket event resolved, but no nested market prices were loaded."
+
+
 def test_event_market_loader_extracts_outcome_rows(monkeypatch) -> None:
-    event = {
+    event = _synthetic_event()
+
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
+        lambda *_args, **_kwargs: (event, {"method": "synthetic", "warnings": []}),
+    )
+
+    markets = load_polymarket_event_markets_by_slug("fifwc-ury-esp-2026-06-26")
+
+    assert set(markets["market_type"]) == {"moneyline", "total"}
+    assert "Uruguay" in set(markets["outcome_name"])
+    assert "Over 2.5" in set(markets["outcome_name"])
+
+
+def _synthetic_event() -> dict:
+    return {
         "id": "EV-URY-ESP",
         "slug": "fifwc-ury-esp-2026-06-26",
         "title": "Uruguay vs. Spain",
@@ -233,16 +342,12 @@ def test_event_market_loader_extracts_outcome_rows(monkeypatch) -> None:
                 "outcomes": '["Yes", "No"]',
                 "outcomePrices": '["0.48", "0.52"]',
             },
+            {
+                "id": "TOT-UNDER",
+                "slug": "fifwc-ury-esp-2026-06-26-under-2-5",
+                "question": "Will total goals be under 2.5?",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.52", "0.48"]',
+            },
         ],
     }
-
-    monkeypatch.setattr(
-        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
-        lambda *_args, **_kwargs: (event, {"method": "synthetic", "warnings": []}),
-    )
-
-    markets = load_polymarket_event_markets_by_slug("fifwc-ury-esp-2026-06-26")
-
-    assert set(markets["market_type"]) == {"moneyline", "total"}
-    assert "Uruguay" in set(markets["outcome_name"])
-    assert "Over 2.5" in set(markets["outcome_name"])

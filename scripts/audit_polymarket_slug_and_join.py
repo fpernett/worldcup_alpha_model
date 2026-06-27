@@ -12,15 +12,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.model import ModelConfig, market_probability_map, run_match_model  # noqa: E402
 from src.polymarket_slug_join import (  # noqa: E402
+    build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
-    join_polymarket_prices_to_model_markets,
-    load_polymarket_event_markets_by_slug,
     polymarket_alpha_rows,
-    resolve_polymarket_slug_for_fixture,
 )
 from src.ratings import get_team_ratings  # noqa: E402
 from src.storage import load_csv  # noqa: E402
-from src.utils import today_iso  # noqa: E402
 
 
 def main() -> None:
@@ -33,27 +30,26 @@ def main() -> None:
     args = parser.parse_args()
 
     candidates = build_polymarket_sports_slug_candidates(args.home, args.away, args.fixture_date, args.competition)
-    resolution = resolve_polymarket_slug_for_fixture(
+    model_markets = _model_markets_for_fixture(args.home, args.away, args.fixture_date, args.competition)
+    joined, diagnostics = build_polymarket_alpha_for_fixture(
         args.home,
         args.away,
         args.fixture_date,
         args.competition,
+        model_markets,
         user_supplied_slug_or_url=args.slug or None,
     )
-    resolved_slug = str(resolution.get("resolved_slug", "") or args.slug or "")
-    event_markets = load_polymarket_event_markets_by_slug(resolved_slug) if resolved_slug else pd.DataFrame()
-    model_markets = _model_markets_for_fixture(args.home, args.away, args.fixture_date, args.competition)
-    joined = join_polymarket_prices_to_model_markets(model_markets, event_markets, args.home, args.away)
+    event_markets = joined.attrs.get("polymarket_event_markets", pd.DataFrame())
     alpha = polymarket_alpha_rows(joined)
-    csv_path, md_path = _write_reports(args, candidates, resolution, event_markets, model_markets, joined, alpha)
+    csv_path, md_path = _write_reports(args, candidates, diagnostics, event_markets, model_markets, joined, alpha)
 
     joined_with_price = joined.loc[joined["market_price_cents"].notna()] if not joined.empty else pd.DataFrame()
     print("Polymarket slug and join audit")
     print("slug candidates:")
     for candidate in candidates:
         print(f"- {candidate}")
-    print(f"resolved slug: {resolution.get('resolved_slug', '')}")
-    print(f"resolution confidence: {resolution.get('confidence', '')}")
+    print(f"resolved slug: {diagnostics.get('resolved_slug', '')}")
+    print(f"resolution confidence: {diagnostics.get('slug_resolution_confidence', '')}")
     print(f"markets loaded: {len(event_markets)}")
     print(f"market types found: {', '.join(_market_types(event_markets)) or 'None'}")
     print(f"model markets generated: {len(model_markets)}")
@@ -62,9 +58,10 @@ def main() -> None:
     print(f"totals joined: {_joined_count(joined, 'Total')}")
     print(f"spreads joined: {_joined_count(joined, 'Handicap')}")
     print(f"BTTS joined: {_joined_count(joined, 'BTTS')}")
+    print(f"Top Alpha rows: {len(alpha)}")
     print(f"Polymarket Alpha rows: {len(alpha)}")
     if alpha.empty:
-        print(f"reason if no rows: {_reason_no_rows(resolution, event_markets, joined)}")
+        print(f"reason if no rows: {diagnostics.get('reason_no_alpha_rows', '')}")
     print(f"report CSV: {csv_path.relative_to(PROJECT_ROOT)}")
     print(f"report: {md_path.relative_to(PROJECT_ROOT)}")
 
@@ -129,7 +126,7 @@ def _find_fixture(fixtures: pd.DataFrame, home: str, away: str, fixture_date: st
 def _write_reports(
     args: argparse.Namespace,
     candidates: list[str],
-    resolution: dict,
+    diagnostics: dict,
     event_markets: pd.DataFrame,
     model_markets: pd.DataFrame,
     joined: pd.DataFrame,
@@ -137,9 +134,9 @@ def _write_reports(
 ) -> tuple[Path, Path]:
     reports = PROJECT_ROOT / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    today = today_iso()
-    csv_path = reports / f"polymarket_slug_join_{today}.csv"
-    md_path = reports / f"polymarket_slug_join_{today}.md"
+    report_stem = f"polymarket_slug_join_{_report_part(args.home)}_{_report_part(args.away)}_{args.fixture_date}"
+    csv_path = reports / f"{report_stem}.csv"
+    md_path = reports / f"{report_stem}.md"
     joined.to_csv(csv_path, index=False)
 
     summary = pd.DataFrame(
@@ -148,9 +145,9 @@ def _write_reports(
                 "fixture": f"{args.home} vs {args.away}",
                 "fixture_date": args.fixture_date,
                 "input_slug": args.slug,
-                "resolved_slug": resolution.get("resolved_slug", ""),
-                "resolution_status": resolution.get("resolution_status", ""),
-                "confidence": resolution.get("confidence", ""),
+                "resolved_slug": diagnostics.get("resolved_slug", ""),
+                "resolution_status": diagnostics.get("slug_resolution_status", ""),
+                "confidence": diagnostics.get("slug_resolution_confidence", ""),
                 "markets_loaded": len(event_markets),
                 "market_types_found": ", ".join(_market_types(event_markets)),
                 "model_markets_generated": len(model_markets),
@@ -159,15 +156,16 @@ def _write_reports(
                 "totals_joined": _joined_count(joined, "Total"),
                 "spreads_joined": _joined_count(joined, "Handicap"),
                 "btts_joined": _joined_count(joined, "BTTS"),
+                "top_alpha_rows": len(alpha),
                 "polymarket_alpha_rows": len(alpha),
-                "reason_no_rows": _reason_no_rows(resolution, event_markets, joined) if alpha.empty else "",
+                "reason_no_rows": diagnostics.get("reason_no_alpha_rows", "") if alpha.empty else "",
             }
         ]
     )
     md_path.write_text(
         "\n".join(
             [
-                f"# Polymarket Slug Join Audit - {today}",
+                f"# Polymarket Slug Join Audit - {args.home} vs {args.away} {args.fixture_date}",
                 "",
                 "This read-only audit resolves a sports event slug and joins discovered prices to model market rows. It does not trade, size, or change the football prediction formula.",
                 "",
@@ -181,7 +179,7 @@ def _write_reports(
                 "",
                 "## Resolution",
                 "",
-                _to_markdown(pd.DataFrame([resolution])),
+                _to_markdown(pd.DataFrame([diagnostics])),
                 "",
                 "## Joined Markets",
                 "",
@@ -221,10 +219,17 @@ def _reason_no_rows(resolution: dict, event_markets: pd.DataFrame, joined: pd.Da
     return ""
 
 
+def _report_part(value: str) -> str:
+    clean = "".join(ch if ch.isalnum() else "_" for ch in str(value).strip())
+    return "_".join(part for part in clean.split("_") if part)
+
+
 def _to_markdown(df: pd.DataFrame) -> str:
     if df is None or df.empty:
         return "_No rows._"
-    display = df.fillna("").astype(str)
+    display = df.copy()
+    display.attrs = {}
+    display = display.fillna("").astype(str)
     headers = list(display.columns)
     rows = display.values.tolist()
     lines = [

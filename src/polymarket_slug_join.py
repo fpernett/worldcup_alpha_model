@@ -53,11 +53,6 @@ JOINED_MARKET_COLUMNS = [
     "market_odds_decimal",
     "alpha_gap_cents",
     "ev",
-    "context_probability",
-    "context_fair_price_cents",
-    "context_alpha_gap_cents",
-    "context_signal",
-    "context_reason",
     "score",
     "signal",
     "polymarket_market_id",
@@ -184,6 +179,76 @@ def load_polymarket_event_markets_by_slug(slug: str) -> pd.DataFrame:
     return out
 
 
+def build_polymarket_alpha_for_fixture(
+    home: str,
+    away: str,
+    fixture_date: str,
+    competition: str,
+    model_market_families_df: pd.DataFrame,
+    user_supplied_slug_or_url: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Resolve a Polymarket sports event, load outcome rows, and join baseline model prices."""
+    slug_candidates = build_polymarket_sports_slug_candidates(home, away, fixture_date, competition)
+    parsed_user_slug = (
+        str(parse_polymarket_url_or_slug(user_supplied_slug_or_url).get("slug", "") or "")
+        if user_supplied_slug_or_url
+        else ""
+    )
+    warnings: list[str] = []
+    resolution = resolve_polymarket_slug_for_fixture(
+        home,
+        away,
+        fixture_date,
+        competition,
+        user_supplied_slug_or_url=user_supplied_slug_or_url,
+    )
+    resolved_slug = str(resolution.get("resolved_slug", "") or "")
+    event_markets = load_polymarket_event_markets_by_slug(resolved_slug) if resolved_slug else pd.DataFrame(columns=POLYMARKET_EVENT_MARKET_COLUMNS)
+    if resolution.get("warning"):
+        warnings.append(str(resolution.get("warning")))
+    if event_markets.attrs.get("warning"):
+        warnings.append(str(event_markets.attrs.get("warning")))
+
+    joined = join_polymarket_prices_to_model_markets(model_market_families_df, event_markets, home, away)
+    priced_rows = joined.loc[joined["market_price_cents"].notna()].copy() if not joined.empty else pd.DataFrame()
+    reason_no_rows = ""
+    if resolution.get("resolution_status") != "resolved":
+        reason_no_rows = "No Polymarket event resolved for this fixture."
+    elif event_markets.empty:
+        reason_no_rows = "Polymarket event resolved, but no nested market prices were loaded."
+    elif priced_rows.empty:
+        reason_no_rows = "Polymarket event resolved, but no matching market prices were found for local model markets."
+
+    diagnostics = {
+        "home": home,
+        "away": away,
+        "fixture_date": fixture_date,
+        "slug_candidates": slug_candidates,
+        "user_supplied_slug": parsed_user_slug,
+        "resolved_slug": resolved_slug,
+        "resolved_url": resolution.get("resolved_url", ""),
+        "slug_resolution_status": resolution.get("resolution_status", ""),
+        "slug_resolution_confidence": resolution.get("confidence", ""),
+        "matched_home": resolution.get("matched_home", False),
+        "matched_away": resolution.get("matched_away", False),
+        "matched_date": resolution.get("matched_date", False),
+        "team_order": resolution.get("team_order", ""),
+        "source": resolution.get("source", ""),
+        "candidates_tried": resolution.get("candidates_tried", []),
+        "event_markets_loaded_count": int(len(event_markets)),
+        "event_market_types_found": _market_types_found(event_markets),
+        "model_markets_count": int(len(model_market_families_df)) if model_market_families_df is not None else 0,
+        "joined_markets_count": int(len(priced_rows)),
+        "top_alpha_rows_count": int(len(priced_rows)),
+        "reason_no_alpha_rows": reason_no_rows,
+        "warnings": [warning for warning in warnings if warning],
+    }
+    joined.attrs["polymarket_alpha_diagnostics"] = diagnostics
+    joined.attrs["polymarket_event_markets"] = event_markets
+    joined.attrs["slug_resolution"] = resolution
+    return joined, diagnostics
+
+
 def join_polymarket_prices_to_model_markets(
     model_market_families_df: pd.DataFrame,
     polymarket_event_markets_df: pd.DataFrame,
@@ -205,9 +270,6 @@ def join_polymarket_prices_to_model_markets(
         market_odds = 100.0 / float(price_cents) if pd.notna(price_cents) and float(price_cents) > 0 else pd.NA
         alpha_gap = float(fair_price) - float(price_cents) if pd.notna(fair_price) and pd.notna(price_cents) else pd.NA
         ev = float(model_prob) * float(market_odds) - 1.0 if pd.notna(model_prob) and pd.notna(market_odds) else pd.NA
-        context_prob = model_row.get("context_probability", pd.NA)
-        context_fair_price = float(context_prob) * 100.0 if pd.notna(context_prob) else pd.NA
-        context_gap = float(context_fair_price) - float(price_cents) if pd.notna(context_fair_price) and pd.notna(price_cents) else pd.NA
         confidence = str(match.get("mapping_confidence", "low") or "low")
         score = _score(alpha_gap, confidence)
         signal = _signal(alpha_gap, confidence, pd.notna(price_cents))
@@ -226,11 +288,6 @@ def join_polymarket_prices_to_model_markets(
                 "market_odds_decimal": market_odds,
                 "alpha_gap_cents": alpha_gap,
                 "ev": ev,
-                "context_probability": context_prob,
-                "context_fair_price_cents": context_fair_price,
-                "context_alpha_gap_cents": context_gap,
-                "context_signal": _context_signal(context_gap, confidence, pd.notna(price_cents)),
-                "context_reason": model_row.get("context_reason", ""),
                 "score": score,
                 "signal": signal,
                 "polymarket_market_id": match.get("market_id", ""),
@@ -266,11 +323,6 @@ def joined_market_groups(joined_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
                 "Fair odds / fair price",
                 "Odds / Price",
                 "EV / Alpha Gap",
-                "Context probability",
-                "Context fair price",
-                "Context alpha gap",
-                "Context signal",
-                "Context reason",
                 "Score",
                 "Signal",
                 "Mapping confidence",
@@ -290,10 +342,6 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
                 "fair_price_cents",
                 "market_price_cents",
                 "alpha_gap_cents",
-                "context_probability",
-                "context_fair_price_cents",
-                "context_alpha_gap_cents",
-                "context_signal",
                 "score",
                 "signal",
                 "polymarket_question",
@@ -309,10 +357,6 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
             "fair_price_cents",
             "market_price_cents",
             "alpha_gap_cents",
-            "context_probability",
-            "context_fair_price_cents",
-            "context_alpha_gap_cents",
-            "context_signal",
             "score",
             "signal",
             "polymarket_question",
@@ -327,10 +371,6 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
             "fair_price_cents",
             "market_price_cents",
             "alpha_gap_cents",
-            "context_probability",
-            "context_fair_price_cents",
-            "context_alpha_gap_cents",
-            "context_signal",
             "score",
             "signal",
             "polymarket_question",
@@ -410,6 +450,8 @@ def _outcome_level_market_rows(flat: pd.DataFrame, fallback_slug: str, source: s
         if not prices:
             prices = [row.get("yes_price", pd.NA), row.get("no_price", pd.NA)]
         market_type = classify_polymarket_market_type(row)
+        if market_type == "exact_score":
+            market_type = "correct_score"
         base = {
             "event_slug": row.get("event_slug", fallback_slug),
             "event_title": row.get("event_title", ""),
@@ -531,7 +573,7 @@ def _price_to_odds(price_cents: Any) -> float | pd.NA:
 
 def _normalise_model_market_rows(df: pd.DataFrame) -> pd.DataFrame:
     model = df.copy() if df is not None else pd.DataFrame()
-    for col in ["market", "selection", "model_prob", "model_probability", "fair_odds", "context_probability", "context_reason"]:
+    for col in ["market", "selection", "model_prob", "model_probability", "fair_odds"]:
         if col not in model.columns:
             model[col] = pd.NA
     if "model_probability" not in model.columns or model["model_probability"].isna().all():
@@ -542,7 +584,7 @@ def _normalise_model_market_rows(df: pd.DataFrame) -> pd.DataFrame:
         else (fair_odds(float(row.get("model_probability"))) if pd.notna(row.get("model_probability")) else pd.NA),
         axis=1,
     )
-    return model[["market", "selection", "model_probability", "fair_odds", "context_probability", "context_reason"]].reset_index(drop=True)
+    return model[["market", "selection", "model_probability", "fair_odds"]].reset_index(drop=True)
 
 
 def _best_market_match(model_row: pd.Series, pm: pd.DataFrame, home: str, away: str) -> dict[str, Any]:
@@ -587,7 +629,7 @@ def _expected_outcome(model_row: pd.Series, home: str, away: str) -> tuple[str, 
     if market == "Handicap":
         return "spread", selection
     if market == "Correct Score":
-        return "exact_score", selection
+        return "correct_score", selection
     return "", ""
 
 
@@ -614,17 +656,6 @@ def _signal(alpha_gap: Any, confidence: str, has_price: bool) -> str:
         return "Positive model gap"
     if gap <= -5.0:
         return "Negative model gap"
-    return "Near fair"
-
-
-def _context_signal(alpha_gap: Any, confidence: str, has_price: bool) -> str:
-    if str(confidence).lower() == "low" or not has_price or pd.isna(alpha_gap):
-        return "No signal"
-    gap = float(alpha_gap)
-    if gap >= 5.0:
-        return "Positive context gap"
-    if gap <= -5.0:
-        return "Negative context gap"
     return "Near fair"
 
 
@@ -656,21 +687,19 @@ def _display_joined_row(row: pd.Series) -> dict[str, Any]:
     market_price = coerce_float(row.get("market_price_cents"), float("nan"))
     gap = coerce_float(row.get("alpha_gap_cents"), float("nan"))
     ev = coerce_float(row.get("ev"), float("nan"))
-    context_prob = coerce_float(row.get("context_probability"), float("nan"))
-    context_fair_price = coerce_float(row.get("context_fair_price_cents"), float("nan"))
-    context_gap = coerce_float(row.get("context_alpha_gap_cents"), float("nan"))
     return {
         "Market": f"{row.get('market', '')}: {row.get('selection', '')}".strip(": "),
         "Model probability": "" if pd.isna(model_prob) else f"{100 * model_prob:.1f}%",
         "Fair odds / fair price": "" if pd.isna(fair_odds_value) or pd.isna(fair_price) else f"{fair_odds_value:.2f} / {fair_price:.1f}c",
         "Odds / Price": "" if pd.isna(market_odds) or pd.isna(market_price) else f"{market_odds:.2f} / {market_price:.1f}c",
         "EV / Alpha Gap": "" if pd.isna(gap) or pd.isna(ev) else f"{100 * ev:.1f}% / {gap:+.1f}c",
-        "Context probability": "" if pd.isna(context_prob) else f"{100 * context_prob:.1f}%",
-        "Context fair price": "" if pd.isna(context_fair_price) else f"{context_fair_price:.1f}c",
-        "Context alpha gap": "" if pd.isna(context_gap) else f"{context_gap:+.1f}c",
-        "Context signal": row.get("context_signal", "No signal"),
-        "Context reason": row.get("context_reason", ""),
         "Score": row.get("score", 0.0),
         "Signal": row.get("signal", "No signal"),
         "Mapping confidence": row.get("mapping_confidence", "low"),
     }
+
+
+def _market_types_found(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty or "market_type" not in df.columns:
+        return []
+    return sorted(df["market_type"].dropna().astype(str).unique().tolist())

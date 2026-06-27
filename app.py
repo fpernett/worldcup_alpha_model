@@ -61,12 +61,11 @@ from src.polymarket_url_resolver import (
     score_polymarket_event_slug_for_fixture,
 )
 from src.polymarket_slug_join import (
+    build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
     joined_market_groups,
-    join_polymarket_prices_to_model_markets,
     load_polymarket_event_markets_by_slug,
     polymarket_alpha_rows,
-    resolve_polymarket_slug_for_fixture,
 )
 from src.postmortem import build_postmortem_report, calculate_prediction_errors, join_predictions_to_results
 from src.prediction_ledger import load_prediction_ledger, load_results_ledger
@@ -100,13 +99,6 @@ from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
 from src.team_behavior import load_team_behavior
 from src.team_names import load_team_name_aliases_df
 from src.timeline import calculate_score_timeline
-from src.tournament_context import (
-    apply_tournament_context_adjustment,
-    build_group_standings_asof,
-    classify_match_context,
-    context_probabilities_display,
-    remaining_group_fixtures_asof,
-)
 from src.tournament_learning import filter_tournament_learning_asof, load_tournament_learning_ledger
 
 
@@ -1394,56 +1386,22 @@ for label in selected_labels:
         alpha["odds_last_updated"] = ""
 
     confidence = result["confidence"]
-    match_kickoff_utc = f"{match.get('date_utc', '')} {match.get('time_utc', '00:00')} UTC"
-    results_ledger_for_context = load_results_ledger()
-    group_standings = build_group_standings_asof(
-        results_ledger_for_context,
-        fixtures,
-        str(match.get("group", "")),
-        match_kickoff_utc,
-    )
-    remaining_group_fixtures = remaining_group_fixtures_asof(
-        fixtures,
-        str(match.get("group", "")),
-        match_kickoff_utc,
-    )
-    match_context = classify_match_context(
-        str(match.get("home", "")),
-        str(match.get("away", "")),
-        match,
-        group_standings,
-        remaining_group_fixtures,
-    )
-    context_probs, context_market_families, context_adjustment_diagnostics = apply_tournament_context_adjustment(
-        probs,
-        alpha,
-        match_context,
-    )
     slug_candidates = build_polymarket_sports_slug_candidates(
         str(match.get("home", "")),
         str(match.get("away", "")),
         str(match.get("date_utc", "")),
         str(match.get("competition", "World Cup") or "World Cup"),
     )
-    slug_resolution = resolve_polymarket_slug_for_fixture(
+    joined_polymarket_markets, polymarket_alpha_diagnostics = build_polymarket_alpha_for_fixture(
         str(match.get("home", "")),
         str(match.get("away", "")),
         str(match.get("date_utc", "")),
         str(match.get("competition", "World Cup") or "World Cup"),
+        alpha,
         user_supplied_slug_or_url=polymarket_event_url_or_slug.strip() or None,
     )
-    resolved_event_markets = pd.DataFrame()
-    if slug_resolution.get("resolved_slug"):
-        resolved_event_markets = load_polymarket_event_markets_for_slug(
-            str(slug_resolution.get("resolved_slug", "")),
-            st.session_state["polymarket_refresh_counter"],
-        )
-    joined_polymarket_markets = join_polymarket_prices_to_model_markets(
-        context_market_families,
-        resolved_event_markets,
-        str(match.get("home", "")),
-        str(match.get("away", "")),
-    )
+    slug_resolution = joined_polymarket_markets.attrs.get("slug_resolution", {})
+    resolved_event_markets = joined_polymarket_markets.attrs.get("polymarket_event_markets", pd.DataFrame())
     joined_polymarket_alpha_rows = polymarket_alpha_rows(joined_polymarket_markets)
     mapped_markets = map_match_to_polymarket_markets(match, polymarket_markets)
     match_polymarket_markets = pd.DataFrame()
@@ -1672,35 +1630,47 @@ for label in selected_labels:
         st.subheader("Model Confidence")
         st.write(f"**{confidence['label']} confidence**: {', '.join(confidence['reasons'])}.")
 
-        st.subheader("Tournament Context")
-        context_cols = st.columns(4)
-        context_cols[0].metric("Stage", str(match_context.get("stage", "unknown")).replace("_", " ").title())
-        context_cols[1].metric("Group", str(match.get("group", "") or "n/a"))
-        context_cols[2].metric("Home incentive", str(match_context.get("home_incentive_label", "unknown")).replace("_", " "))
-        context_cols[3].metric("Away incentive", str(match_context.get("away_incentive_label", "unknown")).replace("_", " "))
-        st.caption(str(match_context.get("explanation", "")))
-        if match_context.get("warnings"):
-            st.warning(str(match_context.get("warnings", "")))
-        context_probability_display = context_probabilities_display(probs, context_probs)
-        context_probability_display["baseline_probability"] = context_probability_display["baseline_probability"].map(lambda x: "" if pd.isna(x) else pct(float(x)))
-        context_probability_display["context_probability"] = context_probability_display["context_probability"].map(lambda x: "" if pd.isna(x) else pct(float(x)))
-        context_probability_display["shift_pp"] = context_probability_display["shift_pp"].map(lambda x: "" if pd.isna(x) else f"{float(x):+.1f} pp")
-        st.dataframe(context_probability_display, hide_index=True, width="stretch")
-        st.caption(
-            "Tournament context is diagnostic. Baseline probabilities remain visible; context-adjusted probabilities use capped v1 shifts."
-        )
-
         st.subheader("Top Alpha Signals")
-        positive_alpha = alpha.loc[alpha["alpha_ev"].notna() & (alpha["alpha_ev"] > 0)].head(5)
-        if positive_alpha.empty:
-            st.caption("No positive alpha EV rows are available from the current market odds file.")
-        else:
+        top_alpha_signals = joined_polymarket_alpha_rows.copy()
+        if not top_alpha_signals.empty:
+            top_alpha_signals = top_alpha_signals.sort_values("score", ascending=False).head(10)
+        if top_alpha_signals.empty:
+            st.info("No Top Alpha Signals because no joined Polymarket price rows are available.")
             st.dataframe(
-                alpha_display(positive_alpha)[["market", "selection", "model_prob", "fair_odds", "market_odds", "alpha_ev"]],
+                pd.DataFrame(
+                    [
+                        {
+                            "slug_resolution_status": polymarket_alpha_diagnostics.get("slug_resolution_status", ""),
+                            "resolved_slug": polymarket_alpha_diagnostics.get("resolved_slug", ""),
+                            "event_markets_loaded_count": polymarket_alpha_diagnostics.get("event_markets_loaded_count", 0),
+                            "joined_markets_count": polymarket_alpha_diagnostics.get("joined_markets_count", 0),
+                            "reason_no_alpha_rows": polymarket_alpha_diagnostics.get("reason_no_alpha_rows", ""),
+                        }
+                    ]
+                ),
                 hide_index=True,
                 width="stretch",
             )
-        st.caption("Alpha EV = model_probability x market_decimal_odds - 1. This is a statistical estimate, not a staking instruction.")
+        else:
+            st.dataframe(
+                top_alpha_signals[
+                    [
+                        "market",
+                        "model_probability",
+                        "fair_price_cents",
+                        "market_price_cents",
+                        "alpha_gap_cents",
+                        "score",
+                        "signal",
+                        "mapping_confidence",
+                        "event_slug",
+                        "polymarket_question",
+                    ]
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+        st.caption("Alpha gap = model fair price - Polymarket price. This is a statistical estimate, not a staking instruction.")
 
     with tabs[1]:
         st.subheader("Alpha Read")
@@ -1737,68 +1707,6 @@ for label in selected_labels:
             f"{data_support['h2h_note']}. Training data range: "
             f"{data_support['training_data_start'] or 'n/a'} to {data_support['training_data_end'] or 'n/a'}."
         )
-
-        st.subheader("Tournament Context")
-        st.caption(
-            "Standings use completed group matches available before kickoff. "
-            "The context layer is diagnostic and backtestable; it does not replace the baseline model."
-        )
-        if group_standings.empty:
-            st.info("No group standings could be built from available fixture/result data.")
-        else:
-            st.dataframe(
-                group_standings[
-                    [
-                        "group_position",
-                        "team",
-                        "played",
-                        "wins",
-                        "draws",
-                        "losses",
-                        "goals_for",
-                        "goals_against",
-                        "goal_difference",
-                        "points",
-                    ]
-                ],
-                hide_index=True,
-                width="stretch",
-            )
-        needs_display = pd.DataFrame(
-            [
-                {
-                    "team": match_context.get("home_need", {}).get("team", result["home"]),
-                    "incentive": match_context.get("home_incentive_label", "unknown"),
-                    "score": match_context.get("home_incentive_score", 0.0),
-                    "needs_win": match_context.get("home_need", {}).get("needs_win", False),
-                    "draw_enough": match_context.get("home_need", {}).get("draw_enough", False),
-                    "must_not_lose": match_context.get("home_need", {}).get("must_not_lose", False),
-                    "goal_difference_pressure": match_context.get("home_need", {}).get("goal_difference_pressure", False),
-                    "reason": match_context.get("home_need", {}).get("reason", ""),
-                },
-                {
-                    "team": match_context.get("away_need", {}).get("team", result["away"]),
-                    "incentive": match_context.get("away_incentive_label", "unknown"),
-                    "score": match_context.get("away_incentive_score", 0.0),
-                    "needs_win": match_context.get("away_need", {}).get("needs_win", False),
-                    "draw_enough": match_context.get("away_need", {}).get("draw_enough", False),
-                    "must_not_lose": match_context.get("away_need", {}).get("must_not_lose", False),
-                    "goal_difference_pressure": match_context.get("away_need", {}).get("goal_difference_pressure", False),
-                    "reason": match_context.get("away_need", {}).get("reason", ""),
-                },
-            ]
-        )
-        st.dataframe(needs_display, hide_index=True, width="stretch")
-        context_diag_display = pd.DataFrame([context_adjustment_diagnostics])
-        for col in ["baseline_home_win", "baseline_draw", "baseline_away_win", "context_home_win", "context_draw", "context_away_win"]:
-            if col in context_diag_display.columns:
-                context_diag_display[col] = context_diag_display[col].map(lambda x: "" if pd.isna(x) else pct(float(x)))
-        if "max_probability_shift_pp" in context_diag_display.columns:
-            context_diag_display["max_probability_shift_pp"] = context_diag_display["max_probability_shift_pp"].map(
-                lambda x: "" if pd.isna(x) else f"{float(x):.1f}"
-            )
-        st.dataframe(context_diag_display, hide_index=True, width="stretch")
-        st.caption(str(match_context.get("explanation", "")))
 
         st.subheader("Goal Distribution And Outcome")
         g1, g2 = st.columns(2)
@@ -1946,17 +1854,18 @@ for label in selected_labels:
             f"Sidebar rows: {len(polymarket_markets)}{match_search_note}"
         )
         slug_summary = {
-            "slug_resolution_status": slug_resolution.get("resolution_status", ""),
-            "resolved_slug": slug_resolution.get("resolved_slug", ""),
-            "confidence": slug_resolution.get("confidence", ""),
-            "matched_home": slug_resolution.get("matched_home", False),
-            "matched_away": slug_resolution.get("matched_away", False),
-            "matched_date": slug_resolution.get("matched_date", False),
-            "team_order": slug_resolution.get("team_order", ""),
-            "markets_loaded_count": len(resolved_event_markets),
-            "markets_joined_count": int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0,
-            "source": slug_resolution.get("source", ""),
-            "warning": slug_resolution.get("warning", ""),
+            "slug_resolution_status": polymarket_alpha_diagnostics.get("slug_resolution_status", ""),
+            "resolved_slug": polymarket_alpha_diagnostics.get("resolved_slug", ""),
+            "confidence": polymarket_alpha_diagnostics.get("slug_resolution_confidence", ""),
+            "matched_home": polymarket_alpha_diagnostics.get("matched_home", False),
+            "matched_away": polymarket_alpha_diagnostics.get("matched_away", False),
+            "matched_date": polymarket_alpha_diagnostics.get("matched_date", False),
+            "team_order": polymarket_alpha_diagnostics.get("team_order", ""),
+            "markets_loaded_count": polymarket_alpha_diagnostics.get("event_markets_loaded_count", 0),
+            "markets_joined_count": polymarket_alpha_diagnostics.get("joined_markets_count", 0),
+            "source": polymarket_alpha_diagnostics.get("source", ""),
+            "reason_no_alpha_rows": polymarket_alpha_diagnostics.get("reason_no_alpha_rows", ""),
+            "warning": "; ".join(polymarket_alpha_diagnostics.get("warnings", [])),
         }
         st.write("Polymarket sports slug resolution")
         st.dataframe(pd.DataFrame([slug_summary]), hide_index=True, width="stretch")
@@ -2171,22 +2080,17 @@ for label in selected_labels:
 
         st.subheader("Polymarket Alpha")
         if joined_polymarket_alpha_rows.empty:
-            if slug_resolution.get("resolution_status") != "resolved":
-                reason_no_rows = "No Polymarket event resolved for this fixture."
-            elif resolved_event_markets.empty:
-                reason_no_rows = "Polymarket event resolved, but no nested market prices were loaded."
-            else:
-                reason_no_rows = "Polymarket event resolved, but no matching market prices were found for local model markets."
+            reason_no_rows = polymarket_alpha_diagnostics.get("reason_no_alpha_rows", "") or "No joined Polymarket alpha rows are available."
             st.info(reason_no_rows)
             st.dataframe(
                 pd.DataFrame(
                     [
                         {
-                            "slug_resolution_status": slug_resolution.get("resolution_status", ""),
-                            "resolved_slug": slug_resolution.get("resolved_slug", ""),
-                            "candidates_tried": ", ".join(slug_resolution.get("candidates_tried", [])),
-                            "markets_loaded_count": len(resolved_event_markets),
-                            "markets_joined_count": int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0,
+                            "slug_resolution_status": polymarket_alpha_diagnostics.get("slug_resolution_status", ""),
+                            "resolved_slug": polymarket_alpha_diagnostics.get("resolved_slug", ""),
+                            "candidates_tried": ", ".join(polymarket_alpha_diagnostics.get("candidates_tried", [])),
+                            "markets_loaded_count": polymarket_alpha_diagnostics.get("event_markets_loaded_count", 0),
+                            "markets_joined_count": polymarket_alpha_diagnostics.get("joined_markets_count", 0),
                             "reason_no_rows": reason_no_rows,
                         }
                     ]
@@ -2203,10 +2107,6 @@ for label in selected_labels:
                         "fair_price_cents",
                         "market_price_cents",
                         "alpha_gap_cents",
-                        "context_probability",
-                        "context_fair_price_cents",
-                        "context_alpha_gap_cents",
-                        "context_signal",
                         "score",
                         "signal",
                         "polymarket_question",
