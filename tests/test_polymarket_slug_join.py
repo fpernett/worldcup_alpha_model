@@ -6,6 +6,7 @@ from pathlib import Path
 from src.polymarket_slug_join import (
     build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
+    extract_markets_from_polymarket_event_html,
     get_polymarket_team_code_variants,
     joined_market_groups,
     join_polymarket_prices_to_model_markets,
@@ -147,6 +148,18 @@ def test_dr_congo_slug_generation_includes_cdr_and_cod() -> None:
     assert "fifwc-cdr-col-2026-06-23" in candidates
     assert "fifwc-col-cod-2026-06-23" in candidates
     assert "fifwc-cod-col-2026-06-23" in candidates
+
+
+def test_portugal_code_variants_and_colombia_portugal_candidates() -> None:
+    codes = get_polymarket_team_code_variants("Portugal")
+    candidates = build_polymarket_sports_slug_candidates("Colombia", "Portugal", "2026-06-27")
+
+    assert "PRT" in codes
+    assert "POR" in codes
+    assert "fifwc-col-prt-2026-06-27" in candidates
+    assert "fifwc-prt-col-2026-06-27" in candidates
+    assert "fifwc-col-por-2026-06-27" in candidates
+    assert "fifwc-por-col-2026-06-27" in candidates
 
 
 def test_user_supplied_slug_is_parsed_and_validated() -> None:
@@ -304,6 +317,66 @@ def test_empty_alpha_returns_diagnostics_instead_of_silent_no_rows(monkeypatch) 
     assert diagnostics["event_markets_loaded_count"] == 0
     assert diagnostics["joined_markets_count"] == 0
     assert diagnostics["reason_no_alpha_rows"] == "Polymarket event resolved, but no nested market prices were loaded."
+
+
+def test_html_fallback_extracts_colombia_draw_portugal_moneyline() -> None:
+    html = """
+    <html><head><title>Colombia - Portugal | Polymarket</title></head>
+    <body><section>Moneyline COL 28¢ Draw 25¢ PRT 48¢</section></body></html>
+    """
+
+    markets = extract_markets_from_polymarket_event_html(html, "fifwc-col-prt-2026-06-27")
+
+    moneyline = markets.loc[markets["market_type"] == "moneyline"]
+    assert set(moneyline["outcome_name"]) == {"Colombia", "Draw", "Portugal"}
+    assert set(moneyline["price_cents"]) == {28.0, 25.0, 48.0}
+
+
+def test_partial_html_extraction_drives_non_empty_alpha_diagnostics(monkeypatch) -> None:
+    html = "<html><body>Moneyline COL 28¢ Draw 25¢ PRT 48¢</body></html>"
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
+        lambda *_args, **_kwargs: (None, {"method": "synthetic", "warnings": []}),
+    )
+    monkeypatch.setattr("src.polymarket_slug_join.load_polymarket_event_page_html", lambda *_args, **_kwargs: html)
+
+    joined, diagnostics = build_polymarket_alpha_for_fixture(
+        "Colombia",
+        "Portugal",
+        "2026-06-27",
+        "World Cup",
+        _model_markets(),
+    )
+    alpha_rows = polymarket_alpha_rows(joined)
+
+    assert diagnostics["registry_match_found"] is True
+    assert diagnostics["event_markets_loaded_count"] == 3
+    assert diagnostics["event_market_types_found"] == ["moneyline"]
+    assert diagnostics["joined_markets_count"] == 3
+    assert diagnostics["top_alpha_rows_count"] == len(alpha_rows)
+    assert not alpha_rows.empty
+
+
+def test_user_supplied_url_overrides_registry_for_colombia_portugal(monkeypatch) -> None:
+    html = "<html><body>Moneyline COL 28¢ Draw 25¢ PRT 48¢</body></html>"
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
+        lambda *_args, **_kwargs: (None, {"method": "synthetic", "warnings": []}),
+    )
+    monkeypatch.setattr("src.polymarket_slug_join.load_polymarket_event_page_html", lambda *_args, **_kwargs: html)
+
+    joined, diagnostics = build_polymarket_alpha_for_fixture(
+        "Colombia",
+        "Portugal",
+        "2026-06-27",
+        "World Cup",
+        _model_markets(),
+        user_supplied_slug_or_url="https://polymarket.com/sports/world-cup/fifwc-col-prt-2026-06-27",
+    )
+
+    assert diagnostics["slug_source"] == "user_supplied_slug_or_url"
+    assert diagnostics["resolved_slug"] == "fifwc-col-prt-2026-06-27"
+    assert joined["market_price_cents"].notna().sum() == 3
 
 
 def test_event_market_loader_extracts_outcome_rows(monkeypatch) -> None:

@@ -1,0 +1,5 @@
+competition,event_date,event_slug,event_url,home,away,home_code,away_code,event_title,source,last_checked_utc,confidence,notes
+World Cup,2026-06-27,fifwc-col-prt-2026-06-27,https://polymarket.com/sports/world-cup/fifwc-col-prt-2026-06-27,Colombia,Portugal,COL,PRT,Colombia - Portugal,manual,,high,Seeded known Polymarket sports event.
+World Cup,2026-06-26,fifwc-ury-esp-2026-06-26,https://polymarket.com/sports/world-cup/fifwc-ury-esp-2026-06-26,Uruguay,Spain,URY,ESP,Uruguay - Spain,manual,,high,Seeded known Polymarket sports event.
+World Cup,2026-06-26,fifwc-cvi-ksa-2026-06-26,https://polymarket.com/sports/world-cup/fifwc-cvi-ksa-2026-06-26,Cape Verde,Saudi Arabia,CVI,KSA,Cape Verde - Saudi Arabia,manual,,high,Seeded known Polymarket sports event.
+World Cup,2026-06-23,fifwc-col-cdr-2026-06-23,https://polymarket.com/sports/world-cup/fifwc-col-cdr-2026-06-23,Colombia,DR Congo,COL,CDR,Colombia - DR Congo,manual,,high,Seeded known Polymarket sports event.

@@ -15,6 +15,8 @@ TEAM_NAME_ALIAS_COLUMNS = ["alias", "canonical"]
 DEFAULT_TEAM_ALIASES = {
     "col": "Colombia",
     "usa": "United States",
+    "por": "Portugal",
+    "prt": "Portugal",
     "u.s.a.": "United States",
     "usmnt": "United States",
     "united states of america": "United States",
@@ -61,6 +63,8 @@ POLYMARKET_TEAM_CODE_ALIASES = {
     "URY": "Uruguay",
     "URU": "Uruguay",
     "ESP": "Spain",
+    "PRT": "Portugal",
+    "POR": "Portugal",
     "CVI": "Cape Verde",
     "CPV": "Cape Verde",
     "CDR": "DR Congo",
@@ -85,6 +89,7 @@ POLYMARKET_TEAM_CODE_ALIASES = {
 POLYMARKET_CANONICAL_TEAM_CODES = {
     "Uruguay": ["URY", "URU"],
     "Spain": ["ESP"],
+    "Portugal": ["PRT", "POR"],
     "Cape Verde": ["CVI", "CPV"],
     "Colombia": ["COL"],
     "DR Congo": ["CDR", "COD", "DRC"],

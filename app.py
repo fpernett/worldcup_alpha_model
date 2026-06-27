@@ -1853,21 +1853,36 @@ for label in selected_labels:
             f"Candidate Polymarket markets: {len(mapping_market_pool)} from {pm_source} | "
             f"Sidebar rows: {len(polymarket_markets)}{match_search_note}"
         )
+        slug_source = str(polymarket_alpha_diagnostics.get("slug_source", "") or "")
+        slug_source_display = {
+            "user_supplied_slug_or_url": "user",
+            "polymarket_event_registry": "registry",
+            "local_event_or_market_cache": "cache",
+            "gamma_events_slug_filter": "gamma",
+            "gamma_events_slug_path": "gamma",
+            "gamma_events_search": "gamma",
+            "local_cache_text_search": "search",
+            "": "unresolved",
+        }.get(slug_source, "deterministic" if slug_source else "unresolved")
         slug_summary = {
-            "slug_resolution_status": polymarket_alpha_diagnostics.get("slug_resolution_status", ""),
-            "resolved_slug": polymarket_alpha_diagnostics.get("resolved_slug", ""),
+            "Slug source": slug_source_display,
+            "Resolved slug": polymarket_alpha_diagnostics.get("resolved_slug", ""),
+            "Resolution status": polymarket_alpha_diagnostics.get("slug_resolution_status", ""),
+            "Event markets loaded": polymarket_alpha_diagnostics.get("event_markets_loaded_count", 0),
+            "Market types found": ", ".join(polymarket_alpha_diagnostics.get("event_market_types_found", [])),
+            "Joined markets": polymarket_alpha_diagnostics.get("joined_markets_count", 0),
+            "Top alpha rows": polymarket_alpha_diagnostics.get("top_alpha_rows_count", 0),
+            "Reason if empty": polymarket_alpha_diagnostics.get("reason_no_alpha_rows", ""),
             "confidence": polymarket_alpha_diagnostics.get("slug_resolution_confidence", ""),
             "matched_home": polymarket_alpha_diagnostics.get("matched_home", False),
             "matched_away": polymarket_alpha_diagnostics.get("matched_away", False),
             "matched_date": polymarket_alpha_diagnostics.get("matched_date", False),
             "team_order": polymarket_alpha_diagnostics.get("team_order", ""),
-            "markets_loaded_count": polymarket_alpha_diagnostics.get("event_markets_loaded_count", 0),
-            "markets_joined_count": polymarket_alpha_diagnostics.get("joined_markets_count", 0),
-            "source": polymarket_alpha_diagnostics.get("source", ""),
-            "reason_no_alpha_rows": polymarket_alpha_diagnostics.get("reason_no_alpha_rows", ""),
+            "registry_match_found": polymarket_alpha_diagnostics.get("registry_match_found", False),
+            "resolver_steps_tried": ", ".join(polymarket_alpha_diagnostics.get("resolver_steps_tried", [])),
             "warning": "; ".join(polymarket_alpha_diagnostics.get("warnings", [])),
         }
-        st.write("Polymarket sports slug resolution")
+        st.write("Polymarket alpha pipeline status")
         st.dataframe(pd.DataFrame([slug_summary]), hide_index=True, width="stretch")
         if slug_candidates:
             with st.expander("Slug candidates tried", expanded=False):

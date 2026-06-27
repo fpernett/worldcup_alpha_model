@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from html import unescape
 from itertools import product
 from typing import Any
 
 import pandas as pd
+import requests
 
 from src.config import SOURCE_API, SOURCE_CACHE
 from src.model import fair_odds
+from src.polymarket_event_registry import load_polymarket_event_registry, match_fixture_to_polymarket_registry
 from src.polymarket_sports_discovery import (
     GAMMA_EVENT_MARKET_COLUMNS,
     MARKETS_CACHE_PATH,
@@ -21,7 +24,7 @@ from src.polymarket_url_resolver import (
     parse_polymarket_url_or_slug,
     score_polymarket_event_slug_for_fixture,
 )
-from src.team_names import normalize_team_name, polymarket_team_codes, team_name_key
+from src.team_names import normalize_polymarket_team_code, normalize_team_name, polymarket_team_codes, team_name_key
 from src.utils import coerce_float, read_csv_with_columns, utc_now_iso
 
 
@@ -101,6 +104,8 @@ def resolve_polymarket_slug_for_fixture(
 ) -> dict[str, Any]:
     candidates = build_polymarket_sports_slug_candidates(home, away, fixture_date, competition)
     tried: list[str] = []
+    steps_tried: list[str] = []
+    registry_match_found = False
 
     def base_response(slug: str = "", source: str = "", warning: str = "") -> dict[str, Any]:
         score = score_polymarket_event_slug_for_fixture(slug, home, away, fixture_date) if slug else {}
@@ -114,11 +119,14 @@ def resolve_polymarket_slug_for_fixture(
             "matched_date": bool(score.get("matched_date", False)),
             "team_order": _team_order(score, home, away),
             "candidates_tried": tried.copy(),
+            "resolver_steps_tried": steps_tried.copy(),
+            "registry_match_found": registry_match_found,
             "source": source,
             "warning": warning or score.get("warning", ""),
         }
 
     if user_supplied_slug_or_url:
+        steps_tried.append("user_supplied_slug_or_url")
         parsed = parse_polymarket_url_or_slug(user_supplied_slug_or_url)
         slug = str(parsed.get("slug", "") or "").strip()
         if slug:
@@ -129,11 +137,45 @@ def resolve_polymarket_slug_for_fixture(
             result["warning"] = "; ".join(part for part in [result["warning"], "User-supplied slug did not validate against fixture."] if part)
             return result
 
-    cache_match = _find_slug_in_cache(candidates, cache_df)
+    steps_tried.append("polymarket_event_registry")
+    registry_match = match_fixture_to_polymarket_registry(
+        home,
+        away,
+        fixture_date,
+        competition,
+        load_polymarket_event_registry(),
+    )
+    if registry_match.get("resolution_status") == "resolved" and registry_match.get("resolved_slug"):
+        registry_match_found = True
+        slug = str(registry_match.get("resolved_slug", "") or "")
+        tried.append(slug)
+        out = base_response(slug, "polymarket_event_registry", str(registry_match.get("warning", "") or ""))
+        out.update(
+            {
+                "resolved_url": registry_match.get("resolved_url", out.get("resolved_url", "")),
+                "confidence": registry_match.get("confidence", out.get("confidence", "")),
+                "matched_home": registry_match.get("matched_home", out.get("matched_home", False)),
+                "matched_away": registry_match.get("matched_away", out.get("matched_away", False)),
+                "matched_date": registry_match.get("matched_date", out.get("matched_date", False)),
+                "team_order": registry_match.get("team_order", out.get("team_order", "")),
+                "registry_home": registry_match.get("registry_home", ""),
+                "registry_away": registry_match.get("registry_away", ""),
+                "registry_home_code": registry_match.get("registry_home_code", ""),
+                "registry_away_code": registry_match.get("registry_away_code", ""),
+                "registry_match_found": True,
+            }
+        )
+        return out
+
+    steps_tried.append("deterministic_slug_candidates")
     tried.extend(slug for slug in candidates if slug not in tried)
+
+    steps_tried.append("local_event_or_market_cache")
+    cache_match = _find_slug_in_cache(candidates, cache_df)
     if cache_match:
         return base_response(cache_match, "local_event_or_market_cache")
 
+    steps_tried.append("gamma_event_api")
     for slug in candidates:
         event, diagnostics = fetch_polymarket_event_by_slug_with_diagnostics(slug)
         if event:
@@ -141,6 +183,7 @@ def resolve_polymarket_slug_for_fixture(
                 tried.append(slug)
             return base_response(slug, diagnostics.get("method", "gamma_event_api"))
 
+    steps_tried.append("local_cache_text_search")
     text_match = _find_text_cache_match(home, away, fixture_date, cache_df)
     if text_match:
         if text_match not in tried:
@@ -161,9 +204,10 @@ def load_polymarket_event_markets_by_slug(slug: str) -> pd.DataFrame:
     if event:
         flat = flatten_gamma_events_to_markets([event])
         out = _outcome_level_market_rows(flat, fallback_slug=slug, source=SOURCE_API)
-        out.attrs["source_label"] = f"Polymarket event {diagnostics.get('method', 'api')}"
-        out.attrs["last_updated"] = utc_now_iso()
-        return out
+        if not out.empty:
+            out.attrs["source_label"] = f"Polymarket event {diagnostics.get('method', 'api')}"
+            out.attrs["last_updated"] = utc_now_iso()
+            return out
 
     cached = read_csv_with_columns(MARKETS_CACHE_PATH, GAMMA_EVENT_MARKET_COLUMNS)
     if not cached.empty and "event_slug" in cached.columns:
@@ -174,9 +218,101 @@ def load_polymarket_event_markets_by_slug(slug: str) -> pd.DataFrame:
             out.attrs["last_updated"] = utc_now_iso()
             return out
 
+    try:
+        html = load_polymarket_event_page_html(slug)
+    except Exception as exc:
+        html = ""
+        html_warning = f"HTML fallback failed: {exc}"
+    else:
+        html_warning = ""
+    if html:
+        out = extract_markets_from_polymarket_event_html(html, slug)
+        if not out.empty:
+            out.attrs["source_label"] = "Polymarket event page HTML fallback"
+            out.attrs["last_updated"] = utc_now_iso()
+            return out
+
     out = pd.DataFrame(columns=POLYMARKET_EVENT_MARKET_COLUMNS)
-    out.attrs["warning"] = "; ".join(diagnostics.get("warnings", [])) if isinstance(diagnostics, dict) else "No event found for slug."
+    warnings = diagnostics.get("warnings", []) if isinstance(diagnostics, dict) else ["No event found for slug."]
+    if html_warning:
+        warnings = [*warnings, html_warning]
+    out.attrs["warning"] = "; ".join(warnings)
     return out
+
+
+def load_polymarket_event_page_html(slug_or_url: str) -> str:
+    parsed = parse_polymarket_url_or_slug(slug_or_url)
+    slug = str(parsed.get("slug", "") or "").strip()
+    url = str(parsed.get("url", "") or "") or _event_url(slug, "World Cup")
+    if not slug and not url:
+        return ""
+    response = requests.get(url, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    return response.text
+
+
+def extract_markets_from_polymarket_event_html(html: str, slug: str) -> pd.DataFrame:
+    text = _html_visible_text(html)
+    if not text:
+        return pd.DataFrame(columns=POLYMARKET_EVENT_MARKET_COLUMNS)
+    parsed = parse_polymarket_url_or_slug(slug)
+    code_1 = str(parsed.get("team_code_1", "") or "").upper()
+    code_2 = str(parsed.get("team_code_2", "") or "").upper()
+    title = _title_from_html(html) or slug
+    rows: list[dict[str, Any]] = []
+
+    moneyline_labels = [code_1, "Draw", code_2]
+    for label in moneyline_labels:
+        price = _extract_visible_price_after_label(text, label)
+        if pd.isna(price):
+            continue
+        outcome = "Draw" if label.lower() == "draw" else _normalise_outcome_label(label)
+        rows.append(
+            _html_market_row(
+                slug=slug,
+                title=title,
+                market_id=f"{slug}-html-moneyline-{_market_key(label)}",
+                market_slug=f"{slug}-html-moneyline",
+                question=f"{title} moneyline",
+                market_type="moneyline",
+                outcome_name=outcome,
+                price_cents=price,
+            )
+        )
+
+    for side, line, price in _extract_over_under_prices(text):
+        rows.append(
+            _html_market_row(
+                slug=slug,
+                title=title,
+                market_id=f"{slug}-html-total-{side.lower()}-{line.replace('.', '-')}",
+                market_slug=f"{slug}-html-total-{line}",
+                question=f"{title} total goals {side} {line}",
+                market_type="total",
+                outcome_name=f"{side} {line}",
+                price_cents=price,
+            )
+        )
+
+    for outcome, price in _extract_btts_prices(text):
+        rows.append(
+            _html_market_row(
+                slug=slug,
+                title=title,
+                market_id=f"{slug}-html-btts-{outcome.lower()}",
+                market_slug=f"{slug}-html-btts",
+                question=f"{title} both teams to score",
+                market_type="btts",
+                outcome_name=outcome,
+                price_cents=price,
+            )
+        )
+
+    out = pd.DataFrame(rows, columns=POLYMARKET_EVENT_MARKET_COLUMNS)
+    if out.empty:
+        out.attrs["warning"] = "HTML fallback loaded page, but no supported market prices were extracted."
+        return out
+    return out.drop_duplicates(subset=["market_id", "outcome_name"]).reset_index(drop=True)
 
 
 def build_polymarket_alpha_for_fixture(
@@ -227,6 +363,7 @@ def build_polymarket_alpha_for_fixture(
         "user_supplied_slug": parsed_user_slug,
         "resolved_slug": resolved_slug,
         "resolved_url": resolution.get("resolved_url", ""),
+        "resolution_status": resolution.get("resolution_status", ""),
         "slug_resolution_status": resolution.get("resolution_status", ""),
         "slug_resolution_confidence": resolution.get("confidence", ""),
         "matched_home": resolution.get("matched_home", False),
@@ -234,6 +371,9 @@ def build_polymarket_alpha_for_fixture(
         "matched_date": resolution.get("matched_date", False),
         "team_order": resolution.get("team_order", ""),
         "source": resolution.get("source", ""),
+        "slug_source": resolution.get("source", ""),
+        "resolver_steps_tried": resolution.get("resolver_steps_tried", []),
+        "registry_match_found": bool(resolution.get("registry_match_found", False)),
         "candidates_tried": resolution.get("candidates_tried", []),
         "event_markets_loaded_count": int(len(event_markets)),
         "event_market_types_found": _market_types_found(event_markets),
@@ -468,16 +608,16 @@ def _outcome_level_market_rows(flat: pd.DataFrame, fallback_slug: str, source: s
         }
 
         if _is_binary_yes_no(outcomes):
-            outcome_name = _infer_binary_outcome_name(row, market_type)
+            outcome_name = _normalise_outcome_label(_infer_binary_outcome_name(row, market_type))
             price = _normalise_price_cents(row.get("yes_price", prices[0] if prices else pd.NA))
             rows.append({**base, "outcome_name": outcome_name, "price_cents": price, "odds_decimal": _price_to_odds(price)})
         elif isinstance(outcomes, list):
             for idx, outcome in enumerate(outcomes):
                 price = _normalise_price_cents(prices[idx] if idx < len(prices) else pd.NA)
-                rows.append({**base, "outcome_name": str(outcome), "price_cents": price, "odds_decimal": _price_to_odds(price)})
+                rows.append({**base, "outcome_name": _normalise_outcome_label(str(outcome)), "price_cents": price, "odds_decimal": _price_to_odds(price)})
         else:
             price = _normalise_price_cents(row.get("yes_price", pd.NA))
-            rows.append({**base, "outcome_name": _infer_binary_outcome_name(row, market_type), "price_cents": price, "odds_decimal": _price_to_odds(price)})
+            rows.append({**base, "outcome_name": _normalise_outcome_label(_infer_binary_outcome_name(row, market_type)), "price_cents": price, "odds_decimal": _price_to_odds(price)})
     out = pd.DataFrame(rows, columns=POLYMARKET_EVENT_MARKET_COLUMNS)
     if out.empty:
         return out
@@ -551,6 +691,91 @@ def _spread_line(text: str) -> str:
 def _team_before_spread(text: str) -> str:
     match = re.search(r"will\s+(.+?)\s+(?:cover|win by|beat)", text, flags=re.I)
     return match.group(1).strip(" ?.") if match else ""
+
+
+def _normalise_outcome_label(value: Any) -> str:
+    label = str(value or "").strip()
+    if not label:
+        return ""
+    if label.lower() == "draw":
+        return "Draw"
+    canonical = normalize_polymarket_team_code(label)
+    return canonical if canonical and canonical != label.upper() else label
+
+
+def _html_visible_text(html: str) -> str:
+    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(html or ""), flags=re.I | re.S)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _title_from_html(html: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", str(html or ""), flags=re.I | re.S)
+    if not match:
+        return ""
+    title = unescape(re.sub(r"\s+", " ", match.group(1)).strip())
+    return re.sub(r"\s*\|\s*Polymarket.*$", "", title, flags=re.I).strip()
+
+
+def _extract_visible_price_after_label(text: str, label: str) -> float | pd.NA:
+    if not label:
+        return pd.NA
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(label)}(?![A-Za-z0-9]).{{0,80}}?(\d+(?:\.\d+)?)\s*(?:¢|cents?|%)"
+    match = re.search(pattern, text, flags=re.I)
+    if not match:
+        return pd.NA
+    return _normalise_price_cents(match.group(1))
+
+
+def _extract_over_under_prices(text: str) -> list[tuple[str, str, float]]:
+    rows: list[tuple[str, str, float]] = []
+    for match in re.finditer(r"\b(Over|Under)\s+(\d+(?:\.\d+)?)\b.{0,80}?(\d+(?:\.\d+)?)\s*(?:¢|cents?|%)", text, flags=re.I):
+        price = _normalise_price_cents(match.group(3))
+        if pd.notna(price):
+            rows.append((match.group(1).title(), match.group(2), float(price)))
+    return rows
+
+
+def _extract_btts_prices(text: str) -> list[tuple[str, float]]:
+    if not re.search(r"Both Teams to Score|BTTS", text, flags=re.I):
+        return []
+    rows: list[tuple[str, float]] = []
+    for outcome in ["Yes", "No"]:
+        price = _extract_visible_price_after_label(text, outcome)
+        if pd.notna(price):
+            rows.append((outcome, float(price)))
+    return rows
+
+
+def _html_market_row(
+    slug: str,
+    title: str,
+    market_id: str,
+    market_slug: str,
+    question: str,
+    market_type: str,
+    outcome_name: str,
+    price_cents: Any,
+) -> dict[str, Any]:
+    return {
+        "event_slug": slug,
+        "event_title": title,
+        "market_id": market_id,
+        "market_slug": market_slug,
+        "question": question,
+        "market_title": "",
+        "market_type": market_type,
+        "outcomes": "",
+        "outcome_name": outcome_name,
+        "price_cents": price_cents,
+        "odds_decimal": _price_to_odds(price_cents),
+        "liquidity": pd.NA,
+        "volume": pd.NA,
+        "source": "polymarket_html",
+        "last_updated": utc_now_iso(),
+    }
 
 
 def _normalise_price_cents(value: Any) -> float | pd.NA:
