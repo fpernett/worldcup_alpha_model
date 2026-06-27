@@ -53,6 +53,11 @@ JOINED_MARKET_COLUMNS = [
     "market_odds_decimal",
     "alpha_gap_cents",
     "ev",
+    "context_probability",
+    "context_fair_price_cents",
+    "context_alpha_gap_cents",
+    "context_signal",
+    "context_reason",
     "score",
     "signal",
     "polymarket_market_id",
@@ -200,6 +205,9 @@ def join_polymarket_prices_to_model_markets(
         market_odds = 100.0 / float(price_cents) if pd.notna(price_cents) and float(price_cents) > 0 else pd.NA
         alpha_gap = float(fair_price) - float(price_cents) if pd.notna(fair_price) and pd.notna(price_cents) else pd.NA
         ev = float(model_prob) * float(market_odds) - 1.0 if pd.notna(model_prob) and pd.notna(market_odds) else pd.NA
+        context_prob = model_row.get("context_probability", pd.NA)
+        context_fair_price = float(context_prob) * 100.0 if pd.notna(context_prob) else pd.NA
+        context_gap = float(context_fair_price) - float(price_cents) if pd.notna(context_fair_price) and pd.notna(price_cents) else pd.NA
         confidence = str(match.get("mapping_confidence", "low") or "low")
         score = _score(alpha_gap, confidence)
         signal = _signal(alpha_gap, confidence, pd.notna(price_cents))
@@ -218,6 +226,11 @@ def join_polymarket_prices_to_model_markets(
                 "market_odds_decimal": market_odds,
                 "alpha_gap_cents": alpha_gap,
                 "ev": ev,
+                "context_probability": context_prob,
+                "context_fair_price_cents": context_fair_price,
+                "context_alpha_gap_cents": context_gap,
+                "context_signal": _context_signal(context_gap, confidence, pd.notna(price_cents)),
+                "context_reason": model_row.get("context_reason", ""),
                 "score": score,
                 "signal": signal,
                 "polymarket_market_id": match.get("market_id", ""),
@@ -253,6 +266,11 @@ def joined_market_groups(joined_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
                 "Fair odds / fair price",
                 "Odds / Price",
                 "EV / Alpha Gap",
+                "Context probability",
+                "Context fair price",
+                "Context alpha gap",
+                "Context signal",
+                "Context reason",
                 "Score",
                 "Signal",
                 "Mapping confidence",
@@ -272,6 +290,10 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
                 "fair_price_cents",
                 "market_price_cents",
                 "alpha_gap_cents",
+                "context_probability",
+                "context_fair_price_cents",
+                "context_alpha_gap_cents",
+                "context_signal",
                 "score",
                 "signal",
                 "polymarket_question",
@@ -287,6 +309,10 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
             "fair_price_cents",
             "market_price_cents",
             "alpha_gap_cents",
+            "context_probability",
+            "context_fair_price_cents",
+            "context_alpha_gap_cents",
+            "context_signal",
             "score",
             "signal",
             "polymarket_question",
@@ -301,6 +327,10 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
             "fair_price_cents",
             "market_price_cents",
             "alpha_gap_cents",
+            "context_probability",
+            "context_fair_price_cents",
+            "context_alpha_gap_cents",
+            "context_signal",
             "score",
             "signal",
             "polymarket_question",
@@ -501,7 +531,7 @@ def _price_to_odds(price_cents: Any) -> float | pd.NA:
 
 def _normalise_model_market_rows(df: pd.DataFrame) -> pd.DataFrame:
     model = df.copy() if df is not None else pd.DataFrame()
-    for col in ["market", "selection", "model_prob", "model_probability", "fair_odds"]:
+    for col in ["market", "selection", "model_prob", "model_probability", "fair_odds", "context_probability", "context_reason"]:
         if col not in model.columns:
             model[col] = pd.NA
     if "model_probability" not in model.columns or model["model_probability"].isna().all():
@@ -512,7 +542,7 @@ def _normalise_model_market_rows(df: pd.DataFrame) -> pd.DataFrame:
         else (fair_odds(float(row.get("model_probability"))) if pd.notna(row.get("model_probability")) else pd.NA),
         axis=1,
     )
-    return model[["market", "selection", "model_probability", "fair_odds"]].reset_index(drop=True)
+    return model[["market", "selection", "model_probability", "fair_odds", "context_probability", "context_reason"]].reset_index(drop=True)
 
 
 def _best_market_match(model_row: pd.Series, pm: pd.DataFrame, home: str, away: str) -> dict[str, Any]:
@@ -587,6 +617,17 @@ def _signal(alpha_gap: Any, confidence: str, has_price: bool) -> str:
     return "Near fair"
 
 
+def _context_signal(alpha_gap: Any, confidence: str, has_price: bool) -> str:
+    if str(confidence).lower() == "low" or not has_price or pd.isna(alpha_gap):
+        return "No signal"
+    gap = float(alpha_gap)
+    if gap >= 5.0:
+        return "Positive context gap"
+    if gap <= -5.0:
+        return "Negative context gap"
+    return "Near fair"
+
+
 def _group_for_joined_row(row: pd.Series) -> str:
     market = str(row.get("market", ""))
     selection = str(row.get("selection", "")).lower()
@@ -615,12 +656,20 @@ def _display_joined_row(row: pd.Series) -> dict[str, Any]:
     market_price = coerce_float(row.get("market_price_cents"), float("nan"))
     gap = coerce_float(row.get("alpha_gap_cents"), float("nan"))
     ev = coerce_float(row.get("ev"), float("nan"))
+    context_prob = coerce_float(row.get("context_probability"), float("nan"))
+    context_fair_price = coerce_float(row.get("context_fair_price_cents"), float("nan"))
+    context_gap = coerce_float(row.get("context_alpha_gap_cents"), float("nan"))
     return {
         "Market": f"{row.get('market', '')}: {row.get('selection', '')}".strip(": "),
         "Model probability": "" if pd.isna(model_prob) else f"{100 * model_prob:.1f}%",
         "Fair odds / fair price": "" if pd.isna(fair_odds_value) or pd.isna(fair_price) else f"{fair_odds_value:.2f} / {fair_price:.1f}c",
         "Odds / Price": "" if pd.isna(market_odds) or pd.isna(market_price) else f"{market_odds:.2f} / {market_price:.1f}c",
         "EV / Alpha Gap": "" if pd.isna(gap) or pd.isna(ev) else f"{100 * ev:.1f}% / {gap:+.1f}c",
+        "Context probability": "" if pd.isna(context_prob) else f"{100 * context_prob:.1f}%",
+        "Context fair price": "" if pd.isna(context_fair_price) else f"{context_fair_price:.1f}c",
+        "Context alpha gap": "" if pd.isna(context_gap) else f"{context_gap:+.1f}c",
+        "Context signal": row.get("context_signal", "No signal"),
+        "Context reason": row.get("context_reason", ""),
         "Score": row.get("score", 0.0),
         "Signal": row.get("signal", "No signal"),
         "Mapping confidence": row.get("mapping_confidence", "low"),

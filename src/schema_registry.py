@@ -468,6 +468,7 @@ MODEL_DEFINITION_FILES: set[str] = {
     "src/postmortem.py",
     "src/model_training.py",
     "src/tournament_learning.py",
+    "src/tournament_context.py",
     "src/match_specific_calibration.py",
     "src/backtest_diagnostics.py",
     "src/rating_coverage.py",
@@ -493,6 +494,7 @@ METRIC_DEFINITION_FILES: set[str] = {
     "src/postmortem.py",
     "src/model_training.py",
     "src/tournament_learning.py",
+    "src/tournament_context.py",
     "src/match_specific_calibration.py",
     "src/backtest_diagnostics.py",
     "src/rating_coverage.py",
@@ -560,6 +562,7 @@ DASHBOARD_DEFINITION_FILES: set[str] = {
     "src/fixture_diagnostics.py",
     "src/market_tables.py",
     "src/timeline.py",
+    "src/tournament_context.py",
 }
 
 DOCUMENTATION_FILES: set[str] = {

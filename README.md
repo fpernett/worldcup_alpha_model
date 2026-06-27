@@ -719,6 +719,7 @@ Report sections:
 - **Historical behavior**: recency-weighted team behavior summary, schedule strength, expected-performance residuals, behavior driver matches, opponent/competition breakdowns, recent long-format match history, environment response, and manual-vs-behavior model input impact.
 - **Model information**: model version, training data count/range, source status, and backtest placeholder.
 - **Market value tables**: grouped decimal-odds alpha and Polymarket alpha screens.
+- **Tournament context**: group-stage incentive diagnostics, current standings as of kickoff, and capped context-adjusted probabilities shown separately from the baseline model.
 
 Real metrics in v1:
 
@@ -731,6 +732,7 @@ Placeholders or approximations in v1:
 - RPS is explicitly shown as `RPS placeholder / not yet backtested`;
 - base xG is not separately stored yet, so adjusted xG is used as the base value in the expected-goals report chart;
 - league context uses fallback baselines when historical match data is unavailable.
+- tournament context is a diagnostic layer; it is not the primary model unless strict as-of validation later supports that change.
 
 ## 8. Alpha EV
 
@@ -777,6 +779,40 @@ Signal labels are simple screens:
 - Avoid: alpha gap below -3 cents.
 
 These labels are not staking advice.
+
+### Tournament Context Layer v1
+
+Tournament Context Layer v1 estimates transparent qualification incentives from completed group results and remaining fixtures. It is designed for cases where one team can probably accept a draw while the other likely needs to win.
+
+The layer:
+
+- builds group standings as of the selected kickoff using only completed matches before kickoff;
+- classifies each team as `draw_enough`, `needs_win`, `must_not_lose`, `already_qualified_likely`, `already_eliminated_likely`, or `unknown`;
+- classifies match context as `one_needs_win_other_draw_enough`, `both_need_win`, `both_draw_ok`, `one_safe_other_needs_win`, `dead_rubber`, `knockout_must_advance`, or `unknown`;
+- applies only small optional diagnostic probability shifts, capped at 5 percentage points on 1X2 outcomes;
+- keeps baseline probabilities and baseline alpha gaps visible.
+
+For knockout matches, the layer does not apply group-stage “draw is enough” logic. It flags advancement context separately because 90-minute 1X2 markets and qualification markets are different.
+
+Audit a fixture:
+
+```bash
+.venv/bin/python scripts/audit_tournament_context.py \
+  --home Uruguay \
+  --away Spain \
+  --fixture-date 2026-06-26 \
+  --competition "World Cup" \
+  --group H
+```
+
+Reports are saved to:
+
+```text
+reports/tournament_context_YYYY-MM-DD.csv
+reports/tournament_context_YYYY-MM-DD.md
+```
+
+The context layer remains diagnostic until `evaluate_context_layer_on_completed_matches(...)` or a stricter as-of validation flow shows improved Brier score, log loss, draw calibration, and totals calibration.
 
 ## 9. Model Confidence
 

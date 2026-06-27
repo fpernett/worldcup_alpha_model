@@ -100,6 +100,13 @@ from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
 from src.team_behavior import load_team_behavior
 from src.team_names import load_team_name_aliases_df
 from src.timeline import calculate_score_timeline
+from src.tournament_context import (
+    apply_tournament_context_adjustment,
+    build_group_standings_asof,
+    classify_match_context,
+    context_probabilities_display,
+    remaining_group_fixtures_asof,
+)
 from src.tournament_learning import filter_tournament_learning_asof, load_tournament_learning_ledger
 
 
@@ -1387,6 +1394,31 @@ for label in selected_labels:
         alpha["odds_last_updated"] = ""
 
     confidence = result["confidence"]
+    match_kickoff_utc = f"{match.get('date_utc', '')} {match.get('time_utc', '00:00')} UTC"
+    results_ledger_for_context = load_results_ledger()
+    group_standings = build_group_standings_asof(
+        results_ledger_for_context,
+        fixtures,
+        str(match.get("group", "")),
+        match_kickoff_utc,
+    )
+    remaining_group_fixtures = remaining_group_fixtures_asof(
+        fixtures,
+        str(match.get("group", "")),
+        match_kickoff_utc,
+    )
+    match_context = classify_match_context(
+        str(match.get("home", "")),
+        str(match.get("away", "")),
+        match,
+        group_standings,
+        remaining_group_fixtures,
+    )
+    context_probs, context_market_families, context_adjustment_diagnostics = apply_tournament_context_adjustment(
+        probs,
+        alpha,
+        match_context,
+    )
     slug_candidates = build_polymarket_sports_slug_candidates(
         str(match.get("home", "")),
         str(match.get("away", "")),
@@ -1407,7 +1439,7 @@ for label in selected_labels:
             st.session_state["polymarket_refresh_counter"],
         )
     joined_polymarket_markets = join_polymarket_prices_to_model_markets(
-        alpha,
+        context_market_families,
         resolved_event_markets,
         str(match.get("home", "")),
         str(match.get("away", "")),
@@ -1640,6 +1672,24 @@ for label in selected_labels:
         st.subheader("Model Confidence")
         st.write(f"**{confidence['label']} confidence**: {', '.join(confidence['reasons'])}.")
 
+        st.subheader("Tournament Context")
+        context_cols = st.columns(4)
+        context_cols[0].metric("Stage", str(match_context.get("stage", "unknown")).replace("_", " ").title())
+        context_cols[1].metric("Group", str(match.get("group", "") or "n/a"))
+        context_cols[2].metric("Home incentive", str(match_context.get("home_incentive_label", "unknown")).replace("_", " "))
+        context_cols[3].metric("Away incentive", str(match_context.get("away_incentive_label", "unknown")).replace("_", " "))
+        st.caption(str(match_context.get("explanation", "")))
+        if match_context.get("warnings"):
+            st.warning(str(match_context.get("warnings", "")))
+        context_probability_display = context_probabilities_display(probs, context_probs)
+        context_probability_display["baseline_probability"] = context_probability_display["baseline_probability"].map(lambda x: "" if pd.isna(x) else pct(float(x)))
+        context_probability_display["context_probability"] = context_probability_display["context_probability"].map(lambda x: "" if pd.isna(x) else pct(float(x)))
+        context_probability_display["shift_pp"] = context_probability_display["shift_pp"].map(lambda x: "" if pd.isna(x) else f"{float(x):+.1f} pp")
+        st.dataframe(context_probability_display, hide_index=True, width="stretch")
+        st.caption(
+            "Tournament context is diagnostic. Baseline probabilities remain visible; context-adjusted probabilities use capped v1 shifts."
+        )
+
         st.subheader("Top Alpha Signals")
         positive_alpha = alpha.loc[alpha["alpha_ev"].notna() & (alpha["alpha_ev"] > 0)].head(5)
         if positive_alpha.empty:
@@ -1687,6 +1737,68 @@ for label in selected_labels:
             f"{data_support['h2h_note']}. Training data range: "
             f"{data_support['training_data_start'] or 'n/a'} to {data_support['training_data_end'] or 'n/a'}."
         )
+
+        st.subheader("Tournament Context")
+        st.caption(
+            "Standings use completed group matches available before kickoff. "
+            "The context layer is diagnostic and backtestable; it does not replace the baseline model."
+        )
+        if group_standings.empty:
+            st.info("No group standings could be built from available fixture/result data.")
+        else:
+            st.dataframe(
+                group_standings[
+                    [
+                        "group_position",
+                        "team",
+                        "played",
+                        "wins",
+                        "draws",
+                        "losses",
+                        "goals_for",
+                        "goals_against",
+                        "goal_difference",
+                        "points",
+                    ]
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+        needs_display = pd.DataFrame(
+            [
+                {
+                    "team": match_context.get("home_need", {}).get("team", result["home"]),
+                    "incentive": match_context.get("home_incentive_label", "unknown"),
+                    "score": match_context.get("home_incentive_score", 0.0),
+                    "needs_win": match_context.get("home_need", {}).get("needs_win", False),
+                    "draw_enough": match_context.get("home_need", {}).get("draw_enough", False),
+                    "must_not_lose": match_context.get("home_need", {}).get("must_not_lose", False),
+                    "goal_difference_pressure": match_context.get("home_need", {}).get("goal_difference_pressure", False),
+                    "reason": match_context.get("home_need", {}).get("reason", ""),
+                },
+                {
+                    "team": match_context.get("away_need", {}).get("team", result["away"]),
+                    "incentive": match_context.get("away_incentive_label", "unknown"),
+                    "score": match_context.get("away_incentive_score", 0.0),
+                    "needs_win": match_context.get("away_need", {}).get("needs_win", False),
+                    "draw_enough": match_context.get("away_need", {}).get("draw_enough", False),
+                    "must_not_lose": match_context.get("away_need", {}).get("must_not_lose", False),
+                    "goal_difference_pressure": match_context.get("away_need", {}).get("goal_difference_pressure", False),
+                    "reason": match_context.get("away_need", {}).get("reason", ""),
+                },
+            ]
+        )
+        st.dataframe(needs_display, hide_index=True, width="stretch")
+        context_diag_display = pd.DataFrame([context_adjustment_diagnostics])
+        for col in ["baseline_home_win", "baseline_draw", "baseline_away_win", "context_home_win", "context_draw", "context_away_win"]:
+            if col in context_diag_display.columns:
+                context_diag_display[col] = context_diag_display[col].map(lambda x: "" if pd.isna(x) else pct(float(x)))
+        if "max_probability_shift_pp" in context_diag_display.columns:
+            context_diag_display["max_probability_shift_pp"] = context_diag_display["max_probability_shift_pp"].map(
+                lambda x: "" if pd.isna(x) else f"{float(x):.1f}"
+            )
+        st.dataframe(context_diag_display, hide_index=True, width="stretch")
+        st.caption(str(match_context.get("explanation", "")))
 
         st.subheader("Goal Distribution And Outcome")
         g1, g2 = st.columns(2)
@@ -2091,6 +2203,10 @@ for label in selected_labels:
                         "fair_price_cents",
                         "market_price_cents",
                         "alpha_gap_cents",
+                        "context_probability",
+                        "context_fair_price_cents",
+                        "context_alpha_gap_cents",
+                        "context_signal",
                         "score",
                         "signal",
                         "polymarket_question",

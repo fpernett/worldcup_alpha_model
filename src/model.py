@@ -282,6 +282,11 @@ def alpha_table(
                 "fair_odds": fair,
                 "market_odds": odds,
                 "alpha_ev": ev,
+                "context_probability": pd.NA,
+                "context_fair_price_cents": pd.NA,
+                "context_alpha_gap_cents": pd.NA,
+                "context_signal": "",
+                "context_reason": "",
                 "odds_source": m["source"].iloc[0] if len(m) else "",
                 "odds_last_updated": m["last_updated"].iloc[0] if len(m) else "",
             }
