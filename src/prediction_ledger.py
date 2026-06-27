@@ -107,9 +107,77 @@ def snapshot_predictions_for_fixtures(
     The function is append-only by default. Re-snapshotting the same match and
     model creates a new row with a new `snapshot_utc`.
     """
+    snapshots, _diagnostics = snapshot_predictions_for_fixtures_with_diagnostics(
+        fixtures_df,
+        team_ratings_df=team_ratings_df,
+        venues_df=venues_df,
+        market_odds_df=market_odds_df,
+        cfg=cfg,
+        model_version=model_version,
+        parameter_set_id=parameter_set_id,
+        primary_model_mode=primary_model_mode,
+        notes=notes,
+        path=path,
+        append=append,
+        include_past=True,
+    )
+    return snapshots
+
+
+def snapshot_predictions_for_fixtures_with_diagnostics(
+    fixtures_df: pd.DataFrame | None,
+    team_ratings_df: pd.DataFrame | None = None,
+    venues_df: pd.DataFrame | None = None,
+    market_odds_df: pd.DataFrame | None = None,
+    cfg: ModelConfig | None = None,
+    model_version: str = "baseline_external_calibrated_v1",
+    parameter_set_id: str = "baseline_current",
+    primary_model_mode: str = "baseline_manual",
+    notes: str = "",
+    path: str | Path = PREDICTION_LEDGER_PATH,
+    append: bool = True,
+    include_past: bool = False,
+    selected_match_ids: list[str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Snapshot predictions with explicit write/skip diagnostics.
+
+    `include_past=False` skips snapshots at or after kickoff so dashboard saves
+    are valid for honest post-mortem by default. Passing `include_past=True`
+    still writes the row but marks `prediction_before_kickoff=False`.
+    """
     fixtures = _normalise_fixtures(fixtures_df)
+    fixtures_available = int(len(fixtures))
+    if selected_match_ids is not None:
+        wanted = {str(match_id) for match_id in selected_match_ids if str(match_id).strip()}
+        fixtures = fixtures.loc[fixtures["match_id"].astype(str).isin(wanted)].copy() if wanted else fixtures.iloc[0:0].copy()
+    fixtures_selected = int(len(fixtures))
+    path = Path(path)
+    output_path = _display_path(path)
+    skip_rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    def diagnostics(rows_written: int, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        rows = rows or skip_rows
+        skipped = int(len(rows))
+        return {
+            "fixtures_available": fixtures_available,
+            "fixtures_selected": fixtures_selected,
+            "fixtures_attempted": int(fixtures_selected - sum(1 for row in rows if row.get("reason_code") in {"past_kickoff", "missing_match_id"})),
+            "predictions_written": int(rows_written),
+            "predictions_skipped": skipped,
+            "skipped_past_kickoff": sum(1 for row in rows if row.get("reason_code") == "past_kickoff"),
+            "skipped_missing_model_result": sum(1 for row in rows if row.get("reason_code") == "missing_model_result"),
+            "skipped_missing_match_id": sum(1 for row in rows if row.get("reason_code") == "missing_match_id"),
+            "skipped_duplicate_policy": 0,
+            "output_path": output_path,
+            "warnings": warnings.copy(),
+            "skip_reasons": rows.copy(),
+        }
+
     if fixtures.empty:
-        return pd.DataFrame(columns=PREDICTION_LEDGER_COLUMNS)
+        warning = "No fixtures were selected." if fixtures_available else "No fixtures are available for the requested snapshot."
+        warnings.append(warning)
+        return pd.DataFrame(columns=PREDICTION_LEDGER_COLUMNS), diagnostics(0)
 
     snapshot_utc = utc_now_iso()
     teams = team_ratings_df.copy() if team_ratings_df is not None else _load_primary_ratings()
@@ -120,17 +188,34 @@ def snapshot_predictions_for_fixtures(
     rows: list[dict[str, Any]] = []
 
     for _, fixture in fixtures.iterrows():
+        match_id_raw = str(fixture.get("match_id", "") or "").strip()
+        if not match_id_raw:
+            skip_rows.append(_skip_row(fixture, "missing_match_id", "Fixture has no match_id, so it was not written to the prediction ledger."))
+            continue
+        kickoff = _kickoff_utc(fixture)
+        before_kickoff = _before_kickoff(snapshot_utc, kickoff)
+        if not include_past and not before_kickoff:
+            skip_rows.append(_skip_row(fixture, "past_kickoff", "Fixture kickoff is not after the snapshot time."))
+            continue
         try:
             result = run_match_model(fixture, teams, venues, odds, model_cfg, model_mode=primary_model_mode)
         except TypeError:
-            result = run_match_model(fixture, teams, venues, odds, model_cfg)
+            try:
+                result = run_match_model(fixture, teams, venues, odds, model_cfg)
+            except Exception as exc:
+                skip_rows.append(_skip_row(fixture, "missing_model_result", f"Model result could not be generated: {exc}"))
+                continue
+        except Exception as exc:
+            skip_rows.append(_skip_row(fixture, "missing_model_result", f"Model result could not be generated: {exc}"))
+            continue
+        if not isinstance(result, dict) or not result.get("probs"):
+            skip_rows.append(_skip_row(fixture, "missing_model_result", "Model result was missing probabilities."))
+            continue
         probs = result.get("probs", {})
         matrix = result.get("score_matrix")
         over_0_5 = _over_probability(matrix, 0)
         over_1_5 = _over_probability(matrix, 1)
-        kickoff = _kickoff_utc(fixture)
-        before_kickoff = _before_kickoff(snapshot_utc, kickoff)
-        match_id = str(fixture.get("match_id", "") or _fallback_match_id(fixture))
+        match_id = match_id_raw
         prediction_id = _prediction_id(snapshot_utc, match_id, model_version, parameter_set_id)
         rows.append(
             {
@@ -166,7 +251,7 @@ def snapshot_predictions_for_fixtures(
     snapshots = pd.DataFrame(rows, columns=PREDICTION_LEDGER_COLUMNS)
     if append:
         append_prediction_snapshots(snapshots, path=path)
-    return snapshots
+    return snapshots, diagnostics(len(snapshots) if append else 0)
 
 
 def import_completed_results(
@@ -301,6 +386,26 @@ def _fallback_match_id(row: Any) -> str:
 def _prediction_id(snapshot_utc: str, match_id: str, model_version: str, parameter_set_id: str) -> str:
     raw = "|".join([snapshot_utc, match_id, model_version, parameter_set_id])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _skip_row(row: Any, reason_code: str, reason: str) -> dict[str, Any]:
+    series = pd.Series(row)
+    return {
+        "match_id": str(series.get("match_id", "") or ""),
+        "date_utc": str(series.get("date_utc", "") or ""),
+        "time_utc": str(series.get("time_utc", "") or ""),
+        "home": str(series.get("home", "") or ""),
+        "away": str(series.get("away", "") or ""),
+        "reason_code": reason_code,
+        "reason": reason,
+    }
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(DATA_DIR.parent))
+    except ValueError:
+        return str(path)
 
 
 def _market_snapshot_available(market_odds_df: pd.DataFrame, match_id: str) -> bool:

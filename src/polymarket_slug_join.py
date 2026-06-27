@@ -61,8 +61,36 @@ JOINED_MARKET_COLUMNS = [
     "polymarket_market_id",
     "polymarket_market_slug",
     "polymarket_question",
+    "polymarket_source",
+    "polymarket_last_updated",
     "mapping_confidence",
     "mapping_reason",
+    "event_slug",
+]
+
+MARKETS_TAB_COLUMNS = [
+    "market",
+    "selection",
+    "model_prob",
+    "primary_model_probability",
+    "behavior_diagnostic_probability",
+    "behavior_probability_delta",
+    "model_policy",
+    "edge_source",
+    "fair_odds",
+    "fair_price_cents",
+    "market_odds",
+    "market_price_cents",
+    "alpha_ev",
+    "alpha_gap_cents",
+    "odds_source",
+    "odds_last_updated",
+    "signal",
+    "score",
+    "mapping_confidence",
+    "polymarket_market_id",
+    "polymarket_market_slug",
+    "polymarket_question",
     "event_slug",
 ]
 
@@ -433,6 +461,8 @@ def join_polymarket_prices_to_model_markets(
                 "polymarket_market_id": match.get("market_id", ""),
                 "polymarket_market_slug": match.get("market_slug", ""),
                 "polymarket_question": match.get("question", ""),
+                "polymarket_source": match.get("source", ""),
+                "polymarket_last_updated": match.get("last_updated", ""),
                 "mapping_confidence": confidence,
                 "mapping_reason": reason,
                 "event_slug": match.get("event_slug", ""),
@@ -440,6 +470,147 @@ def join_polymarket_prices_to_model_markets(
         )
 
     return pd.DataFrame(rows, columns=JOINED_MARKET_COLUMNS)
+
+
+def build_markets_tab_joined_dataframe(
+    model_market_families_df: pd.DataFrame,
+    joined_polymarket_df: pd.DataFrame | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Return the Markets-tab dataframe, enriched with joined Polymarket prices when available."""
+    model = model_market_families_df.copy() if model_market_families_df is not None else pd.DataFrame()
+    diagnostics = diagnostics or {}
+    joined = joined_polymarket_df.copy() if joined_polymarket_df is not None else pd.DataFrame(columns=JOINED_MARKET_COLUMNS)
+    for col in JOINED_MARKET_COLUMNS:
+        if col not in joined.columns:
+            joined[col] = pd.NA
+
+    for col in ["market", "selection", "model_prob", "fair_odds"]:
+        if col not in model.columns:
+            model[col] = pd.NA
+    if "model_probability" in model.columns:
+        model["model_prob"] = model["model_prob"].where(model["model_prob"].notna(), model["model_probability"])
+    model["fair_price_cents"] = model.apply(
+        lambda row: row.get("fair_price_cents")
+        if "fair_price_cents" in model.columns and pd.notna(row.get("fair_price_cents"))
+        else _probability_to_cents(row.get("model_prob")),
+        axis=1,
+    )
+
+    passthrough_cols = [
+        "primary_model_probability",
+        "behavior_diagnostic_probability",
+        "behavior_probability_delta",
+        "model_policy",
+        "edge_source",
+    ]
+    for col in passthrough_cols:
+        if col not in model.columns:
+            model[col] = pd.NA
+
+    lookup = {
+        (str(row.get("market", "")), str(row.get("selection", ""))): row
+        for _, row in joined.iterrows()
+    }
+    rows: list[dict[str, Any]] = []
+    for _, model_row in model.iterrows():
+        out = {col: model_row.get(col, pd.NA) for col in MARKETS_TAB_COLUMNS}
+        out["model_prob"] = model_row.get("model_prob", pd.NA)
+        out["fair_odds"] = model_row.get("fair_odds", pd.NA)
+        out["fair_price_cents"] = model_row.get("fair_price_cents", pd.NA)
+        out["market_odds"] = pd.NA
+        out["market_price_cents"] = pd.NA
+        out["alpha_ev"] = pd.NA
+        out["alpha_gap_cents"] = pd.NA
+        out["odds_source"] = pd.NA
+        out["odds_last_updated"] = pd.NA
+        out["signal"] = "No price joined"
+        out["score"] = 0.0
+        out["mapping_confidence"] = pd.NA
+        out["polymarket_market_id"] = pd.NA
+        out["polymarket_market_slug"] = pd.NA
+        out["polymarket_question"] = pd.NA
+        out["event_slug"] = pd.NA
+
+        match = lookup.get((str(model_row.get("market", "")), str(model_row.get("selection", ""))))
+        if match is not None:
+            model_prob = _first_notna(match.get("model_probability"), out.get("model_prob"))
+            fair_odds_value = _first_notna(match.get("fair_odds"), out.get("fair_odds"))
+            fair_price = _first_notna(match.get("fair_price_cents"), out.get("fair_price_cents"), _probability_to_cents(model_prob))
+            price_cents = match.get("market_price_cents", pd.NA)
+            market_odds = _price_to_odds(price_cents)
+            alpha_gap = float(fair_price) - float(price_cents) if pd.notna(fair_price) and pd.notna(price_cents) else pd.NA
+            alpha_ev = (
+                float(fair_odds_value) / float(market_odds) - 1.0
+                if pd.notna(fair_odds_value) and pd.notna(market_odds) and float(market_odds) > 0
+                else pd.NA
+            )
+
+            out.update(
+                {
+                    "model_prob": model_prob,
+                    "fair_odds": fair_odds_value,
+                    "fair_price_cents": fair_price,
+                    "market_price_cents": price_cents,
+                    "market_odds": market_odds,
+                    "alpha_ev": alpha_ev,
+                    "alpha_gap_cents": alpha_gap,
+                    "score": match.get("score", 0.0),
+                    "mapping_confidence": match.get("mapping_confidence", pd.NA),
+                    "polymarket_market_id": match.get("polymarket_market_id", pd.NA),
+                    "polymarket_market_slug": match.get("polymarket_market_slug", pd.NA),
+                    "polymarket_question": match.get("polymarket_question", pd.NA),
+                    "event_slug": match.get("event_slug", pd.NA),
+                }
+            )
+            if pd.notna(price_cents):
+                out["odds_source"] = "polymarket"
+                out["odds_last_updated"] = _first_notna(match.get("polymarket_last_updated"), utc_now_iso())
+                out["signal"] = match.get("signal", "Near fair")
+            else:
+                out["signal"] = "No price joined"
+        rows.append(out)
+
+    out_df = pd.DataFrame(rows, columns=MARKETS_TAB_COLUMNS)
+    tab_diagnostics = markets_tab_join_diagnostics(out_df, joined, diagnostics)
+    return out_df, tab_diagnostics
+
+
+def markets_tab_export_dataframe(markets_tab_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the exact dataframe intended for Markets-tab CSV export."""
+    return markets_tab_df.copy() if markets_tab_df is not None else pd.DataFrame(columns=MARKETS_TAB_COLUMNS)
+
+
+def markets_tab_join_diagnostics(
+    markets_tab_df: pd.DataFrame,
+    joined_polymarket_df: pd.DataFrame | None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnostics = diagnostics or {}
+    joined = joined_polymarket_df.copy() if joined_polymarket_df is not None else pd.DataFrame()
+    rows_with_market_odds = _notna_count(markets_tab_df, "market_odds")
+    rows_with_alpha_ev = _notna_count(markets_tab_df, "alpha_ev")
+    event_markets_loaded = int(diagnostics.get("event_markets_loaded_count", 0) or 0)
+    joined_markets = int(diagnostics.get("joined_markets_count", 0) or 0)
+    if joined_markets == 0 and not joined.empty and "market_price_cents" in joined.columns:
+        joined_markets = int(joined["market_price_cents"].notna().sum())
+    reason = ""
+    status = str(diagnostics.get("slug_resolution_status", diagnostics.get("resolution_status", "")) or "")
+    if rows_with_market_odds == 0:
+        if status != "resolved":
+            reason = "No Polymarket prices joined because no event slug was resolved."
+        elif event_markets_loaded == 0:
+            reason = "Event slug resolved, but no event markets were loaded."
+        else:
+            reason = "Event markets loaded, but no model markets matched Polymarket outcomes."
+    return {
+        "resolved_slug": diagnostics.get("resolved_slug", ""),
+        "event_markets_loaded": event_markets_loaded,
+        "joined_markets": joined_markets,
+        "rows_with_market_odds": rows_with_market_odds,
+        "rows_with_alpha_ev": rows_with_alpha_ev,
+        "reason_if_zero": reason,
+    }
 
 
 def joined_market_groups(joined_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -928,3 +1099,23 @@ def _market_types_found(df: pd.DataFrame) -> list[str]:
     if df is None or df.empty or "market_type" not in df.columns:
         return []
     return sorted(df["market_type"].dropna().astype(str).unique().tolist())
+
+
+def _probability_to_cents(value: Any) -> float | pd.NA:
+    probability = coerce_float(value, float("nan"))
+    if pd.isna(probability):
+        return pd.NA
+    return float(probability) * 100.0
+
+
+def _first_notna(*values: Any) -> Any:
+    for value in values:
+        if pd.notna(value):
+            return value
+    return pd.NA
+
+
+def _notna_count(df: pd.DataFrame, column: str) -> int:
+    if df is None or df.empty or column not in df.columns:
+        return 0
+    return int(df[column].notna().sum())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -108,6 +109,188 @@ def test_snapshot_predictions_for_fixtures_appends(monkeypatch, tmp_path) -> Non
     assert path.exists()
 
 
+def test_dashboard_snapshot_uses_prediction_ledger_not_prediction_log() -> None:
+    app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    assert "save_prediction_snapshot(" not in app_source
+    assert "Prediction snapshot target: data/prediction_ledger.csv" in app_source
+    assert "Saved {written} prediction row(s) to data/prediction_ledger.csv." in app_source
+
+
+def test_selected_future_fixture_writes_one_ledger_row(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "prediction_ledger.csv"
+    monkeypatch.setattr(prediction_ledger, "run_match_model", _fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
+
+    snapshots, diagnostics = prediction_ledger.snapshot_predictions_for_fixtures_with_diagnostics(
+        _fixtures("2026-06-22", "18:00"),
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        market_odds_df=pd.DataFrame(),
+        path=path,
+        selected_match_ids=["m1"],
+    )
+
+    assert len(snapshots) == 1
+    assert diagnostics["predictions_written"] == 1
+    assert diagnostics["output_path"].endswith("prediction_ledger.csv")
+    ledger = pd.read_csv(path)
+    assert len(ledger) == 1
+
+
+def test_past_fixture_skipped_without_explicit_include_past(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(prediction_ledger, "run_match_model", _fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
+
+    snapshots, diagnostics = prediction_ledger.snapshot_predictions_for_fixtures_with_diagnostics(
+        _fixtures("2026-06-22", "11:00"),
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=tmp_path / "prediction_ledger.csv",
+        include_past=False,
+    )
+
+    assert snapshots.empty
+    assert diagnostics["predictions_written"] == 0
+    assert diagnostics["skipped_past_kickoff"] == 1
+    assert diagnostics["skip_reasons"][0]["reason_code"] == "past_kickoff"
+
+
+def test_past_fixture_can_be_written_with_pre_kickoff_false(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(prediction_ledger, "run_match_model", _fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
+
+    snapshots, diagnostics = prediction_ledger.snapshot_predictions_for_fixtures_with_diagnostics(
+        _fixtures("2026-06-22", "11:00"),
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=tmp_path / "prediction_ledger.csv",
+        include_past=True,
+    )
+
+    assert len(snapshots) == 1
+    assert diagnostics["predictions_written"] == 1
+    assert bool(snapshots.iloc[0]["prediction_before_kickoff"]) is False
+
+
+def test_no_selected_fixtures_returns_clear_diagnostic(tmp_path) -> None:
+    snapshots, diagnostics = prediction_ledger.snapshot_predictions_for_fixtures_with_diagnostics(
+        _fixtures("2026-06-22", "18:00"),
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=tmp_path / "prediction_ledger.csv",
+        selected_match_ids=[],
+    )
+
+    assert snapshots.empty
+    assert diagnostics["fixtures_available"] == 1
+    assert diagnostics["fixtures_selected"] == 0
+    assert diagnostics["warnings"] == ["No fixtures were selected."]
+
+
+def test_missing_model_result_returns_clear_diagnostic(monkeypatch, tmp_path) -> None:
+    def raise_model(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(prediction_ledger, "run_match_model", raise_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
+
+    snapshots, diagnostics = prediction_ledger.snapshot_predictions_for_fixtures_with_diagnostics(
+        _fixtures("2026-06-22", "18:00"),
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=tmp_path / "prediction_ledger.csv",
+    )
+
+    assert snapshots.empty
+    assert diagnostics["skipped_missing_model_result"] == 1
+    assert "model unavailable" in diagnostics["skip_reasons"][0]["reason"]
+
+
+def test_snapshot_preserves_existing_ledger_rows(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "prediction_ledger.csv"
+    existing = {col: "" for col in prediction_ledger.PREDICTION_LEDGER_COLUMNS}
+    existing.update({"prediction_id": "existing", "match_id": "old"})
+    pd.DataFrame([existing]).to_csv(path, index=False)
+    monkeypatch.setattr(prediction_ledger, "run_match_model", _fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
+
+    prediction_ledger.snapshot_predictions_for_fixtures_with_diagnostics(
+        _fixtures("2026-06-22", "18:00"),
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=path,
+    )
+
+    ledger = pd.read_csv(path)
+    assert list(ledger["prediction_id"])[0] == "existing"
+    assert len(ledger) == 2
+
+
+def test_required_prediction_ledger_columns_exist() -> None:
+    required = {
+        "prediction_id",
+        "snapshot_utc",
+        "match_id",
+        "kickoff_utc",
+        "competition",
+        "group",
+        "home",
+        "away",
+        "venue",
+        "primary_model_mode",
+        "model_version",
+        "parameter_set_id",
+        "home_win_prob",
+        "draw_prob",
+        "away_win_prob",
+        "home_xg",
+        "away_xg",
+        "over_0_5_prob",
+        "over_1_5_prob",
+        "over_2_5_prob",
+        "over_3_5_prob",
+        "btts_yes_prob",
+        "source_status",
+        "prediction_before_kickoff",
+        "market_snapshot_available",
+        "notes",
+    }
+
+    assert required.issubset(set(prediction_ledger.PREDICTION_LEDGER_COLUMNS))
+
+
+def test_snapshot_audit_dry_run_does_not_write(monkeypatch, tmp_path, capsys) -> None:
+    import scripts.audit_prediction_snapshot as script
+
+    path = tmp_path / "prediction_ledger.csv"
+    _patch_audit_script(monkeypatch, script, path)
+    monkeypatch.setattr(sys, "argv", ["audit_prediction_snapshot.py", "--start-date", "2026-06-22", "--end-date", "2026-06-22", "--competition", "World Cup"])
+
+    script.main()
+
+    assert "predictions_that_would_be_written: 1" in capsys.readouterr().out
+    assert not path.exists()
+
+
+def test_snapshot_audit_write_appends_rows(monkeypatch, tmp_path, capsys) -> None:
+    import scripts.audit_prediction_snapshot as script
+
+    path = tmp_path / "prediction_ledger.csv"
+    _patch_audit_script(monkeypatch, script, path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["audit_prediction_snapshot.py", "--start-date", "2026-06-22", "--end-date", "2026-06-22", "--competition", "World Cup", "--write"],
+    )
+
+    script.main()
+
+    assert "predictions_written: 1" in capsys.readouterr().out
+    assert path.exists()
+    assert len(pd.read_csv(path)) == 1
+
+
 def test_import_completed_results_script_runs(monkeypatch, tmp_path, capsys) -> None:
     import scripts.import_completed_results as script
 
@@ -132,3 +315,61 @@ def test_import_completed_results_script_runs(monkeypatch, tmp_path, capsys) -> 
     script.main()
 
     assert "results ledger rows: 1" in capsys.readouterr().out
+
+
+def _fixtures(date_utc: str, time_utc: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "match_id": "m1",
+                "date_utc": date_utc,
+                "time_utc": time_utc,
+                "competition": "World Cup",
+                "group": "A",
+                "home": "Alpha",
+                "away": "Beta",
+                "venue": "Test",
+            }
+        ]
+    )
+
+
+def _teams() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"team": "Alpha", "elo": 1700, "attack": 0.6, "defense": 0.6, "recent_form": 0.6},
+            {"team": "Beta", "elo": 1600, "attack": 0.5, "defense": 0.5, "recent_form": 0.5},
+        ]
+    )
+
+
+def _fake_run_match_model(*_args, **_kwargs):
+    return {
+        "hxg": 1.5,
+        "axg": 0.9,
+        "probs": {
+            "home_win": 0.5,
+            "draw": 0.25,
+            "away_win": 0.25,
+            "over_2_5": 0.45,
+            "over_3_5": 0.20,
+            "btts_yes": 0.48,
+        },
+        "score_matrix": pd.DataFrame(
+            [
+                {"home_goals": 0, "away_goals": 0, "prob": 0.2},
+                {"home_goals": 1, "away_goals": 0, "prob": 0.3},
+                {"home_goals": 1, "away_goals": 1, "prob": 0.5},
+            ]
+        ),
+    }
+
+
+def _patch_audit_script(monkeypatch, script, path) -> None:
+    monkeypatch.setattr(script, "PREDICTION_LEDGER_PATH", path)
+    monkeypatch.setattr(script, "get_upcoming_fixtures", lambda **_kwargs: _fixtures("2026-06-22", "18:00"))
+    monkeypatch.setattr(script, "get_team_ratings", lambda **_kwargs: _teams())
+    monkeypatch.setattr(script, "load_venues", lambda: pd.DataFrame())
+    monkeypatch.setattr(script, "load_market_odds", lambda: pd.DataFrame())
+    monkeypatch.setattr(prediction_ledger, "run_match_model", _fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")

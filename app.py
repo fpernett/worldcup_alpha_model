@@ -10,7 +10,7 @@ import streamlit as st
 from src.alpha import calculate_polymarket_alpha
 from src.asof_backtest import get_team_ratings_asof, run_asof_backtest_result
 from src.backtest import run_backtest
-from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log, save_prediction_snapshot
+from src.backtesting import evaluate_predictions, load_prediction_log, load_results_log
 from src.blend_sensitivity import run_blend_sensitivity_result
 from src.behavior_driver_report import (
     audit_final_model_inputs,
@@ -63,12 +63,14 @@ from src.polymarket_url_resolver import (
 from src.polymarket_slug_join import (
     build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
+    build_markets_tab_joined_dataframe,
     joined_market_groups,
     load_polymarket_event_markets_by_slug,
+    markets_tab_export_dataframe,
     polymarket_alpha_rows,
 )
 from src.postmortem import build_postmortem_report, calculate_prediction_errors, join_predictions_to_results
-from src.prediction_ledger import load_prediction_ledger, load_results_ledger
+from src.prediction_ledger import PREDICTION_LEDGER_PATH, load_prediction_ledger, load_results_ledger, snapshot_predictions_for_fixtures_with_diagnostics
 from src.rating_coverage import (
     audit_rating_coverage,
     collect_required_teams,
@@ -1403,6 +1405,11 @@ for label in selected_labels:
     slug_resolution = joined_polymarket_markets.attrs.get("slug_resolution", {})
     resolved_event_markets = joined_polymarket_markets.attrs.get("polymarket_event_markets", pd.DataFrame())
     joined_polymarket_alpha_rows = polymarket_alpha_rows(joined_polymarket_markets)
+    markets_tab_df, markets_tab_diagnostics = build_markets_tab_joined_dataframe(
+        alpha,
+        joined_polymarket_markets,
+        polymarket_alpha_diagnostics,
+    )
     mapped_markets = map_match_to_polymarket_markets(match, polymarket_markets)
     match_polymarket_markets = pd.DataFrame()
     url_resolved_markets = pd.DataFrame()
@@ -1819,25 +1826,24 @@ for label in selected_labels:
 
     with tabs[3]:
         st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
-        market_cols = [
-            "market",
-            "selection",
-            "model_prob",
-            "primary_model_probability",
-            "behavior_diagnostic_probability",
-            "behavior_probability_delta",
-            "model_policy",
-            "edge_source",
-            "fair_odds",
-            "market_odds",
-            "alpha_ev",
-            "odds_source",
-            "odds_last_updated",
-        ]
+        diag_cols = st.columns(5)
+        diag_cols[0].metric("Resolved slug", markets_tab_diagnostics.get("resolved_slug", "") or "unresolved")
+        diag_cols[1].metric("Event markets loaded", markets_tab_diagnostics.get("event_markets_loaded", 0))
+        diag_cols[2].metric("Joined markets", markets_tab_diagnostics.get("joined_markets", 0))
+        diag_cols[3].metric("Rows with market_odds", markets_tab_diagnostics.get("rows_with_market_odds", 0))
+        diag_cols[4].metric("Rows with alpha_ev", markets_tab_diagnostics.get("rows_with_alpha_ev", 0))
+        if markets_tab_diagnostics.get("reason_if_zero"):
+            st.warning(markets_tab_diagnostics["reason_if_zero"])
         st.dataframe(
-            alpha_display(alpha)[[col for col in market_cols if col in alpha.columns]],
+            markets_tab_df,
             hide_index=True,
             width="stretch",
+        )
+        st.download_button(
+            "Export Markets table CSV",
+            markets_tab_export_dataframe(markets_tab_df).to_csv(index=False).encode("utf-8"),
+            file_name="markets_tab_joined.csv",
+            mime="text/csv",
         )
         st.caption("Market alpha uses the primary model probability. Behavior-only differences are diagnostic context, not primary alpha.")
 
@@ -2155,9 +2161,54 @@ for label in selected_labels:
                 width="stretch",
             )
 
+        st.caption("Prediction snapshot target: data/prediction_ledger.csv")
+        allow_post_kickoff_snapshot = st.checkbox(
+            "Allow post-kickoff snapshot for diagnostics",
+            value=False,
+            key=f"allow_post_kickoff_snapshot_{match['match_id']}",
+            help="Post-kickoff snapshots are marked prediction_before_kickoff=False and are not valid for honest post-mortem scoring.",
+        )
         if st.button("Save prediction snapshot", key=f"save_snapshot_{match['match_id']}"):
-            save_prediction_snapshot(match, result, polymarket_alpha)
-            st.success(f"Saved {len(polymarket_alpha)} prediction row(s) to data/prediction_log.csv.")
+            snapshot_rows, snapshot_diagnostics = snapshot_predictions_for_fixtures_with_diagnostics(
+                pd.DataFrame([match]),
+                team_ratings_df=teams,
+                venues_df=venues,
+                market_odds_df=market_odds,
+                cfg=cfg,
+                model_version="baseline_external_calibrated_v1",
+                parameter_set_id="baseline_current",
+                primary_model_mode=str(current_model_policy["primary_model_mode"]),
+                notes="Dashboard selected-match snapshot",
+                path=PREDICTION_LEDGER_PATH,
+                append=True,
+                include_past=allow_post_kickoff_snapshot,
+                selected_match_ids=[str(match.get("match_id", ""))],
+            )
+            written = int(snapshot_diagnostics.get("predictions_written", 0))
+            if written > 0:
+                st.success(f"Saved {written} prediction row(s) to data/prediction_ledger.csv.")
+            else:
+                skip_reasons = snapshot_diagnostics.get("skip_reasons", [])
+                reason = skip_reasons[0].get("reason", "No prediction rows were eligible to save.") if skip_reasons else "No prediction rows were eligible to save."
+                st.warning(f"Saved 0 prediction rows because {reason[0].lower() + reason[1:] if reason else 'no eligible fixtures were found.'}")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Predictions written": written,
+                            "Skipped": snapshot_diagnostics.get("predictions_skipped", 0),
+                            "Output path": snapshot_diagnostics.get("output_path", "data/prediction_ledger.csv"),
+                            "Warnings": "; ".join(snapshot_diagnostics.get("warnings", [])),
+                        }
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            skip_reasons = snapshot_diagnostics.get("skip_reasons", [])
+            if skip_reasons:
+                st.write("Snapshot skip reasons")
+                st.dataframe(pd.DataFrame(skip_reasons), hide_index=True, width="stretch")
 
     with tabs[5]:
         st.subheader("Sensitivity Analysis")

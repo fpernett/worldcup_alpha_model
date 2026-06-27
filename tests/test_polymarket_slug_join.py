@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 
 from src.polymarket_slug_join import (
+    build_markets_tab_joined_dataframe,
     build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
     extract_markets_from_polymarket_event_html,
@@ -11,6 +12,7 @@ from src.polymarket_slug_join import (
     joined_market_groups,
     join_polymarket_prices_to_model_markets,
     load_polymarket_event_markets_by_slug,
+    markets_tab_export_dataframe,
     polymarket_alpha_rows,
     resolve_polymarket_slug_for_fixture,
 )
@@ -223,6 +225,72 @@ def test_available_price_populates_value_columns() -> None:
     assert row["alpha_gap_cents"] == 7.0
     assert row["score"] == 7.0
     assert row["signal"] == "Positive model gap"
+
+
+def test_markets_tab_model_only_keeps_fair_odds_without_prices() -> None:
+    table, diagnostics = build_markets_tab_joined_dataframe(
+        _model_markets(),
+        pd.DataFrame(),
+        {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+    )
+
+    assert table["fair_odds"].notna().all()
+    assert table["market_odds"].isna().all()
+    assert table["signal"].eq("No price joined").all()
+    assert diagnostics["reason_if_zero"] == "No Polymarket prices joined because no event slug was resolved."
+
+
+def test_markets_tab_joined_moneyline_populates_market_odds_alpha_ev_source_and_timestamp() -> None:
+    joined = join_polymarket_prices_to_model_markets(_model_markets().head(3), _event_markets(), "Uruguay", "Spain")
+    table, diagnostics = build_markets_tab_joined_dataframe(
+        _model_markets().head(3),
+        joined,
+        {"slug_resolution_status": "resolved", "resolved_slug": "fifwc-ury-esp-2026-06-26", "event_markets_loaded_count": 5, "joined_markets_count": 3},
+    )
+
+    home = table.loc[(table["market"] == "1X2") & (table["selection"] == "Home")].iloc[0]
+    assert round(float(home["market_odds"]), 2) == 2.86
+    assert round(float(home["alpha_ev"]), 4) == round(2.38 / (100.0 / 35.0) - 1.0, 4)
+    assert home["odds_source"] == "polymarket"
+    assert home["odds_last_updated"] == "2026-06-26T00:00:00Z"
+    assert diagnostics["rows_with_market_odds"] == 3
+    assert diagnostics["rows_with_alpha_ev"] == 3
+
+
+def test_markets_tab_export_dataframe_equals_display_dataframe() -> None:
+    joined = join_polymarket_prices_to_model_markets(_model_markets().head(3), _event_markets(), "Uruguay", "Spain")
+    table, _diagnostics = build_markets_tab_joined_dataframe(
+        _model_markets().head(3),
+        joined,
+        {"slug_resolution_status": "resolved", "event_markets_loaded_count": 5, "joined_markets_count": 3},
+    )
+
+    pd.testing.assert_frame_equal(markets_tab_export_dataframe(table), table)
+
+
+def test_markets_tab_diagnostics_explain_no_slug() -> None:
+    table, diagnostics = build_markets_tab_joined_dataframe(
+        _model_markets().head(1),
+        pd.DataFrame(),
+        {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+    )
+
+    assert table["market_odds"].isna().all()
+    assert diagnostics["reason_if_zero"] == "No Polymarket prices joined because no event slug was resolved."
+
+
+def test_markets_tab_diagnostics_explain_mapping_failure() -> None:
+    no_match = _event_markets().loc[_event_markets()["market_type"] == "moneyline"].copy()
+    model = _model_markets().loc[_model_markets()["market"] == "BTTS"].copy()
+    joined = join_polymarket_prices_to_model_markets(model, no_match, "Uruguay", "Spain")
+    table, diagnostics = build_markets_tab_joined_dataframe(
+        model,
+        joined,
+        {"slug_resolution_status": "resolved", "event_markets_loaded_count": len(no_match), "joined_markets_count": 0},
+    )
+
+    assert table["market_odds"].isna().all()
+    assert diagnostics["reason_if_zero"] == "Event markets loaded, but no model markets matched Polymarket outcomes."
 
 
 def test_polymarket_alpha_table_not_empty_when_markets_match() -> None:
