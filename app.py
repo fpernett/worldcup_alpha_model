@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.express as px
@@ -69,7 +70,12 @@ from src.polymarket_slug_join import (
     markets_tab_export_dataframe,
     polymarket_alpha_rows,
 )
-from src.postmortem import build_postmortem_report, calculate_prediction_errors, join_predictions_to_results
+from src.postmortem import (
+    build_postmortem_action_plan,
+    build_postmortem_report,
+    calculate_prediction_errors,
+    join_predictions_to_results,
+)
 from src.prediction_ledger import PREDICTION_LEDGER_PATH, load_prediction_ledger, load_results_ledger, snapshot_predictions_for_fixtures_with_diagnostics
 from src.rating_coverage import (
     audit_rating_coverage,
@@ -126,6 +132,99 @@ def _first_value(df: pd.DataFrame, column: str, default: str = ""):
     if pd.isna(value):
         return default
     return value
+
+
+def _is_missing_display_value(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _display_value(value: Any) -> str:
+    if _is_missing_display_value(value):
+        return ""
+    return str(value)
+
+
+def _object_column_needs_text(series: pd.Series) -> bool:
+    kinds: set[str] = set()
+    for value in series:
+        if _is_missing_display_value(value):
+            continue
+        if isinstance(value, (dict, list, tuple, set, pd.Series, pd.DataFrame)):
+            return True
+        if isinstance(value, str):
+            kinds.add("str")
+        elif isinstance(value, bool):
+            kinds.add("bool")
+        elif isinstance(value, (int, float)):
+            kinds.add("number")
+        else:
+            kinds.add(type(value).__name__)
+    return len(kinds) > 1
+
+
+def display_dataframe(data, *args, **kwargs):
+    if isinstance(data, pd.DataFrame):
+        data = data.copy()
+        data.attrs = {}
+        for col in data.columns:
+            if pd.api.types.is_object_dtype(data[col]) and _object_column_needs_text(data[col]):
+                data[col] = data[col].map(_display_value)
+    return st.dataframe(data, *args, **kwargs)
+
+
+def candidate_leaderboard_display(leaderboard: pd.DataFrame) -> pd.DataFrame:
+    if leaderboard is None or leaderboard.empty:
+        return pd.DataFrame()
+    out = leaderboard.copy()
+    for col in [
+        "brier_1x2",
+        "log_loss_1x2",
+        "accuracy",
+        "mean_actual_result_prob",
+        "over_2_5_brier",
+        "btts_brier",
+        "total_goals_mae",
+        "calibration_error",
+    ]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(3)
+    out["interpretation"] = out.get("promotion_status", pd.Series("", index=out.index)).map(_candidate_interpretation)
+    columns = [
+        "parameter_set_id",
+        "n_matches",
+        "brier_1x2",
+        "log_loss_1x2",
+        "accuracy",
+        "over_2_5_brier",
+        "promotion_status",
+        "interpretation",
+    ]
+    for col in columns:
+        if col not in out.columns:
+            out[col] = ""
+    return out[columns]
+
+
+def _candidate_interpretation(status: Any) -> str:
+    status_text = str(status or "")
+    if status_text == "current_primary_baseline":
+        return "Current primary model; candidates must beat this on Brier and log loss."
+    if status_text == "promotion_candidate":
+        return "Candidate passed the statistical gate; manual validation is still required."
+    if status_text == "not_promoted_sample_too_small":
+        return "Directionally better, but the completed-match sample is too small."
+    if status_text == "not_promoted_goal_market_worse":
+        return "1X2 improved, but goal-market quality worsened too much."
+    if status_text == "not_promoted_did_not_beat_baseline":
+        return "Did not beat the current baseline on the promotion metrics."
+    if status_text == "no_baseline_comparison":
+        return "Cannot compare because the baseline row is missing."
+    return "Diagnostic row; no model-policy action implied."
 
 
 def alpha_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -1251,7 +1350,7 @@ polymarket_markets = load_polymarket_inputs(
 
 with st.sidebar:
     st.header("Source Diagnostics")
-    st.dataframe(
+    display_dataframe(
         source_status[["input", "source", "rows", "api_configured", "last_updated", "warning"]],
         hide_index=True,
         width="stretch",
@@ -1324,7 +1423,7 @@ fixture_view["match_label"] = (
     + fixture_view["away"].astype(str)
 )
 
-st.dataframe(
+display_dataframe(
     fixture_view[["match_id", "kickoff_utc", "competition", "group", "home", "away", "venue", "city"]],
     width="stretch",
     hide_index=True,
@@ -1553,7 +1652,7 @@ for label in selected_labels:
             external_priors.get("_team_key", pd.Series(dtype=str)) == selected_binding["away_canonical"].lower()
         ]
         st.write("Selected match source binding")
-        st.dataframe(
+        display_dataframe(
             pd.DataFrame(
                 [
                     {
@@ -1631,7 +1730,7 @@ for label in selected_labels:
             for col in ["primary_probability", "behavior_diagnostic_probability"]:
                 display_diag[col] = display_diag[col].map(lambda x: "" if pd.isna(x) else pct(float(x)))
             display_diag["delta"] = display_diag["delta"].map(lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp")
-            st.dataframe(display_diag, hide_index=True, width="stretch")
+            display_dataframe(display_diag, hide_index=True, width="stretch")
             st.caption("Behavior probabilities are diagnostic-only and do not drive the primary alpha tables.")
 
         st.subheader("Model Confidence")
@@ -1643,7 +1742,7 @@ for label in selected_labels:
             top_alpha_signals = top_alpha_signals.sort_values("score", ascending=False).head(10)
         if top_alpha_signals.empty:
             st.info("No Top Alpha Signals because no joined Polymarket price rows are available.")
-            st.dataframe(
+            display_dataframe(
                 pd.DataFrame(
                     [
                         {
@@ -1659,7 +1758,7 @@ for label in selected_labels:
                 width="stretch",
             )
         else:
-            st.dataframe(
+            display_dataframe(
                 top_alpha_signals[
                     [
                         "market",
@@ -1726,7 +1825,7 @@ for label in selected_labels:
             st.plotly_chart(create_match_outcome_donut(probs, result["home"], result["away"]), width="stretch")
 
         st.subheader("League Context")
-        st.dataframe(league_context_display(league_context), hide_index=True, width="stretch")
+        display_dataframe(league_context_display(league_context), hide_index=True, width="stretch")
         context_source = league_context["source"].iloc[0] if "source" in league_context.columns and not league_context.empty else ""
         st.caption(f"League context source: {context_source}.")
 
@@ -1748,7 +1847,7 @@ for label in selected_labels:
             st.caption(expected_goals_df.attrs.get("note", ""))
         with x2:
             st.plotly_chart(create_team_ratings_chart(rating_percentiles), width="stretch")
-            st.dataframe(
+            display_dataframe(
                 rating_percentiles[
                     ["team", "attack", "defense", "attack_label", "defense_label"]
                 ],
@@ -1759,7 +1858,7 @@ for label in selected_labels:
         st.subheader("Climate Factors And Model Information")
         m1, m2 = st.columns(2)
         with m1:
-            st.dataframe(climate_factor_display(climate_factors), hide_index=True, width="stretch")
+            display_dataframe(climate_factor_display(climate_factors), hide_index=True, width="stretch")
             if climate_factors.attrs.get("team_factor_note"):
                 st.caption(climate_factors.attrs["team_factor_note"])
             if climate_factors.attrs.get("roof_note"):
@@ -1785,7 +1884,7 @@ for label in selected_labels:
                     {"Item": "Data source status", "Value": source_summary},
                 ]
             )
-            st.dataframe(model_info, hide_index=True, width="stretch")
+            display_dataframe(model_info, hide_index=True, width="stretch")
 
         st.subheader("Market Value Tables")
         markets_loaded_count = len(resolved_event_markets)
@@ -1804,7 +1903,7 @@ for label in selected_labels:
                 else:
                     st.caption("Polymarket event resolved, but no matching market prices were found for this market group.")
             else:
-                st.dataframe(group_df, hide_index=True, width="stretch")
+                display_dataframe(group_df, hide_index=True, width="stretch")
                 if "Odds / Price" in group_df.columns and not group_df["Odds / Price"].astype(str).str.strip().any():
                     st.caption("Polymarket event resolved, but no matching market prices were found for this market group.")
 
@@ -1822,7 +1921,7 @@ for label in selected_labels:
 
         scores = result["top_scores"].copy()
         scores["probability"] = scores["prob"].map(pct)
-        st.dataframe(scores[["label", "probability"]], hide_index=True, width="stretch")
+        display_dataframe(scores[["label", "probability"]], hide_index=True, width="stretch")
 
     with tabs[3]:
         st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
@@ -1834,7 +1933,7 @@ for label in selected_labels:
         diag_cols[4].metric("Rows with alpha_ev", markets_tab_diagnostics.get("rows_with_alpha_ev", 0))
         if markets_tab_diagnostics.get("reason_if_zero"):
             st.warning(markets_tab_diagnostics["reason_if_zero"])
-        st.dataframe(
+        display_dataframe(
             markets_tab_df,
             hide_index=True,
             width="stretch",
@@ -1889,10 +1988,10 @@ for label in selected_labels:
             "warning": "; ".join(polymarket_alpha_diagnostics.get("warnings", [])),
         }
         st.write("Polymarket alpha pipeline status")
-        st.dataframe(pd.DataFrame([slug_summary]), hide_index=True, width="stretch")
+        display_dataframe(pd.DataFrame([slug_summary]), hide_index=True, width="stretch")
         if slug_candidates:
             with st.expander("Slug candidates tried", expanded=False):
-                st.dataframe(pd.DataFrame({"slug_candidate": slug_candidates}), hide_index=True, width="stretch")
+                display_dataframe(pd.DataFrame({"slug_candidate": slug_candidates}), hide_index=True, width="stretch")
         if pm_warning:
             st.warning(pm_warning)
         st.write("Polymarket market search diagnostics")
@@ -1913,7 +2012,7 @@ for label in selected_labels:
             if not mapped_markets.empty
             else "No high-confidence match market was mapped. The market may not exist yet, may be closed, may use different team names, or the API/cache may be stale.",
         }
-        st.dataframe(pd.DataFrame([discovery_summary]), hide_index=True, width="stretch")
+        display_dataframe(pd.DataFrame([discovery_summary]), hide_index=True, width="stretch")
         if polymarket_event_url_or_slug.strip():
             st.write("Polymarket URL / slug resolver")
             st.caption(
@@ -1947,7 +2046,7 @@ for label in selected_labels:
                     if part
                 ),
             }
-            st.dataframe(pd.DataFrame([url_summary]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([url_summary]), hide_index=True, width="stretch")
             if not url_resolved_markets.empty:
                 url_cols = [
                     "market_id",
@@ -1959,21 +2058,21 @@ for label in selected_labels:
                     "volume",
                     "extraction_method",
                 ]
-                st.dataframe(
+                display_dataframe(
                     url_resolved_markets[[col for col in url_cols if col in url_resolved_markets.columns]],
                     hide_index=True,
                     width="stretch",
                 )
                 st.caption("To manually confirm any row, add its market_id and side mapping to data/market_mappings.csv.")
         if polymarket_search_queries:
-            st.dataframe(pd.DataFrame({"search_queries_used": polymarket_search_queries}), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame({"search_queries_used": polymarket_search_queries}), hide_index=True, width="stretch")
         if not polymarket_search_diagnostics.empty:
             best_candidate = polymarket_search_diagnostics.loc[
                 ~polymarket_search_diagnostics["rejected"].astype(bool)
             ].head(1)
             if not best_candidate.empty:
                 st.write("Best match-search candidate")
-                st.dataframe(
+                display_dataframe(
                     best_candidate[
                         [
                             "market_id",
@@ -2007,10 +2106,10 @@ for label in selected_labels:
             ]
             if not accepted_search.empty:
                 st.write("Accepted search candidates")
-                st.dataframe(accepted_search[[col for col in diag_cols if col in accepted_search.columns]], hide_index=True, width="stretch")
+                display_dataframe(accepted_search[[col for col in diag_cols if col in accepted_search.columns]], hide_index=True, width="stretch")
             if not rejected_search.empty:
                 st.write("Rejected search candidates")
-                st.dataframe(rejected_search[[col for col in diag_cols if col in rejected_search.columns]], hide_index=True, width="stretch")
+                display_dataframe(rejected_search[[col for col in diag_cols if col in rejected_search.columns]], hide_index=True, width="stretch")
         if mapping_market_pool.empty:
             st.warning(
                 "No Polymarket market data is loaded, so there is nothing to map for this match. "
@@ -2052,7 +2151,7 @@ for label in selected_labels:
                         diagnostic_display[col] = diagnostic_display[col].map(
                             lambda x: "" if pd.isna(x) else f"{100*float(x):.1f}"
                         )
-                st.dataframe(
+                display_dataframe(
                     diagnostic_display[
                         [
                             "market_id",
@@ -2076,7 +2175,7 @@ for label in selected_labels:
             for col in ["yes_price", "no_price"]:
                 if col in candidate_display.columns:
                     candidate_display[col] = candidate_display[col].map(lambda x: "" if pd.isna(x) else f"{100*float(x):.1f}")
-            st.dataframe(
+            display_dataframe(
                 candidate_display[
                     [
                         "market_id",
@@ -2103,7 +2202,7 @@ for label in selected_labels:
         if joined_polymarket_alpha_rows.empty:
             reason_no_rows = polymarket_alpha_diagnostics.get("reason_no_alpha_rows", "") or "No joined Polymarket alpha rows are available."
             st.info(reason_no_rows)
-            st.dataframe(
+            display_dataframe(
                 pd.DataFrame(
                     [
                         {
@@ -2120,7 +2219,7 @@ for label in selected_labels:
                 width="stretch",
             )
         else:
-            st.dataframe(
+            display_dataframe(
                 joined_polymarket_alpha_rows[
                     [
                         "market",
@@ -2142,7 +2241,7 @@ for label in selected_labels:
 
         if not show_only_mapped:
             st.subheader("Loaded Polymarket Markets")
-            st.dataframe(
+            display_dataframe(
                 mapping_market_pool.head(50)[
                     [
                         "market_id",
@@ -2191,7 +2290,7 @@ for label in selected_labels:
                 skip_reasons = snapshot_diagnostics.get("skip_reasons", [])
                 reason = skip_reasons[0].get("reason", "No prediction rows were eligible to save.") if skip_reasons else "No prediction rows were eligible to save."
                 st.warning(f"Saved 0 prediction rows because {reason[0].lower() + reason[1:] if reason else 'no eligible fixtures were found.'}")
-            st.dataframe(
+            display_dataframe(
                 pd.DataFrame(
                     [
                         {
@@ -2208,7 +2307,7 @@ for label in selected_labels:
             skip_reasons = snapshot_diagnostics.get("skip_reasons", [])
             if skip_reasons:
                 st.write("Snapshot skip reasons")
-                st.dataframe(pd.DataFrame(skip_reasons), hide_index=True, width="stretch")
+                display_dataframe(pd.DataFrame(skip_reasons), hide_index=True, width="stretch")
 
     with tabs[5]:
         st.subheader("Sensitivity Analysis")
@@ -2217,7 +2316,7 @@ for label in selected_labels:
             sens_display[col] = sens_display[col].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
         for col in ["home_xg", "away_xg"]:
             sens_display[col] = sens_display[col].map(lambda x: "" if pd.isna(x) else f"{x:.2f}")
-        st.dataframe(sens_display, hide_index=True, width="stretch")
+        display_dataframe(sens_display, hide_index=True, width="stretch")
 
         st.subheader("Alpha Robustness")
         if polymarket_alpha.empty:
@@ -2238,7 +2337,7 @@ for label in selected_labels:
             robustness_display["alpha_gap_cents"] = robustness_display["alpha_gap_cents"].map(
                 lambda x: "" if pd.isna(x) else f"{x:.1f}"
             )
-            st.dataframe(robustness_display, hide_index=True, width="stretch")
+            display_dataframe(robustness_display, hide_index=True, width="stretch")
             st.caption("A signal is robust when the same Polymarket side remains positive alpha in at least 2 of 3 scenarios.")
 
     with tabs[6]:
@@ -2262,7 +2361,7 @@ for label in selected_labels:
                 eval_row = evaluation.iloc[0]
                 c2.metric("Brier score", "" if pd.isna(eval_row["brier_score"]) else f"{eval_row['brier_score']:.4f}")
                 c3.metric("Log loss", "" if pd.isna(eval_row["log_loss"]) else f"{eval_row['log_loss']:.4f}")
-                st.dataframe(evaluation, hide_index=True, width="stretch")
+                display_dataframe(evaluation, hide_index=True, width="stretch")
             if results_log.empty:
                 st.info("Add completed match rows to `data/results_log.csv` to evaluate saved predictions.")
         else:
@@ -2311,7 +2410,7 @@ for label in selected_labels:
                 st.info("No completed matches found for this backtest filter. Widen the date range or clear the competition filter.")
             else:
                 st.write("Summary metrics")
-                st.dataframe(bt_metrics, hide_index=True, width="stretch")
+                display_dataframe(bt_metrics, hide_index=True, width="stretch")
 
                 st.write("Per-match comparison")
                 comparison_cols = [
@@ -2326,18 +2425,18 @@ for label in selected_labels:
                     "improved_by_behavior",
                     "notes",
                 ]
-                st.dataframe(
+                display_dataframe(
                     bt_comparison[[col for col in comparison_cols if col in bt_comparison.columns]],
                     hide_index=True,
                     width="stretch",
                 )
 
                 st.write("Calibration buckets")
-                st.dataframe(bt_calibration, hide_index=True, width="stretch")
+                display_dataframe(bt_calibration, hide_index=True, width="stretch")
 
                 if isinstance(bt_qa_summary, dict) and bt_qa_summary:
                     st.write("Backtest QA summary")
-                    st.dataframe(pd.DataFrame([bt_qa_summary]), hide_index=True, width="stretch")
+                    display_dataframe(pd.DataFrame([bt_qa_summary]), hide_index=True, width="stretch")
                 if isinstance(bt_qa_matches, pd.DataFrame) and not bt_qa_matches.empty:
                     qa_cols = [
                         "date_utc",
@@ -2355,7 +2454,7 @@ for label in selected_labels:
                         "rating_coverage_warning",
                         "probability_warning",
                     ]
-                    st.dataframe(bt_qa_matches[[col for col in qa_cols if col in bt_qa_matches.columns]], hide_index=True, width="stretch")
+                    display_dataframe(bt_qa_matches[[col for col in qa_cols if col in bt_qa_matches.columns]], hide_index=True, width="stretch")
         else:
             st.info("Behavior-adjusted backtest is idle. Enable it to run the completed-match evaluation.")
 
@@ -2367,29 +2466,29 @@ for label in selected_labels:
             rating_audit = audit_rating_coverage(rating_required, manual_rating_rows, rating_aliases)
             rating_alias_proposals = propose_team_aliases(rating_required, manual_rating_rows, rating_aliases)
             rating_summary = rating_coverage_summary(rating_audit, rating_alias_proposals)
-            st.dataframe(pd.DataFrame([rating_summary]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([rating_summary]), hide_index=True, width="stretch")
             if not rating_audit.empty:
-                st.dataframe(rating_audit.loc[rating_audit["warning"].astype(str) != ""], hide_index=True, width="stretch")
+                display_dataframe(rating_audit.loc[rating_audit["warning"].astype(str) != ""], hide_index=True, width="stretch")
 
             st.write("Rating Review")
             review_audit = audit_generated_ratings(manual_rating_rows, team_behavior, historical_long_matches, bt_matches)
-            st.dataframe(pd.DataFrame([rating_review_summary(review_audit)]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([rating_review_summary(review_audit)]), hide_index=True, width="stretch")
 
             st.write("External Prior / Benchmark Review")
             external_priors = load_external_priors()
             review_proposals = load_review_proposals()
             manual_review_sheet = load_manual_rating_review_sheet()
             prior_comparison = compare_ratings_to_external_priors(manual_rating_rows, review_proposals, external_priors)
-            st.dataframe(pd.DataFrame([external_prior_review_summary(prior_comparison, manual_review_sheet)]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([external_prior_review_summary(prior_comparison, manual_review_sheet)]), hide_index=True, width="stretch")
             benchmark_coverage = audit_external_benchmark_coverage(rating_required, external_priors, manual_rating_rows)
-            st.dataframe(pd.DataFrame([external_benchmark_coverage_summary(benchmark_coverage)]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([external_benchmark_coverage_summary(benchmark_coverage)]), hide_index=True, width="stretch")
             calibration_proposals = load_external_calibration_proposals()
             if calibration_proposals.empty:
                 calibration_proposals = build_external_calibration_proposals(manual_rating_rows, team_behavior, external_priors)
-            st.dataframe(pd.DataFrame([external_benchmark_calibration_summary(calibration_proposals, manual_rating_rows)]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([external_benchmark_calibration_summary(calibration_proposals, manual_rating_rows)]), hide_index=True, width="stretch")
 
             st.write("FIFA Snapshot / Ranking Import Status")
-            st.dataframe(pd.DataFrame([fifa_snapshot_validation_dashboard_status(), fifa_ranking_import_dashboard_status()]), hide_index=True, width="stretch")
+            display_dataframe(pd.DataFrame([fifa_snapshot_validation_dashboard_status(), fifa_ranking_import_dashboard_status()]), hide_index=True, width="stretch")
 
         if st.checkbox("Run strict as-of-date backtest", value=False, key=f"run_asof_backtest_{bt_key}"):
             st.write("Strict As-Of-Date Backtest")
@@ -2406,9 +2505,9 @@ for label in selected_labels:
             if asof_warning:
                 st.warning(asof_warning)
             if isinstance(asof_metrics, pd.DataFrame) and not asof_metrics.empty:
-                st.dataframe(asof_metrics, hide_index=True, width="stretch")
+                display_dataframe(asof_metrics, hide_index=True, width="stretch")
             if isinstance(asof_comparison, pd.DataFrame) and not asof_comparison.empty:
-                st.dataframe(asof_comparison, hide_index=True, width="stretch")
+                display_dataframe(asof_comparison, hide_index=True, width="stretch")
             if isinstance(asof_predictions, pd.DataFrame) and not asof_predictions.empty:
                 diag_cols = [
                     "date_utc",
@@ -2422,7 +2521,7 @@ for label in selected_labels:
                     "lookahead_safe",
                     "warning",
                 ]
-                st.dataframe(asof_predictions[[col for col in diag_cols if col in asof_predictions.columns]], hide_index=True, width="stretch")
+                display_dataframe(asof_predictions[[col for col in diag_cols if col in asof_predictions.columns]], hide_index=True, width="stretch")
 
         if st.checkbox("Run strict behavior blend sensitivity", value=False, key=f"blend_sensitivity_{bt_key}"):
             blend_result = load_blend_sensitivity_results(
@@ -2438,10 +2537,10 @@ for label in selected_labels:
                 st.info(blend_recommendation)
             if isinstance(blend_metrics, pd.DataFrame) and not blend_metrics.empty:
                 st.write("Metrics by blend multiplier")
-                st.dataframe(blend_metrics, hide_index=True, width="stretch")
+                display_dataframe(blend_metrics, hide_index=True, width="stretch")
             if isinstance(blend_team, pd.DataFrame) and not blend_team.empty:
                 st.write("Team-level helped/hurt")
-                st.dataframe(blend_team, hide_index=True, width="stretch")
+                display_dataframe(blend_team, hide_index=True, width="stretch")
 
     with tabs[7]:
         st.subheader("Team Inputs")
@@ -2457,7 +2556,7 @@ for label in selected_labels:
         ]:
             if col not in team_inputs.columns:
                 team_inputs[col] = pd.NA
-        st.dataframe(
+        display_dataframe(
             team_inputs[
                 [
                     "team",
@@ -2491,13 +2590,13 @@ for label in selected_labels:
                 {"team": result["away"], **get_team_training_climate(result["away"])},
             ]
         )
-        st.dataframe(climates, hide_index=True, width="stretch")
+        display_dataframe(climates, hide_index=True, width="stretch")
 
     with tabs[8]:
         st.subheader("Venue And Environment")
         env = venue_env
         env_df = pd.DataFrame([env])
-        st.dataframe(
+        display_dataframe(
             env_df[
                 [
                     "venue",
@@ -2550,14 +2649,14 @@ for label in selected_labels:
             )
             h2.metric(f"{result['home']} rows", f"{int(selected_overview.iloc[0]['historical_rows']):,}")
             h3.metric(f"{result['away']} rows", f"{int(selected_overview.iloc[1]['historical_rows']):,}")
-            st.dataframe(selected_overview, hide_index=True, width="stretch")
+            display_dataframe(selected_overview, hide_index=True, width="stretch")
 
         st.subheader("Recent Window Summary")
         window_summary = behavior_window_display(team_behavior, [result["home"], result["away"]])
         if window_summary.empty:
             st.caption("No calibrated behavior window rows are available.")
         else:
-            st.dataframe(window_summary, hide_index=True, width="stretch")
+            display_dataframe(window_summary, hide_index=True, width="stretch")
             for warning_text in window_summary.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
                 if warning_text:
                     st.warning(warning_text)
@@ -2567,7 +2666,7 @@ for label in selected_labels:
         if all_time_compare.empty:
             st.caption("No all-time diagnostic behavior rows are available.")
         else:
-            st.dataframe(all_time_compare, hide_index=True, width="stretch")
+            display_dataframe(all_time_compare, hide_index=True, width="stretch")
 
         st.subheader("Schedule Strength")
         st.caption("This section checks whether recent good results came against strong or weak opponents.")
@@ -2575,7 +2674,7 @@ for label in selected_labels:
         if schedule_display.empty:
             st.caption("No opponent-Elo schedule diagnostics are available.")
         else:
-            st.dataframe(schedule_display, hide_index=True, width="stretch")
+            display_dataframe(schedule_display, hide_index=True, width="stretch")
             for warning_text in schedule_display.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
                 if warning_text:
                     st.warning(warning_text)
@@ -2586,7 +2685,7 @@ for label in selected_labels:
         if residual_display.empty:
             st.caption("No residual-based performance diagnostics are available.")
         else:
-            st.dataframe(residual_display, hide_index=True, width="stretch")
+            display_dataframe(residual_display, hide_index=True, width="stretch")
             for warning_text in residual_display.get("warnings", pd.Series(dtype="object")).dropna().astype(str):
                 if warning_text:
                     st.warning(warning_text)
@@ -2617,7 +2716,7 @@ for label in selected_labels:
                         if attack_drivers.empty:
                             st.caption("No attack driver rows are available.")
                         else:
-                            st.dataframe(attack_drivers, hide_index=True, width="stretch")
+                            display_dataframe(attack_drivers, hide_index=True, width="stretch")
                     with d2:
                         st.markdown("**Top defense driver matches**")
                         defense_drivers = behavior_driver_matches_display(
@@ -2630,7 +2729,7 @@ for label in selected_labels:
                         if defense_drivers.empty:
                             st.caption("No defense driver rows are available.")
                         else:
-                            st.dataframe(defense_drivers, hide_index=True, width="stretch")
+                            display_dataframe(defense_drivers, hide_index=True, width="stretch")
 
                     b1, b2 = st.columns(2)
                     with b1:
@@ -2641,7 +2740,7 @@ for label in selected_labels:
                         if opponent_breakdown.empty:
                             st.caption("No opponent-tier breakdown is available.")
                         else:
-                            st.dataframe(opponent_breakdown, hide_index=True, width="stretch")
+                            display_dataframe(opponent_breakdown, hide_index=True, width="stretch")
                     with b2:
                         st.markdown("**Competition breakdown**")
                         competition_breakdown = behavior_breakdown_display(
@@ -2650,7 +2749,7 @@ for label in selected_labels:
                         if competition_breakdown.empty:
                             st.caption("No competition breakdown is available.")
                         else:
-                            st.dataframe(competition_breakdown, hide_index=True, width="stretch")
+                            display_dataframe(competition_breakdown, hide_index=True, width="stretch")
         else:
             st.info("Behavior driver diagnostics are idle. Enable them to scan historical match drivers and breakdowns.")
 
@@ -2659,7 +2758,7 @@ for label in selected_labels:
         if input_audit.empty:
             st.caption("No final model input audit rows are available.")
         else:
-            st.dataframe(input_audit, hide_index=True, width="stretch")
+            display_dataframe(input_audit, hide_index=True, width="stretch")
             for warning_text in input_audit.get("warning", pd.Series(dtype="object")).dropna().astype(str):
                 if warning_text:
                     st.warning(warning_text)
@@ -2677,7 +2776,7 @@ for label in selected_labels:
                 "`data/team_behavior.csv`."
             )
         else:
-            st.dataframe(behavior_summary, hide_index=True, width="stretch")
+            display_dataframe(behavior_summary, hide_index=True, width="stretch")
 
         st.subheader("Recency-Weighted Match History")
         h1, h2 = st.columns(2)
@@ -2687,18 +2786,18 @@ for label in selected_labels:
             if home_history.empty:
                 st.caption("No long-format historical rows available.")
             else:
-                st.dataframe(home_history, hide_index=True, width="stretch")
+                display_dataframe(home_history, hide_index=True, width="stretch")
         with h2:
             st.markdown(f"**{result['away']}**")
             away_history = historical_match_history_display(historical_long_matches, result["away"], match.get("date_utc"), limit=20)
             if away_history.empty:
                 st.caption("No long-format historical rows available.")
             else:
-                st.dataframe(away_history, hide_index=True, width="stretch")
+                display_dataframe(away_history, hide_index=True, width="stretch")
 
         st.subheader("Environment Response")
         env_response = environment_response_display(historical_long_matches, [result["home"], result["away"]], match.get("date_utc"))
-        st.dataframe(env_response, hide_index=True, width="stretch")
+        display_dataframe(env_response, hide_index=True, width="stretch")
         st.caption(
             "Environmental response uses hot >= 28 C, humid >= 70%, altitude >= 1000 m, "
             "wind >= 20 km/h, and rain > 0 mm. Effects are capped and conservative."
@@ -2709,7 +2808,7 @@ for label in selected_labels:
 
         st.subheader("Model Impact")
         impact_display = model_impact_display(result)
-        st.dataframe(impact_display, hide_index=True, width="stretch")
+        display_dataframe(impact_display, hide_index=True, width="stretch")
         if not impact_display.empty and impact_display["cap_hit"].any():
             st.warning("One or more behavior adjustments reached the configured movement cap; manual ratings remain the base input.")
         st.caption(
@@ -2762,11 +2861,34 @@ for label in selected_labels:
             joined_pm = join_predictions_to_results(ledger, results_ledger)
             errors_pm = calculate_prediction_errors(joined_pm)
             report_pm = build_postmortem_report(errors_pm, joined_pm)
+            training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
+            latest_training = training_reports[-1] if training_reports else None
+            if latest_training is not None:
+                try:
+                    leaderboard = pd.read_csv(latest_training)
+                except Exception:
+                    leaderboard = pd.DataFrame()
+            else:
+                leaderboard = pd.DataFrame()
 
             pm1, pm2, pm3 = st.columns(3)
             pm1.metric("Prediction ledger rows", f"{len(ledger):,}")
             pm2.metric("Completed result rows", f"{len(results_ledger):,}")
             pm3.metric("Scored pre-kickoff predictions", f"{len(errors_pm):,}")
+
+            st.divider()
+            st.write("What to do next")
+            action_plan = build_postmortem_action_plan(
+                prediction_rows=len(ledger),
+                result_rows=len(results_ledger),
+                scored_prediction_rows=len(errors_pm),
+                leaderboard_df=leaderboard,
+            )
+            display_dataframe(action_plan, hide_index=True, width="stretch")
+            st.caption(
+                "Use this table as the operating checklist: first collect pre-kickoff snapshots, then import results, "
+                "then score predictions, and only then review candidate model changes. It is evaluation-only."
+            )
 
             st.divider()
             st.write("Rolling tournament learning")
@@ -2790,7 +2912,7 @@ for label in selected_labels:
             )
             if not learning_used.empty:
                 display_cols = ["date_utc", "home", "away", "actual_result", "eligible_after_utc", "source"]
-                st.dataframe(
+                display_dataframe(
                     learning_used[[col for col in display_cols if col in learning_used.columns]].tail(20),
                     hide_index=True,
                     width="stretch",
@@ -2805,29 +2927,25 @@ for label in selected_labels:
             else:
                 summary_pm = report_pm.get("summary_metrics", pd.DataFrame())
                 st.write("Post-mortem metrics")
-                st.dataframe(summary_pm, hide_index=True, width="stretch")
+                display_dataframe(summary_pm, hide_index=True, width="stretch")
                 c_best, c_worst = st.columns(2)
                 with c_worst:
                     st.write("Worst misses")
-                    st.dataframe(report_pm.get("worst_misses", pd.DataFrame()).head(10), hide_index=True, width="stretch")
+                    display_dataframe(report_pm.get("worst_misses", pd.DataFrame()).head(10), hide_index=True, width="stretch")
                 with c_best:
                     st.write("Best calls")
-                    st.dataframe(report_pm.get("best_calls", pd.DataFrame()).head(10), hide_index=True, width="stretch")
+                    display_dataframe(report_pm.get("best_calls", pd.DataFrame()).head(10), hide_index=True, width="stretch")
 
             st.divider()
             st.write("Candidate model leaderboard")
-            training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
-            if training_reports:
-                latest_training = training_reports[-1]
-                try:
-                    leaderboard = pd.read_csv(latest_training)
-                except Exception:
-                    leaderboard = pd.DataFrame()
+            if latest_training is not None:
                 st.caption(f"Latest saved candidate report: `{latest_training.name}`")
                 if leaderboard.empty:
                     st.info("Latest candidate report could not be read.")
                 else:
-                    st.dataframe(leaderboard.head(20), hide_index=True, width="stretch")
+                    display_dataframe(candidate_leaderboard_display(leaderboard).head(20), hide_index=True, width="stretch")
+                    with st.expander("Full candidate report", expanded=False):
+                        display_dataframe(leaderboard.head(20), hide_index=True, width="stretch")
                     promoted = leaderboard.loc[leaderboard["promotion_status"].astype(str) == "promotion_candidate"] if "promotion_status" in leaderboard.columns else pd.DataFrame()
                     if promoted.empty:
                         st.info("No candidate is currently promoted; baseline external-calibrated remains the primary model.")

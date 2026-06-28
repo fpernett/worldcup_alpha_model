@@ -106,6 +106,40 @@ def test_build_postmortem_report_sections() -> None:
     assert not report["summary_metrics"].empty
 
 
+def test_postmortem_action_plan_blocks_when_no_scored_predictions() -> None:
+    actions = postmortem.build_postmortem_action_plan(
+        prediction_rows=1,
+        result_rows=1,
+        scored_prediction_rows=0,
+        leaderboard_df=pd.DataFrame(),
+    )
+
+    scored = actions.loc[actions["area"] == "Scored predictions"].iloc[0]
+    training = actions.loc[actions["area"] == "Candidate training"].iloc[0]
+    assert scored["status"] == "Blocked"
+    assert "match IDs" in scored["next_action"]
+    assert training["status"] == "Not run"
+
+
+def test_postmortem_action_plan_marks_promotion_for_manual_review() -> None:
+    leaderboard = pd.DataFrame(
+        [{"parameter_set_id": "draw_1.10", "promotion_status": "promotion_candidate"}]
+    )
+
+    actions = postmortem.build_postmortem_action_plan(
+        prediction_rows=40,
+        result_rows=40,
+        scored_prediction_rows=34,
+        leaderboard_df=leaderboard,
+    )
+
+    scored = actions.loc[actions["area"] == "Scored predictions"].iloc[0]
+    training = actions.loc[actions["area"] == "Candidate training"].iloc[0]
+    assert scored["status"] == "Usable"
+    assert training["status"] == "Review needed"
+    assert "before any model-policy change" in training["next_action"]
+
+
 def test_run_postmortem_script_runs(monkeypatch, tmp_path, capsys) -> None:
     import scripts.run_postmortem as script
 

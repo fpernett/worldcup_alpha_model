@@ -169,3 +169,18 @@ def test_local_fixture_fallback_covers_next_48_hours() -> None:
     assert "Mexico vs South Korea" in labels
     assert "United States vs Australia" in labels
     assert "Brazil vs Haiti" in labels
+
+
+def test_local_fixture_fallback_covers_june_28_dashboard_default() -> None:
+    fixtures = pd.read_csv("data/fixtures.csv")
+
+    filtered = filter_future_fixtures(
+        fixtures,
+        now_utc="2026-06-28T09:00:00Z",
+        horizon_hours=48,
+    )
+
+    labels = set(filtered["home"].astype(str) + " vs " + filtered["away"].astype(str))
+    assert len(filtered) >= 4
+    assert "South Africa vs Canada" in labels
+    assert "Brazil vs Japan" in labels

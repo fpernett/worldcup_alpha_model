@@ -38,6 +38,14 @@ POSTMORTEM_ERROR_COLUMNS = [
     "error_notes",
 ]
 
+POSTMORTEM_ACTION_COLUMNS = [
+    "area",
+    "status",
+    "what_it_means",
+    "next_action",
+    "command_or_file",
+]
+
 
 def join_predictions_to_results(prediction_ledger_df: pd.DataFrame | None, results_ledger_df: pd.DataFrame | None) -> pd.DataFrame:
     predictions = _ensure_columns(prediction_ledger_df, PREDICTION_LEDGER_COLUMNS)
@@ -140,6 +148,142 @@ def build_postmortem_report(errors_df: pd.DataFrame | None, joined_df: pd.DataFr
         "team_level_error_table": _team_level_errors(errors),
         "model_version_comparison": summary.copy(),
     }
+
+
+def build_postmortem_action_plan(
+    prediction_rows: int,
+    result_rows: int,
+    scored_prediction_rows: int,
+    leaderboard_df: pd.DataFrame | None = None,
+    minimum_training_sample: int = 30,
+) -> pd.DataFrame:
+    """Translate post-mortem diagnostics into evaluation-only next steps."""
+    leaderboard = leaderboard_df.copy() if leaderboard_df is not None else pd.DataFrame()
+    rows: list[dict[str, str]] = []
+
+    if prediction_rows <= 0:
+        rows.append(
+            _action_row(
+                "Prediction snapshots",
+                "Missing",
+                "There are no saved pre-match model snapshots to score later.",
+                "Snapshot upcoming predictions before kickoff.",
+                ".venv/bin/python scripts/snapshot_upcoming_predictions.py",
+            )
+        )
+    else:
+        rows.append(
+            _action_row(
+                "Prediction snapshots",
+                "Ready",
+                f"{prediction_rows:,} prediction ledger row(s) are available.",
+                "Keep snapshotting before each match so post-mortems use pre-kickoff evidence.",
+                "data/prediction_ledger.csv",
+            )
+        )
+
+    if result_rows <= 0:
+        rows.append(
+            _action_row(
+                "Completed results",
+                "Missing",
+                "No completed result rows are available to score predictions.",
+                "Import or enter completed results after matches finish.",
+                ".venv/bin/python scripts/import_completed_results.py",
+            )
+        )
+    else:
+        rows.append(
+            _action_row(
+                "Completed results",
+                "Ready",
+                f"{result_rows:,} result ledger row(s) are available.",
+                "Keep results current after completed matches.",
+                "data/results_ledger.csv",
+            )
+        )
+
+    if scored_prediction_rows <= 0:
+        rows.append(
+            _action_row(
+                "Scored predictions",
+                "Blocked",
+                "No prediction can be matched to a completed result before kickoff.",
+                "Check match IDs, kickoff timestamps, and whether snapshots were saved before kickoff.",
+                "Post-mortem Training > Worst misses / Best calls",
+            )
+        )
+    elif scored_prediction_rows < minimum_training_sample:
+        rows.append(
+            _action_row(
+                "Scored predictions",
+                "Directional",
+                f"{scored_prediction_rows:,} scored prediction(s) are available; this is below the {minimum_training_sample:,}-match promotion threshold.",
+                "Use misses for diagnosis, but do not promote model settings yet.",
+                "Collect more completed pre-kickoff predictions.",
+            )
+        )
+    else:
+        rows.append(
+            _action_row(
+                "Scored predictions",
+                "Usable",
+                f"{scored_prediction_rows:,} scored prediction(s) meet the minimum candidate-training sample.",
+                "Review Brier, log loss, calibration, and miss tables before changing model policy.",
+                "Post-mortem Training > Post-mortem metrics",
+            )
+        )
+
+    promotion_status = _promotion_status(leaderboard)
+    if leaderboard.empty:
+        rows.append(
+            _action_row(
+                "Candidate training",
+                "Not run",
+                "No saved candidate leaderboard is available.",
+                "Run candidate training after enough scored results exist.",
+                ".venv/bin/python scripts/train_model_candidates.py --save-report",
+            )
+        )
+    elif promotion_status == "promotion_candidate":
+        rows.append(
+            _action_row(
+                "Candidate training",
+                "Review needed",
+                "At least one candidate beat the baseline under the promotion rule.",
+                "Manually inspect the report and validation caveats before any model-policy change.",
+                "reports/model_training_candidates_*.csv",
+            )
+        )
+    else:
+        rows.append(
+            _action_row(
+                "Candidate training",
+                "Keep baseline",
+                "No saved candidate currently meets the promotion rule.",
+                "Keep the baseline external-calibrated model as primary and use diagnostics to guide future review.",
+                "reports/model_training_candidates_*.csv",
+            )
+        )
+
+    return pd.DataFrame(rows, columns=POSTMORTEM_ACTION_COLUMNS)
+
+
+def _action_row(area: str, status: str, what_it_means: str, next_action: str, command_or_file: str) -> dict[str, str]:
+    return {
+        "area": area,
+        "status": status,
+        "what_it_means": what_it_means,
+        "next_action": next_action,
+        "command_or_file": command_or_file,
+    }
+
+
+def _promotion_status(leaderboard: pd.DataFrame) -> str:
+    if leaderboard.empty or "promotion_status" not in leaderboard.columns:
+        return ""
+    statuses = leaderboard["promotion_status"].fillna("").astype(str)
+    return "promotion_candidate" if statuses.eq("promotion_candidate").any() else ""
 
 
 def _summary_metrics(errors: pd.DataFrame) -> pd.DataFrame:

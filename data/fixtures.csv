@@ -37,3 +37,35 @@ wc2026_55,2026-06-25,20:00,FIFA World Cup,Group E,Ecuador,Germany,MetLife Stadiu
 wc2026_56,2026-06-25,20:00,FIFA World Cup,Group E,Curacao,Ivory Coast,Lincoln Financial Field,Philadelphia,USA
 wc2026_57,2026-06-25,23:00,FIFA World Cup,Group F,Japan,Sweden,Dallas Stadium,Arlington,USA
 wc2026_58,2026-06-25,23:00,FIFA World Cup,Group F,Tunisia,Netherlands,Arrowhead Stadium,Kansas City,USA
+wc2026_73,2026-06-28,19:00,FIFA World Cup,Round of 32,South Africa,Canada,SoFi Stadium,Inglewood,USA
+wc2026_76,2026-06-29,17:00,FIFA World Cup,Round of 32,Brazil,Japan,NRG Stadium,Houston,USA
+wc2026_74,2026-06-29,20:30,FIFA World Cup,Round of 32,Germany,Paraguay,Gillette Stadium,Foxborough,USA
+wc2026_75,2026-06-30,01:00,FIFA World Cup,Round of 32,Netherlands,Morocco,Estadio BBVA,Guadalupe,Mexico
+wc2026_78,2026-06-30,17:00,FIFA World Cup,Round of 32,Ivory Coast,Norway,Dallas Stadium,Arlington,USA
+wc2026_77,2026-06-30,21:00,FIFA World Cup,Round of 32,France,Sweden,MetLife Stadium,East Rutherford,USA
+wc2026_79,2026-07-01,01:00,FIFA World Cup,Round of 32,Mexico,3rd Group C/E,Estadio Azteca,Mexico City,Mexico
+wc2026_80,2026-07-01,16:00,FIFA World Cup,Round of 32,Winner Group L,3rd Group I/J/K,Mercedes-Benz Stadium,Atlanta,USA
+wc2026_82,2026-07-01,20:00,FIFA World Cup,Round of 32,Belgium,3rd Group A/I/J,Lumen Field,Seattle,USA
+wc2026_81,2026-07-02,00:00,FIFA World Cup,Round of 32,United States,Bosnia and Herzegovina,Levi's Stadium,Santa Clara,USA
+wc2026_84,2026-07-02,19:00,FIFA World Cup,Round of 32,Spain,Runner-up Group J,SoFi Stadium,Inglewood,USA
+wc2026_83,2026-07-02,23:00,FIFA World Cup,Round of 32,Runner-up Group K,Runner-up Group L,BMO Field,Toronto,Canada
+wc2026_85,2026-07-03,03:00,FIFA World Cup,Round of 32,Switzerland,3rd Group G/J,BC Place,Vancouver,Canada
+wc2026_88,2026-07-03,18:00,FIFA World Cup,Round of 32,Australia,Egypt,Dallas Stadium,Arlington,USA
+wc2026_86,2026-07-03,22:00,FIFA World Cup,Round of 32,Argentina,Cape Verde,Hard Rock Stadium,Miami Gardens,USA
+wc2026_87,2026-07-04,01:30,FIFA World Cup,Round of 32,Winner Group K,3rd Group E/I/L,Arrowhead Stadium,Kansas City,USA
+wc2026_90,2026-07-04,17:00,FIFA World Cup,Round of 16,Winner Match 73,Winner Match 75,NRG Stadium,Houston,USA
+wc2026_89,2026-07-04,21:00,FIFA World Cup,Round of 16,Winner Match 74,Winner Match 77,Lincoln Financial Field,Philadelphia,USA
+wc2026_91,2026-07-05,20:00,FIFA World Cup,Round of 16,Winner Match 76,Winner Match 78,MetLife Stadium,East Rutherford,USA
+wc2026_92,2026-07-06,00:00,FIFA World Cup,Round of 16,Winner Match 79,Winner Match 80,Estadio Azteca,Mexico City,Mexico
+wc2026_93,2026-07-06,19:00,FIFA World Cup,Round of 16,Winner Match 83,Winner Match 84,Dallas Stadium,Arlington,USA
+wc2026_94,2026-07-07,00:00,FIFA World Cup,Round of 16,Winner Match 81,Winner Match 82,Lumen Field,Seattle,USA
+wc2026_95,2026-07-07,16:00,FIFA World Cup,Round of 16,Winner Match 86,Winner Match 88,Mercedes-Benz Stadium,Atlanta,USA
+wc2026_96,2026-07-07,20:00,FIFA World Cup,Round of 16,Winner Match 85,Winner Match 87,BC Place,Vancouver,Canada
+wc2026_97,2026-07-09,20:00,FIFA World Cup,Quarterfinal,Winner Match 89,Winner Match 90,Gillette Stadium,Foxborough,USA
+wc2026_98,2026-07-10,19:00,FIFA World Cup,Quarterfinal,Winner Match 93,Winner Match 94,SoFi Stadium,Inglewood,USA
+wc2026_99,2026-07-11,21:00,FIFA World Cup,Quarterfinal,Winner Match 91,Winner Match 92,Hard Rock Stadium,Miami Gardens,USA
+wc2026_100,2026-07-12,01:00,FIFA World Cup,Quarterfinal,Winner Match 95,Winner Match 96,Arrowhead Stadium,Kansas City,USA
+wc2026_101,2026-07-14,19:00,FIFA World Cup,Semifinal,Winner Match 97,Winner Match 98,Dallas Stadium,Arlington,USA
+wc2026_102,2026-07-15,19:00,FIFA World Cup,Semifinal,Winner Match 99,Winner Match 100,Mercedes-Benz Stadium,Atlanta,USA
+wc2026_103,2026-07-18,21:00,FIFA World Cup,Third-place match,Loser Match 101,Loser Match 102,Hard Rock Stadium,Miami Gardens,USA
+wc2026_104,2026-07-19,19:00,FIFA World Cup,Final,Winner Match 101,Winner Match 102,MetLife Stadium,East Rutherford,USA
