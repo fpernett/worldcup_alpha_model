@@ -250,11 +250,49 @@ def test_markets_tab_joined_moneyline_populates_market_odds_alpha_ev_source_and_
 
     home = table.loc[(table["market"] == "1X2") & (table["selection"] == "Home")].iloc[0]
     assert round(float(home["market_odds"]), 2) == 2.86
-    assert round(float(home["alpha_ev"]), 4) == round(2.38 / (100.0 / 35.0) - 1.0, 4)
+    assert round(float(home["alpha_ev"]), 4) == round(0.42 * (100.0 / 35.0) - 1.0, 4)
     assert home["odds_source"] == "polymarket"
     assert home["odds_last_updated"] == "2026-06-26T00:00:00Z"
     assert diagnostics["rows_with_market_odds"] == 3
     assert diagnostics["rows_with_alpha_ev"] == 3
+
+
+def test_markets_tab_uses_mapped_polymarket_alpha_when_event_join_is_empty() -> None:
+    model = pd.DataFrame([{"market": "1X2", "selection": "Uruguay", "model_prob": 0.42, "fair_odds": 2.38}])
+    mapped_alpha = pd.DataFrame(
+        [
+            {
+                "market_id": "PM-URY",
+                "question": "Will Uruguay beat Spain?",
+                "market": "1X2",
+                "selection": "Uruguay",
+                "model_probability": 0.42,
+                "primary_model_probability": 0.42,
+                "fair_price_cents": 42.0,
+                "polymarket_price_cents": 35.0,
+                "alpha_gap_cents": 7.0,
+                "alpha_ev": 0.20,
+                "signal_strength": "Moderate",
+                "mapping_confidence": "high",
+            }
+        ]
+    )
+
+    table, diagnostics = build_markets_tab_joined_dataframe(
+        model,
+        pd.DataFrame(),
+        {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+        mapped_polymarket_alpha_df=mapped_alpha,
+    )
+    row = table.iloc[0]
+
+    assert round(float(row["market_odds"]), 2) == 2.86
+    assert round(float(row["alpha_ev"]), 2) == 0.20
+    assert row["odds_source"] == "polymarket"
+    assert row["polymarket_market_id"] == "PM-URY"
+    assert diagnostics["mapped_alpha_rows"] == 1
+    assert diagnostics["rows_with_market_odds"] == 1
+    assert diagnostics["reason_if_zero"] == ""
 
 
 def test_markets_tab_export_dataframe_equals_display_dataframe() -> None:

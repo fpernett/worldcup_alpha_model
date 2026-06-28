@@ -13,6 +13,8 @@ ALPHA_COLUMNS = [
     "market_id",
     "question",
     "market_type",
+    "market",
+    "selection",
     "model_side",
     "polymarket_side",
     "model_probability",
@@ -72,6 +74,7 @@ def calculate_polymarket_alpha(
         volume = coerce_float(mapping.get("volume"), float("nan"))
         warning = alpha_warnings(mapping, yes_price, no_price, liquidity, min_liquidity)
         signal = classify_signal(alpha_gap, mapping.get("mapping_confidence", ""), liquidity, warning, min_liquidity)
+        market, selection = dashboard_market_selection(mapping)
 
         rows.append(
             {
@@ -79,6 +82,8 @@ def calculate_polymarket_alpha(
                 "market_id": mapping.get("market_id", ""),
                 "question": mapping.get("question", ""),
                 "market_type": mapping.get("market_type", ""),
+                "market": market,
+                "selection": selection,
                 "model_side": model_side,
                 "polymarket_side": polymarket_side,
                 "model_probability": model_probability,
@@ -101,6 +106,30 @@ def calculate_polymarket_alpha(
 
     out = pd.DataFrame(rows, columns=ALPHA_COLUMNS)
     return out.sort_values(["alpha_gap_cents"], ascending=False, na_position="last").reset_index(drop=True)
+
+
+def dashboard_market_selection(mapping: pd.Series) -> tuple[str, str]:
+    """Return the dashboard market/selection key for a mapped Polymarket row."""
+    model_side = str(mapping.get("model_side", "") or "").lower()
+    market_type = str(mapping.get("market_type", "") or "").lower()
+    home = str(mapping.get("home", "") or "").strip()
+    away = str(mapping.get("away", "") or "").strip()
+
+    if model_side in {"home_win", "match_winner_home"} or market_type == "match_winner_home":
+        return "1X2", home or "Home"
+    if model_side in {"away_win", "match_winner_away"} or market_type == "match_winner_away":
+        return "1X2", away or "Away"
+    if model_side == "draw" or market_type == "draw":
+        return "1X2", "Draw"
+    if model_side == "over_2_5" or market_type == "over_2_5":
+        return "Total", "Over 2.5"
+    if model_side == "under_2_5" or market_type == "under_2_5":
+        return "Total", "Under 2.5"
+    if model_side == "btts_yes" or market_type == "btts_yes":
+        return "BTTS", "Yes"
+    if model_side == "btts_no" or market_type == "btts_no":
+        return "BTTS", "No"
+    return str(mapping.get("market_type", "") or ""), str(mapping.get("model_side", "") or "")
 
 
 def model_probability_for_side(probs: dict[str, Any], model_side: str, market_type: str = "") -> float | pd.NA:

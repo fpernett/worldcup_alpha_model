@@ -1592,11 +1592,6 @@ for label in selected_labels:
     slug_resolution = joined_polymarket_markets.attrs.get("slug_resolution", {})
     resolved_event_markets = joined_polymarket_markets.attrs.get("polymarket_event_markets", pd.DataFrame())
     joined_polymarket_alpha_rows = polymarket_alpha_rows(joined_polymarket_markets)
-    markets_tab_df, markets_tab_diagnostics = build_markets_tab_joined_dataframe(
-        alpha,
-        joined_polymarket_markets,
-        polymarket_alpha_diagnostics,
-    )
     mapped_markets = map_match_to_polymarket_markets(match, polymarket_markets)
     match_polymarket_markets = pd.DataFrame()
     url_resolved_markets = pd.DataFrame()
@@ -1668,6 +1663,12 @@ for label in selected_labels:
         filtered_polymarket_alpha = filtered_polymarket_alpha.loc[
             pd.to_numeric(filtered_polymarket_alpha["alpha_gap_cents"], errors="coerce").fillna(-999) >= min_alpha_gap
         ]
+    markets_tab_df, markets_tab_diagnostics = build_markets_tab_joined_dataframe(
+        alpha,
+        joined_polymarket_markets,
+        polymarket_alpha_diagnostics,
+        mapped_polymarket_alpha_df=polymarket_alpha,
+    )
 
     venue_env = result.get("environment", {})
     data_support = build_data_support(match, historical_long_matches)
@@ -1828,7 +1829,10 @@ for label in selected_labels:
         top_alpha_signals = joined_polymarket_alpha_rows.copy()
         if not top_alpha_signals.empty:
             top_alpha_signals = top_alpha_signals.sort_values("score", ascending=False).head(10)
-        if top_alpha_signals.empty:
+        top_mapped_alpha_signals = filtered_polymarket_alpha.copy()
+        if not top_mapped_alpha_signals.empty:
+            top_mapped_alpha_signals = top_mapped_alpha_signals.sort_values("alpha_gap_cents", ascending=False, na_position="last").head(10)
+        if top_alpha_signals.empty and top_mapped_alpha_signals.empty:
             st.info("No Top Alpha Signals because no joined Polymarket price rows are available.")
             display_dataframe(
                 pd.DataFrame(
@@ -1845,7 +1849,7 @@ for label in selected_labels:
                 hide_index=True,
                 width="stretch",
             )
-        else:
+        elif not top_alpha_signals.empty:
             display_dataframe(
                 top_alpha_signals[
                     [
@@ -1864,14 +1868,37 @@ for label in selected_labels:
                 hide_index=True,
                 width="stretch",
             )
+        else:
+            display_dataframe(
+                polymarket_alpha_display(
+                    top_mapped_alpha_signals[
+                        [
+                            "market",
+                            "selection",
+                            "question",
+                            "model_probability",
+                            "fair_price_cents",
+                            "polymarket_price_cents",
+                            "alpha_gap_cents",
+                            "alpha_ev",
+                            "signal_strength",
+                            "mapping_confidence",
+                        ]
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption("Showing mapped Polymarket market rows because no event-slug joined rows were available.")
         st.caption("Alpha gap = model fair price - Polymarket price. This is a statistical estimate, not a staking instruction.")
 
     with tabs[1]:
         st.subheader("Alpha Read")
         top_alpha_rows = alpha.loc[alpha["alpha_ev"].notna()].sort_values("alpha_ev", ascending=False)
-        top_pm_rows = polymarket_alpha.loc[polymarket_alpha["alpha_gap_cents"].notna()].sort_values(
+        top_pm_source = filtered_polymarket_alpha if not filtered_polymarket_alpha.empty else polymarket_alpha
+        top_pm_rows = top_pm_source.loc[top_pm_source["alpha_gap_cents"].notna()].sort_values(
             "alpha_gap_cents", ascending=False
-        ) if not polymarket_alpha.empty else pd.DataFrame()
+        ) if not top_pm_source.empty else pd.DataFrame()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Model confidence", confidence["label"])
         c2.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
@@ -2019,6 +2046,7 @@ for label in selected_labels:
         diag_cols[2].metric("Joined markets", markets_tab_diagnostics.get("joined_markets", 0))
         diag_cols[3].metric("Rows with market_odds", markets_tab_diagnostics.get("rows_with_market_odds", 0))
         diag_cols[4].metric("Rows with alpha_ev", markets_tab_diagnostics.get("rows_with_alpha_ev", 0))
+        st.caption(f"Mapped Polymarket alpha rows available to this table: {markets_tab_diagnostics.get('mapped_alpha_rows', 0)}.")
         if markets_tab_diagnostics.get("reason_if_zero"):
             st.warning(markets_tab_diagnostics["reason_if_zero"])
         display_dataframe(
@@ -2287,9 +2315,12 @@ for label in selected_labels:
             )
 
         st.subheader("Polymarket Alpha")
-        if joined_polymarket_alpha_rows.empty:
+        if filtered_polymarket_alpha.empty:
             reason_no_rows = polymarket_alpha_diagnostics.get("reason_no_alpha_rows", "") or "No joined Polymarket alpha rows are available."
-            st.info(reason_no_rows)
+            if polymarket_alpha.empty:
+                st.info(reason_no_rows)
+            else:
+                st.info("No mapped Polymarket alpha rows passed the sidebar liquidity/alpha filters.")
             display_dataframe(
                 pd.DataFrame(
                     [
@@ -2308,6 +2339,38 @@ for label in selected_labels:
             )
         else:
             display_dataframe(
+                polymarket_alpha_display(
+                    filtered_polymarket_alpha[
+                        [
+                            "market",
+                            "selection",
+                            "question",
+                            "model_probability",
+                            "primary_model_probability",
+                            "behavior_diagnostic_probability",
+                            "behavior_probability_delta",
+                            "model_policy",
+                            "edge_source",
+                            "fair_price_cents",
+                            "polymarket_price_cents",
+                            "alpha_gap_cents",
+                            "alpha_ev",
+                            "liquidity",
+                            "volume",
+                            "signal_strength",
+                            "mapping_confidence",
+                            "warning",
+                        ]
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption("Mapped Polymarket rows use loaded Gamma/cache/local market data. This is a statistical screen, not betting advice.")
+
+        if not joined_polymarket_alpha_rows.empty:
+            st.write("Event-slug joined Polymarket rows")
+            display_dataframe(
                 joined_polymarket_alpha_rows[
                     [
                         "market",
@@ -2325,7 +2388,6 @@ for label in selected_labels:
                 hide_index=True,
                 width="stretch",
             )
-            st.caption("Model fair price and alpha gap are shown in cents. This is a statistical screen, not betting advice.")
 
         if not show_only_mapped:
             st.subheader("Loaded Polymarket Markets")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import requests
 
-from src.alpha import calculate_polymarket_alpha
+from src.alpha import calculate_polymarket_alpha, dashboard_market_selection
 from src.backtesting import load_prediction_log, save_prediction_snapshot
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets
 from src.polymarket import (
@@ -109,6 +109,18 @@ def test_alpha_gap_calculation() -> None:
     assert round(float(alpha.iloc[0]["fair_price_cents"]), 1) == 49.1
     assert round(float(alpha.iloc[0]["polymarket_price_cents"]), 1) == 42.0
     assert round(float(alpha.iloc[0]["alpha_gap_cents"]), 1) == 7.1
+
+
+def test_polymarket_alpha_rows_include_dashboard_market_selection() -> None:
+    alpha = calculate_polymarket_alpha(sample_model_result(), sample_mapping("YES"))
+
+    assert alpha.iloc[0]["market"] == "1X2"
+    assert alpha.iloc[0]["selection"] == "England"
+
+
+def test_dashboard_market_selection_maps_totals_and_btts() -> None:
+    assert dashboard_market_selection(pd.Series({"market_type": "over_2_5", "model_side": "over_2_5"})) == ("Total", "Over 2.5")
+    assert dashboard_market_selection(pd.Series({"market_type": "btts_no", "model_side": "btts_no"})) == ("BTTS", "No")
 
 
 def test_sensitivity_output_shape() -> None:
