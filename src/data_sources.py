@@ -19,7 +19,7 @@ from src.historical_data import build_historical_matches_from_results, load_hist
 from src.odds import ODDS_COLUMNS, load_market_odds, update_market_odds_for_fixtures
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
 from src.team_behavior import rebuild_team_behavior_csv
-from src.team_names import team_name_key
+from src.team_names import is_unresolved_team_slot, team_name_key
 from src.utils import csv_status, parse_date, read_csv_with_columns
 from src.weather import VENUE_COLUMNS, fetch_weather_for_fixtures
 
@@ -116,12 +116,14 @@ def filter_future_fixtures(
     now_utc: str | pd.Timestamp | None = None,
     horizon_hours: float | None = None,
     include_past: bool = False,
+    include_unresolved: bool = False,
 ) -> pd.DataFrame:
     """Add UTC kickoff timestamps and optionally keep only future fixtures.
 
     `date_utc` and `time_utc` are treated as UTC. Rows with missing or
     unparseable kickoff timestamps are hidden because match modelling needs a
-    concrete kickoff time.
+    concrete kickoff time. Unresolved bracket slots are hidden by default
+    because the model requires actual team rows.
     """
     if fixtures is None:
         return pd.DataFrame(columns=FIXTURE_COLUMNS + ["kickoff_utc"])
@@ -144,16 +146,33 @@ def filter_future_fixtures(
     date_part = out.get("date_utc", pd.Series(index=out.index, dtype="object")).astype(str)
     time_part = out.get("time_utc", pd.Series("00:00", index=out.index)).fillna("00:00").astype(str).str.slice(0, 5)
     out["kickoff_utc"] = pd.to_datetime(date_part + " " + time_part, utc=True, errors="coerce")
+    out["has_unresolved_team_slot"] = out.apply(fixture_has_unresolved_team_slot, axis=1)
 
     mask = out["kickoff_utc"].notna()
     if not include_past:
         mask &= out["kickoff_utc"] >= now
     if horizon_hours is not None:
         mask &= out["kickoff_utc"] <= now + pd.Timedelta(hours=float(horizon_hours))
+    unresolved_hidden_count = int((mask & out["has_unresolved_team_slot"].astype(bool)).sum())
+    if not include_unresolved:
+        mask &= ~out["has_unresolved_team_slot"].astype(bool)
 
     filtered = out.loc[mask].sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
+    if unresolved_hidden_count and not include_unresolved:
+        attrs["unresolved_fixture_count"] = unresolved_hidden_count
+        attrs["warning"] = _combine_warnings(
+            attrs.get("warning", ""),
+            (
+                f"{unresolved_hidden_count} fixture(s) were hidden because a home or away side "
+                "is still an unresolved bracket slot."
+            ),
+        )
     filtered.attrs = attrs
     return filtered
+
+
+def fixture_has_unresolved_team_slot(row: pd.Series | dict[str, Any]) -> bool:
+    return is_unresolved_team_slot(row.get("home", "")) or is_unresolved_team_slot(row.get("away", ""))
 
 
 def _load_local_fixture_pool() -> pd.DataFrame:

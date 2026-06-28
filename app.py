@@ -1441,7 +1441,8 @@ with st.sidebar:
     st.caption(
         f"Loaded: {fa.get('total_fixtures_loaded', 0)} | "
         f"Visible: {fa.get('fixtures_visible', 0)} | "
-        f"Hidden as past: {fa.get('fixtures_hidden_as_past', 0)}"
+        f"Hidden as past: {fa.get('fixtures_hidden_as_past', 0)} | "
+        f"Hidden unresolved: {fa.get('fixtures_hidden_as_unresolved', 0)}"
     )
     st.caption(
         f"Current UTC: {fa.get('current_utc', '')} | "
@@ -1471,6 +1472,13 @@ with st.sidebar:
     st.caption(current_model_policy["reason"])
 
 st.subheader("Available Matches")
+hidden_unresolved_fixtures = int(fixture_audit_summary.get("fixtures_hidden_as_unresolved", 0) or 0)
+if hidden_unresolved_fixtures:
+    st.warning(
+        f"{hidden_unresolved_fixtures} fixture(s) in this UTC window are hidden because a team is still "
+        "an unresolved bracket slot such as `Winner Group K` or `Winner Match 73`. Update `data/fixtures.csv` "
+        "with actual teams before modelling those games."
+    )
 if fixtures.empty:
     st.warning("No fixtures found for the selected UTC window. Add rows to `data/fixtures.csv`, widen the date range, or configure a fixture API.")
     st.stop()

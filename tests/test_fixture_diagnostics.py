@@ -4,6 +4,7 @@ import pandas as pd
 
 from src import data_sources
 from src.fixture_diagnostics import audit_fixture_availability
+from src.team_names import is_unresolved_team_slot
 
 
 def _fixtures() -> pd.DataFrame:
@@ -92,6 +93,64 @@ def test_custom_date_range_excluded_reason_is_populated():
     excluded = audit.loc[~audit["visible_in_app"]]
     assert not excluded.empty
     assert excluded["excluded_reason"].str.len().min() > 0
+
+
+def test_unresolved_bracket_slots_are_hidden_with_specific_reason():
+    fixtures = pd.DataFrame(
+        [
+            {
+                "match_id": "resolved",
+                "date_utc": "2026-07-01",
+                "time_utc": "16:00",
+                "competition": "World Cup",
+                "group": "Round of 32",
+                "home": "England",
+                "away": "DR Congo",
+                "venue": "V1",
+            },
+            {
+                "match_id": "placeholder",
+                "date_utc": "2026-07-01",
+                "time_utc": "20:00",
+                "competition": "World Cup",
+                "group": "Round of 32",
+                "home": "winner of group K",
+                "away": "third of group L",
+                "venue": "V2",
+            },
+        ]
+    )
+
+    audit, summary = audit_fixture_availability(
+        fixtures,
+        start_date="2026-07-01",
+        end_date="2026-07-01",
+        hide_past=True,
+        now_utc="2026-07-01T12:00:00Z",
+    )
+
+    placeholder = audit.loc[audit["match_id"] == "placeholder"].iloc[0]
+    assert not placeholder["visible_in_app"]
+    assert placeholder["hidden_by_unresolved_slot"]
+    assert placeholder["excluded_reason"] == "unresolved_team_slot"
+    assert summary["fixtures_visible"] == 1
+    assert summary["fixtures_hidden_as_unresolved"] == 1
+    assert "unresolved bracket slot" in summary["warning"]
+
+
+def test_local_round_of_32_fixture_rows_are_resolved():
+    fixtures = pd.read_csv("data/fixtures.csv")
+    round_of_32 = fixtures.loc[fixtures["group"].astype(str) == "Round of 32"].copy()
+    unresolved = round_of_32.loc[
+        round_of_32["home"].map(is_unresolved_team_slot)
+        | round_of_32["away"].map(is_unresolved_team_slot)
+    ]
+    labels = set(round_of_32["home"].astype(str) + " vs " + round_of_32["away"].astype(str))
+
+    assert unresolved.empty
+    assert "England vs DR Congo" in labels
+    assert "Portugal vs Croatia" in labels
+    assert "Colombia vs Ghana" in labels
 
 
 def test_source_end_warning_when_fixture_file_has_no_later_games():

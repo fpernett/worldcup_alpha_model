@@ -23,7 +23,7 @@ from src.feature_engineering import (
 )
 from src.model_policy import get_current_model_policy
 from src.team_behavior import load_team_behavior
-from src.team_names import normalize_team_name
+from src.team_names import is_unresolved_team_slot, normalize_team_name
 from src.utils import clamp, coerce_float, read_csv_with_columns, today_iso
 
 
@@ -486,7 +486,11 @@ def _fixture_team_names() -> set[str]:
     teams: set[str] = set()
     for col in ["home", "away"]:
         if col in fixtures.columns:
-            teams.update(team for team in fixtures[col].dropna().astype(str).str.strip() if team)
+            teams.update(
+                team
+                for team in fixtures[col].dropna().astype(str).str.strip()
+                if team and not is_unresolved_team_slot(team)
+            )
     return teams
 
 

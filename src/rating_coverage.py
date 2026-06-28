@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.config import DATA_DIR
 from src.ratings import TEAM_RATING_COLUMNS, exact_rating_row_for_team, rating_row_for_team
-from src.team_names import load_team_name_aliases_df, normalize_team_name, team_name_key
+from src.team_names import is_unresolved_team_slot, load_team_name_aliases_df, normalize_team_name, team_name_key
 from src.utils import clamp, coerce_float, read_csv_with_columns, today_iso
 
 
@@ -358,7 +358,11 @@ def _teams_from_columns(df: pd.DataFrame, columns: list[str]) -> set[str]:
     for col in columns:
         if col not in df.columns:
             continue
-        teams.update(team for team in df[col].dropna().astype(str).str.strip() if team)
+        teams.update(
+            team
+            for team in df[col].dropna().astype(str).str.strip()
+            if team and not is_unresolved_team_slot(team)
+        )
     return teams
 
 

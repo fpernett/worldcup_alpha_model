@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from src.data_sources import FIXTURE_COLUMNS
+from src.team_names import is_unresolved_team_slot
 
 
 FIXTURE_AUDIT_COLUMNS = [
@@ -22,6 +23,8 @@ FIXTURE_AUDIT_COLUMNS = [
     "inside_selected_window",
     "is_past",
     "hidden_by_past_filter",
+    "has_unresolved_team_slot",
+    "hidden_by_unresolved_slot",
     "excluded_reason",
     "visible_in_app",
 ]
@@ -54,7 +57,13 @@ def audit_fixture_availability(
         audit["inside_selected_window"] &= audit["kickoff_utc"] <= selected_end
     audit["is_past"] = audit["kickoff_utc"].notna() & (audit["kickoff_utc"] < now)
     audit["hidden_by_past_filter"] = bool(hide_past) & audit["inside_selected_window"] & audit["is_past"]
-    audit["visible_in_app"] = audit["inside_selected_window"] & ~audit["hidden_by_past_filter"]
+    audit["has_unresolved_team_slot"] = audit.apply(_has_unresolved_team_slot, axis=1)
+    audit["hidden_by_unresolved_slot"] = audit["inside_selected_window"] & audit["has_unresolved_team_slot"]
+    audit["visible_in_app"] = (
+        audit["inside_selected_window"]
+        & ~audit["hidden_by_past_filter"]
+        & ~audit["hidden_by_unresolved_slot"]
+    )
     audit["excluded_reason"] = audit.apply(_excluded_reason, axis=1)
 
     audit["kickoff_utc"] = audit["kickoff_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -110,7 +119,13 @@ def _excluded_reason(row: pd.Series) -> str:
         return "outside_selected_window"
     if bool(row.get("hidden_by_past_filter")):
         return "hidden_by_past_filter"
+    if bool(row.get("hidden_by_unresolved_slot")):
+        return "unresolved_team_slot"
     return ""
+
+
+def _has_unresolved_team_slot(row: pd.Series) -> bool:
+    return is_unresolved_team_slot(row.get("home", "")) or is_unresolved_team_slot(row.get("away", ""))
 
 
 def _fixture_warning(
@@ -129,16 +144,27 @@ def _fixture_warning(
                 f"No fixtures after {latest.strftime('%Y-%m-%dT%H:%M:%SZ')} are available in the loaded fixture source. "
                 "Refresh API/cache or update data/fixtures.csv."
             )
-        if selected_end is not None and latest < selected_end:
-            return (
-                f"The loaded fixture source ends at {latest.strftime('%Y-%m-%dT%H:%M:%SZ')}; "
-                "refresh API/cache or update data/fixtures.csv to show later games."
-            )
     visible = int(audit["visible_in_app"].sum())
     inside = int(audit["inside_selected_window"].sum())
     hidden = int(audit["hidden_by_past_filter"].sum())
+    unresolved = int(audit.get("hidden_by_unresolved_slot", pd.Series(dtype=bool)).sum())
     if visible == 0 and inside > 0 and hidden == inside:
         return "Fixtures exist in the selected window, but all are hidden by the past-kickoff filter."
+    if visible == 0 and inside > 0 and unresolved > 0:
+        return (
+            "Fixtures exist in the selected window, but all visible candidates are unresolved bracket slots. "
+            "Update data/fixtures.csv with actual teams before modelling them."
+        )
+    if unresolved > 0:
+        return (
+            f"{unresolved} fixture(s) in the selected window are hidden because the home or away side "
+            "is still an unresolved bracket slot."
+        )
+    if pd.notna(latest) and selected_end is not None and latest < selected_end:
+        return (
+            f"The loaded fixture source ends at {latest.strftime('%Y-%m-%dT%H:%M:%SZ')}; "
+            "refresh API/cache or update data/fixtures.csv to show later games."
+        )
     if visible == 0:
         return "No fixtures are visible for the selected UTC window."
     return ""
@@ -161,6 +187,9 @@ def _summary(
         "current_utc": _ts_label(now),
         "fixtures_inside_window": int(audit.get("inside_selected_window", pd.Series(dtype=bool)).sum()),
         "fixtures_hidden_as_past": int(audit.get("hidden_by_past_filter", pd.Series(dtype=bool)).sum()),
+        "fixtures_hidden_as_unresolved": int(
+            audit.get("hidden_by_unresolved_slot", pd.Series(dtype=bool)).sum()
+        ),
         "fixtures_visible": int(audit.get("visible_in_app", pd.Series(dtype=bool)).sum()),
         "fixtures_excluded": int((~audit.get("visible_in_app", pd.Series(dtype=bool))).sum()) if not audit.empty else 0,
         "warning": warning,

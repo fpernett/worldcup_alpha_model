@@ -106,6 +106,27 @@ POLYMARKET_CANONICAL_TEAM_CODES = {
 }
 
 
+UNRESOLVED_TEAM_SLOT_PATTERN = re.compile(
+    r"^(?:winner|loser|runner[-\s]?up|3rd|third)\s+(?:of\s+)?(?:group|match)\b",
+    re.IGNORECASE,
+)
+
+
+def is_unresolved_team_slot(name: object) -> bool:
+    """Return True for bracket placeholders that are not actual teams."""
+    if name is None:
+        return False
+    try:
+        if pd.isna(name):
+            return False
+    except (TypeError, ValueError):
+        pass
+    text = str(name or "").strip()
+    if not text:
+        return False
+    return bool(UNRESOLVED_TEAM_SLOT_PATTERN.search(text))
+
+
 def normalize_team_name(name: str) -> str:
     """Return the canonical team name used by local CSVs where known."""
     raw = str(name or "").strip()

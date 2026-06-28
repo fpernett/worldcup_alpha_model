@@ -6,7 +6,7 @@ import pandas as pd
 
 from src.config import DATA_DIR
 from src.ratings import TEAM_RATING_COLUMNS, classify_rating_status, exact_rating_row_for_team, rating_row_for_team
-from src.team_names import normalize_team_name
+from src.team_names import is_unresolved_team_slot, normalize_team_name
 from src.utils import clamp, coerce_float, read_csv_with_columns, today_iso
 
 
@@ -350,7 +350,13 @@ def _elo_scaled_value(elo: float, ratings: pd.DataFrame) -> float:
 def _team_names(df: pd.DataFrame) -> list[str]:
     if df is None or df.empty or "team" not in df.columns:
         return []
-    return sorted({str(team).strip() for team in df["team"].dropna() if str(team).strip()})
+    return sorted(
+        {
+            str(team).strip()
+            for team in df["team"].dropna()
+            if str(team).strip() and not is_unresolved_team_slot(team)
+        }
+    )
 
 
 def _teams_from_matches(df: pd.DataFrame) -> set[str]:
@@ -359,7 +365,11 @@ def _teams_from_matches(df: pd.DataFrame) -> set[str]:
         return teams
     for col in ["home", "away"]:
         if col in df.columns:
-            teams.update(team for team in df[col].dropna().astype(str).str.strip() if team)
+            teams.update(
+                team
+                for team in df[col].dropna().astype(str).str.strip()
+                if team and not is_unresolved_team_slot(team)
+            )
     return teams
 
 
@@ -381,7 +391,7 @@ def _team_counts(df: pd.DataFrame) -> dict[str, int]:
         if col not in df.columns:
             continue
         for raw_team in df[col].dropna().astype(str).str.strip():
-            if not raw_team:
+            if not raw_team or is_unresolved_team_slot(raw_team):
                 continue
             canonical = normalize_team_name(raw_team)
             counts[raw_team] = counts.get(raw_team, 0) + 1

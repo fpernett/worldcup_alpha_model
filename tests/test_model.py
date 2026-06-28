@@ -155,6 +155,55 @@ def test_fixture_filter_can_include_past_for_selected_date_range() -> None:
     assert "kickoff_utc" in filtered.columns
 
 
+def test_future_fixture_filter_excludes_unresolved_bracket_slots() -> None:
+    fixtures = pd.DataFrame(
+        [
+            {"match_id": "REAL", "date_utc": "2026-07-01", "time_utc": "16:00", "home": "England", "away": "DR Congo"},
+            {
+                "match_id": "PLACEHOLDER",
+                "date_utc": "2026-07-01",
+                "time_utc": "20:00",
+                "home": "Winner Group K",
+                "away": "3rd Group E/I/L",
+            },
+        ]
+    )
+
+    filtered = filter_future_fixtures(
+        fixtures,
+        now_utc="2026-07-01T12:00:00Z",
+        horizon_hours=24,
+    )
+
+    assert filtered["match_id"].tolist() == ["REAL"]
+    assert filtered.attrs.get("unresolved_fixture_count") == 1
+    assert "unresolved bracket slot" in filtered.attrs.get("warning", "")
+
+
+def test_fixture_filter_can_include_unresolved_slots_for_audit_use() -> None:
+    fixtures = pd.DataFrame(
+        [
+            {
+                "match_id": "PLACEHOLDER",
+                "date_utc": "2026-07-01",
+                "time_utc": "20:00",
+                "home": "winner of group K",
+                "away": "third of group L",
+            },
+        ]
+    )
+
+    filtered = filter_future_fixtures(
+        fixtures,
+        now_utc="2026-07-01T12:00:00Z",
+        horizon_hours=24,
+        include_unresolved=True,
+    )
+
+    assert filtered["match_id"].tolist() == ["PLACEHOLDER"]
+    assert filtered["has_unresolved_team_slot"].tolist() == [True]
+
+
 def test_local_fixture_fallback_covers_next_48_hours() -> None:
     fixtures = pd.read_csv("data/fixtures.csv")
 
