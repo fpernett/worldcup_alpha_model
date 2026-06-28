@@ -167,8 +167,8 @@ def build_postmortem_action_plan(
                 "Prediction snapshots",
                 "Missing",
                 "There are no saved pre-match model snapshots to score later.",
-                "Snapshot upcoming predictions before kickoff.",
-                ".venv/bin/python scripts/snapshot_upcoming_predictions.py",
+                "Select and analyze upcoming matches in the dashboard before kickoff; it auto-saves snapshots.",
+                "Dashboard auto-save; fallback: .venv/bin/python scripts/snapshot_upcoming_predictions.py",
             )
         )
     else:
@@ -177,7 +177,7 @@ def build_postmortem_action_plan(
                 "Prediction snapshots",
                 "Ready",
                 f"{prediction_rows:,} prediction ledger row(s) are available.",
-                "Keep snapshotting before each match so post-mortems use pre-kickoff evidence.",
+                "Keep selecting/analyzing matches before kickoff so the dashboard captures pre-kickoff evidence.",
                 "data/prediction_ledger.csv",
             )
         )
@@ -188,8 +188,8 @@ def build_postmortem_action_plan(
                 "Completed results",
                 "Missing",
                 "No completed result rows are available to score predictions.",
-                "Import or enter completed results after matches finish.",
-                ".venv/bin/python scripts/import_completed_results.py",
+                "Open analyzed matches after the post-game delay; the dashboard auto-imports completed results when source data has the score.",
+                "Dashboard auto-import; fallback: .venv/bin/python scripts/import_completed_results.py",
             )
         )
     else:
@@ -198,7 +198,7 @@ def build_postmortem_action_plan(
                 "Completed results",
                 "Ready",
                 f"{result_rows:,} result ledger row(s) are available.",
-                "Keep results current after completed matches.",
+                "Open completed matches after the post-game delay to keep result rows current.",
                 "data/results_ledger.csv",
             )
         )

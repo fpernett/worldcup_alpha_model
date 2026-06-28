@@ -113,7 +113,7 @@ def test_dashboard_snapshot_uses_prediction_ledger_not_prediction_log() -> None:
     app_source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
 
     assert "save_prediction_snapshot(" not in app_source
-    assert "Prediction snapshot target: data/prediction_ledger.csv" in app_source
+    assert "Selected upcoming matches are auto-saved to data/prediction_ledger.csv" in app_source
     assert "Saved {written} prediction row(s) to data/prediction_ledger.csv." in app_source
 
 
@@ -225,6 +225,100 @@ def test_snapshot_preserves_existing_ledger_rows(monkeypatch, tmp_path) -> None:
     ledger = pd.read_csv(path)
     assert list(ledger["prediction_id"])[0] == "existing"
     assert len(ledger) == 2
+
+
+def test_dashboard_parameter_set_id_changes_for_custom_config() -> None:
+    assert prediction_ledger.dashboard_parameter_set_id(prediction_ledger.ModelConfig()) == "baseline_current"
+
+    custom = prediction_ledger.ModelConfig(base_total_goals=2.65)
+    assert prediction_ledger.dashboard_parameter_set_id(custom).startswith("dashboard_custom_")
+
+
+def test_auto_snapshot_skips_fresh_duplicate(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "prediction_ledger.csv"
+    existing = {col: "" for col in prediction_ledger.PREDICTION_LEDGER_COLUMNS}
+    existing.update(
+        {
+            "prediction_id": "existing",
+            "snapshot_utc": "2026-06-22T12:00:00+00:00",
+            "match_id": "m1",
+            "primary_model_mode": "baseline_manual",
+            "model_version": "baseline_external_calibrated_v1",
+            "parameter_set_id": "baseline_current",
+            "prediction_before_kickoff": True,
+        }
+    )
+    pd.DataFrame([existing]).to_csv(path, index=False)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:30:00+00:00")
+
+    snapshots, diagnostics = prediction_ledger.snapshot_selected_match_if_needed(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=path,
+    )
+
+    assert snapshots.empty
+    assert diagnostics["skipped_duplicate_policy"] == 1
+    assert len(pd.read_csv(path)) == 1
+
+
+def test_auto_snapshot_writes_when_no_fresh_duplicate(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "prediction_ledger.csv"
+    monkeypatch.setattr(prediction_ledger, "run_match_model", _fake_run_match_model)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-22T12:00:00+00:00")
+
+    snapshots, diagnostics = prediction_ledger.snapshot_selected_match_if_needed(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        team_ratings_df=_teams(),
+        venues_df=pd.DataFrame(),
+        path=path,
+    )
+
+    assert len(snapshots) == 1
+    assert diagnostics["predictions_written"] == 1
+    assert pd.read_csv(path).iloc[0]["notes"] == "Auto-saved by dashboard selected-match analysis"
+
+
+def test_auto_result_import_waits_until_post_game_delay(tmp_path) -> None:
+    results, diagnostics = prediction_ledger.import_completed_result_for_fixture_if_ready(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        completed_matches_df=pd.DataFrame(),
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-22T21:59:00+00:00",
+    )
+
+    assert results.empty
+    assert diagnostics["status"] == "not_ready"
+    assert diagnostics["rows_imported"] == 0
+
+
+def test_auto_result_import_uses_selected_fixture_match_id(tmp_path) -> None:
+    completed = pd.DataFrame(
+        [
+            {
+                "match_id": "external_id",
+                "date_utc": "2026-06-22",
+                "competition": "World Cup",
+                "home": "Alpha",
+                "away": "Beta",
+                "home_goals": 2,
+                "away_goals": 1,
+            }
+        ]
+    )
+
+    results, diagnostics = prediction_ledger.import_completed_result_for_fixture_if_ready(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        completed_matches_df=completed,
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-22T22:01:00+00:00",
+    )
+
+    assert diagnostics["status"] == "imported"
+    assert diagnostics["rows_imported"] == 1
+    assert results.iloc[0]["match_id"] == "m1"
+    assert results.iloc[0]["actual_result"] == "home_win"
 
 
 def test_required_prediction_ledger_columns_exist() -> None:

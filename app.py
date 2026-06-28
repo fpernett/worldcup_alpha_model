@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -76,7 +77,27 @@ from src.postmortem import (
     calculate_prediction_errors,
     join_predictions_to_results,
 )
-from src.prediction_ledger import PREDICTION_LEDGER_PATH, load_prediction_ledger, load_results_ledger, snapshot_predictions_for_fixtures_with_diagnostics
+from src import prediction_ledger as prediction_ledger_module
+
+_PREDICTION_LEDGER_AUTOMATION_EXPORTS = (
+    "dashboard_parameter_set_id",
+    "import_completed_result_for_fixture_if_ready",
+    "snapshot_selected_match_if_needed",
+)
+if not all(hasattr(prediction_ledger_module, name) for name in _PREDICTION_LEDGER_AUTOMATION_EXPORTS):
+    # Streamlit keeps imported modules alive across script reruns during local development.
+    prediction_ledger_module = importlib.reload(prediction_ledger_module)
+
+from src.prediction_ledger import (
+    PREDICTION_LEDGER_PATH,
+    RESULTS_LEDGER_PATH,
+    dashboard_parameter_set_id,
+    import_completed_result_for_fixture_if_ready,
+    load_prediction_ledger,
+    load_results_ledger,
+    snapshot_predictions_for_fixtures_with_diagnostics,
+    snapshot_selected_match_if_needed,
+)
 from src.rating_coverage import (
     audit_rating_coverage,
     collect_required_teams,
@@ -225,6 +246,48 @@ def _candidate_interpretation(status: Any) -> str:
     if status_text == "no_baseline_comparison":
         return "Cannot compare because the baseline row is missing."
     return "Diagnostic row; no model-policy action implied."
+
+
+def automation_status_display(snapshot_diagnostics: dict, result_diagnostics: dict) -> pd.DataFrame:
+    snapshot_written = int(snapshot_diagnostics.get("predictions_written", 0) or 0)
+    snapshot_status = "saved" if snapshot_written else _first_skip_code(snapshot_diagnostics)
+    result_status = str(result_diagnostics.get("status", "") or "")
+    return pd.DataFrame(
+        [
+            {
+                "automation": "Pre-kickoff prediction snapshot",
+                "status": snapshot_status,
+                "rows_changed": snapshot_written,
+                "detail": _snapshot_detail(snapshot_diagnostics),
+                "target": snapshot_diagnostics.get("output_path", "data/prediction_ledger.csv"),
+            },
+            {
+                "automation": "Completed result import",
+                "status": result_status,
+                "rows_changed": int(result_diagnostics.get("rows_imported", 0) or 0),
+                "detail": result_diagnostics.get("message", ""),
+                "target": "data/results_ledger.csv",
+            },
+        ]
+    )
+
+
+def _first_skip_code(snapshot_diagnostics: dict) -> str:
+    skip_reasons = snapshot_diagnostics.get("skip_reasons", []) or []
+    if skip_reasons:
+        return str(skip_reasons[0].get("reason_code", "skipped") or "skipped")
+    warnings = snapshot_diagnostics.get("warnings", []) or []
+    return "skipped" if warnings else "idle"
+
+
+def _snapshot_detail(snapshot_diagnostics: dict) -> str:
+    if int(snapshot_diagnostics.get("predictions_written", 0) or 0) > 0:
+        return "Auto-saved selected-match pre-kickoff probabilities."
+    skip_reasons = snapshot_diagnostics.get("skip_reasons", []) or []
+    if skip_reasons:
+        return str(skip_reasons[0].get("reason", "") or "No prediction row was written.")
+    warnings = snapshot_diagnostics.get("warnings", []) or []
+    return "; ".join(str(warning) for warning in warnings) if warnings else "No prediction row was written."
 
 
 def alpha_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -1470,6 +1533,23 @@ for label in selected_labels:
         cfg,
     )
     behavior_warning = behavior_disagreement_warning(result, behavior_diagnostic_result)
+    dashboard_parameter_id = dashboard_parameter_set_id(cfg)
+    auto_snapshot_rows, auto_snapshot_diagnostics = snapshot_selected_match_if_needed(
+        match,
+        team_ratings_df=teams,
+        venues_df=venues,
+        market_odds_df=market_odds,
+        cfg=cfg,
+        model_version="baseline_external_calibrated_v1",
+        parameter_set_id=dashboard_parameter_id,
+        primary_model_mode=str(current_model_policy["primary_model_mode"]),
+        notes="Auto-saved by dashboard selected-match analysis",
+        path=PREDICTION_LEDGER_PATH,
+    )
+    auto_results_ledger, auto_result_diagnostics = import_completed_result_for_fixture_if_ready(
+        match,
+        path=RESULTS_LEDGER_PATH,
+    )
 
     probs = result["probs"]
     behavior_alpha = behavior_diagnostic_result.get("alpha", pd.DataFrame()) if behavior_diagnostic_result else pd.DataFrame()
@@ -2260,14 +2340,23 @@ for label in selected_labels:
                 width="stretch",
             )
 
-        st.caption("Prediction snapshot target: data/prediction_ledger.csv")
+        st.subheader("Prediction And Result Automation")
+        display_dataframe(
+            automation_status_display(auto_snapshot_diagnostics, auto_result_diagnostics),
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            "Selected upcoming matches are auto-saved to data/prediction_ledger.csv with a 60-minute duplicate guard. "
+            "Completed results are checked automatically after kickoff + 4 hours, which allows for extra time, penalties, and a one-hour reporting delay."
+        )
         allow_post_kickoff_snapshot = st.checkbox(
-            "Allow post-kickoff snapshot for diagnostics",
+            "Allow manual post-kickoff snapshot for diagnostics",
             value=False,
             key=f"allow_post_kickoff_snapshot_{match['match_id']}",
             help="Post-kickoff snapshots are marked prediction_before_kickoff=False and are not valid for honest post-mortem scoring.",
         )
-        if st.button("Save prediction snapshot", key=f"save_snapshot_{match['match_id']}"):
+        if st.button("Save another prediction snapshot", key=f"save_snapshot_{match['match_id']}"):
             snapshot_rows, snapshot_diagnostics = snapshot_predictions_for_fixtures_with_diagnostics(
                 pd.DataFrame([match]),
                 team_ratings_df=teams,
@@ -2275,9 +2364,9 @@ for label in selected_labels:
                 market_odds_df=market_odds,
                 cfg=cfg,
                 model_version="baseline_external_calibrated_v1",
-                parameter_set_id="baseline_current",
+                parameter_set_id=dashboard_parameter_id,
                 primary_model_mode=str(current_model_policy["primary_model_mode"]),
-                notes="Dashboard selected-match snapshot",
+                notes="Manual dashboard selected-match snapshot",
                 path=PREDICTION_LEDGER_PATH,
                 append=True,
                 include_past=allow_post_kickoff_snapshot,

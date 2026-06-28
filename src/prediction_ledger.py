@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,9 @@ RESULTS_LEDGER_COLUMNS = [
     "result_source",
     "last_updated",
 ]
+
+DEFAULT_AUTO_SNAPSHOT_MIN_INTERVAL_MINUTES = 60
+DEFAULT_RESULT_READY_DELAY_HOURS = 4.0
 
 
 def load_prediction_ledger(path: str | Path = PREDICTION_LEDGER_PATH) -> pd.DataFrame:
@@ -254,6 +258,138 @@ def snapshot_predictions_for_fixtures_with_diagnostics(
     return snapshots, diagnostics(len(snapshots) if append else 0)
 
 
+def dashboard_parameter_set_id(cfg: ModelConfig | None, baseline_id: str = "baseline_current") -> str:
+    """Create a stable parameter id for dashboard snapshots."""
+    model_cfg = cfg or ModelConfig()
+    default_cfg = ModelConfig()
+    if _config_payload(model_cfg) == _config_payload(default_cfg):
+        return baseline_id
+    raw = "|".join(f"{key}={value}" for key, value in sorted(_config_payload(model_cfg).items()))
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+    return f"dashboard_custom_{digest}"
+
+
+def snapshot_selected_match_if_needed(
+    fixture_row: pd.Series | dict[str, Any] | pd.DataFrame | None,
+    team_ratings_df: pd.DataFrame | None = None,
+    venues_df: pd.DataFrame | None = None,
+    market_odds_df: pd.DataFrame | None = None,
+    cfg: ModelConfig | None = None,
+    model_version: str = "baseline_external_calibrated_v1",
+    parameter_set_id: str | None = None,
+    primary_model_mode: str = "baseline_manual",
+    notes: str = "Auto-saved by dashboard selected-match analysis",
+    path: str | Path = PREDICTION_LEDGER_PATH,
+    min_interval_minutes: int = DEFAULT_AUTO_SNAPSHOT_MIN_INTERVAL_MINUTES,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Append a pre-kickoff selected-match snapshot unless a fresh one exists."""
+    fixture = _single_fixture_frame(fixture_row)
+    parameter_id = parameter_set_id or dashboard_parameter_set_id(cfg)
+    match_id = _first_match_id(fixture)
+    duplicate = _fresh_existing_prediction(
+        match_id,
+        model_version=model_version,
+        parameter_set_id=parameter_id,
+        primary_model_mode=primary_model_mode,
+        path=path,
+        min_interval_minutes=min_interval_minutes,
+    )
+    if duplicate:
+        diagnostics = {
+            "fixtures_available": int(len(fixture)),
+            "fixtures_selected": int(len(fixture)),
+            "fixtures_attempted": 0,
+            "predictions_written": 0,
+            "predictions_skipped": 1,
+            "skipped_past_kickoff": 0,
+            "skipped_missing_model_result": 0,
+            "skipped_missing_match_id": 0,
+            "skipped_duplicate_policy": 1,
+            "output_path": _display_path(Path(path)),
+            "warnings": [],
+            "skip_reasons": [
+                {
+                    "match_id": match_id,
+                    "reason_code": "duplicate_policy",
+                    "reason": f"A fresh pre-kickoff snapshot already exists within {int(min_interval_minutes)} minute(s).",
+                }
+            ],
+        }
+        return pd.DataFrame(columns=PREDICTION_LEDGER_COLUMNS), diagnostics
+    return snapshot_predictions_for_fixtures_with_diagnostics(
+        fixture,
+        team_ratings_df=team_ratings_df,
+        venues_df=venues_df,
+        market_odds_df=market_odds_df,
+        cfg=cfg,
+        model_version=model_version,
+        parameter_set_id=parameter_id,
+        primary_model_mode=primary_model_mode,
+        notes=notes,
+        path=path,
+        append=True,
+        include_past=False,
+        selected_match_ids=[match_id] if match_id else None,
+    )
+
+
+def import_completed_result_for_fixture_if_ready(
+    fixture_row: pd.Series | dict[str, Any],
+    completed_matches_df: pd.DataFrame | None = None,
+    path: str | Path = RESULTS_LEDGER_PATH,
+    now_utc: str | pd.Timestamp | None = None,
+    result_ready_delay_hours: float = DEFAULT_RESULT_READY_DELAY_HOURS,
+    result_source: str = "auto_dashboard_completed_matches",
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Import one selected fixture result after a conservative post-game delay.
+
+    The app waits four hours after kickoff by default: roughly three hours for
+    regulation, extra time, penalties, and stoppage, plus one hour before trying
+    to pull completed-result data.
+    """
+    fixture = pd.Series(fixture_row).copy()
+    path = Path(path)
+    existing = load_results_ledger(path)
+    match_id = str(fixture.get("match_id", "") or "").strip()
+    kickoff = pd.to_datetime(_kickoff_utc(fixture), errors="coerce", utc=True)
+    now = pd.Timestamp.now(tz="UTC") if now_utc is None else pd.Timestamp(now_utc)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+    if not match_id:
+        return existing, _result_import_diagnostics("skipped_missing_match_id", match_id, "", 0, "Fixture has no match_id.")
+    if pd.isna(kickoff):
+        return existing, _result_import_diagnostics("skipped_invalid_kickoff", match_id, "", 0, "Fixture kickoff could not be parsed.")
+    ready_at = kickoff + pd.Timedelta(hours=float(result_ready_delay_hours))
+    if now < ready_at:
+        return existing, _result_import_diagnostics(
+            "not_ready",
+            match_id,
+            ready_at.isoformat(),
+            0,
+            "Result import waits until kickoff plus the post-game delay.",
+        )
+    if not existing.empty and "match_id" in existing.columns and (existing["match_id"].astype(str) == match_id).any():
+        return existing, _result_import_diagnostics("already_imported", match_id, ready_at.isoformat(), 0, "Result already exists in the ledger.")
+
+    completed = completed_matches_df.copy() if completed_matches_df is not None else _completed_candidates_for_fixture(fixture)
+    candidate = _completed_result_for_fixture(fixture, completed)
+    if candidate.empty:
+        return existing, _result_import_diagnostics(
+            "result_not_found",
+            match_id,
+            ready_at.isoformat(),
+            0,
+            "No completed-result row matched this fixture yet.",
+        )
+
+    result_row = candidate.iloc[0].copy()
+    result_row["match_id"] = match_id
+    for col in ["date_utc", "competition", "home", "away"]:
+        if col in fixture.index:
+            result_row[col] = fixture.get(col, result_row.get(col, ""))
+    combined = import_completed_results(pd.DataFrame([result_row]), path=path, result_source=result_source)
+    return combined, _result_import_diagnostics("imported", match_id, ready_at.isoformat(), 1, "Completed result imported.")
+
+
 def import_completed_results(
     completed_matches_df: pd.DataFrame | None = None,
     start_date: str | None = None,
@@ -317,6 +453,122 @@ def _load_primary_ratings() -> pd.DataFrame:
         return get_team_ratings(model_mode="baseline_manual")
     except TypeError:
         return read_csv_with_columns(DATA_DIR / "team_ratings.csv", TEAM_RATING_COLUMNS)
+
+
+def _config_payload(cfg: ModelConfig) -> dict[str, Any]:
+    if is_dataclass(cfg):
+        raw = asdict(cfg)
+    else:
+        raw = dict(getattr(cfg, "__dict__", {}))
+    payload: dict[str, Any] = {}
+    for key, value in raw.items():
+        if isinstance(value, float):
+            payload[key] = round(value, 8)
+        else:
+            payload[key] = value
+    return payload
+
+
+def _single_fixture_frame(fixture_row: pd.Series | dict[str, Any] | pd.DataFrame | None) -> pd.DataFrame:
+    if fixture_row is None:
+        return pd.DataFrame()
+    if isinstance(fixture_row, pd.DataFrame):
+        return fixture_row.head(1).copy()
+    return pd.DataFrame([pd.Series(fixture_row)])
+
+
+def _first_match_id(fixtures: pd.DataFrame) -> str:
+    if fixtures is None or fixtures.empty or "match_id" not in fixtures.columns:
+        return ""
+    return str(fixtures["match_id"].iloc[0] or "").strip()
+
+
+def _fresh_existing_prediction(
+    match_id: str,
+    model_version: str,
+    parameter_set_id: str,
+    primary_model_mode: str,
+    path: str | Path,
+    min_interval_minutes: int,
+) -> bool:
+    if not match_id:
+        return False
+    existing = load_prediction_ledger(path)
+    if existing.empty:
+        return False
+    frame = existing.copy()
+    mask = (
+        frame["match_id"].astype(str).eq(str(match_id))
+        & frame["model_version"].astype(str).eq(str(model_version))
+        & frame["parameter_set_id"].astype(str).eq(str(parameter_set_id))
+        & frame["primary_model_mode"].astype(str).eq(str(primary_model_mode))
+        & frame["prediction_before_kickoff"].astype(str).str.lower().isin({"true", "1", "yes"})
+    )
+    matched = frame.loc[mask].copy()
+    if matched.empty:
+        return False
+    snapshots = pd.to_datetime(matched["snapshot_utc"], errors="coerce", utc=True).dropna()
+    if snapshots.empty:
+        return False
+    latest = snapshots.max()
+    now = pd.to_datetime(utc_now_iso(), errors="coerce", utc=True)
+    if pd.isna(now):
+        now = pd.Timestamp.now(tz="UTC")
+    return bool(latest >= now - pd.Timedelta(minutes=int(min_interval_minutes)))
+
+
+def _completed_candidates_for_fixture(fixture: pd.Series) -> pd.DataFrame:
+    date_label = _date_label(fixture.get("date_utc"))
+    teams = [str(fixture.get("home", "") or ""), str(fixture.get("away", "") or "")]
+    teams = [team for team in teams if team.strip()]
+    return load_completed_matches_for_backtest(start_date=date_label, end_date=date_label, teams=teams or None)
+
+
+def _completed_result_for_fixture(fixture: pd.Series, completed_matches_df: pd.DataFrame | None) -> pd.DataFrame:
+    completed = completed_matches_df.copy() if completed_matches_df is not None else pd.DataFrame()
+    if completed.empty:
+        return pd.DataFrame()
+    for col in ["match_id", "date_utc", "home", "away", "home_goals", "away_goals"]:
+        if col not in completed.columns:
+            completed[col] = pd.NA
+    fixture_match_id = str(fixture.get("match_id", "") or "").strip()
+    if fixture_match_id:
+        by_id = completed.loc[completed["match_id"].astype(str) == fixture_match_id].copy()
+        if not by_id.empty:
+            return by_id.head(1)
+    date_label = _date_label(fixture.get("date_utc"))
+    home_key = _team_key(fixture.get("home", ""))
+    away_key = _team_key(fixture.get("away", ""))
+    home = completed["home"].map(_team_key)
+    away = completed["away"].map(_team_key)
+    date = completed["date_utc"].map(_date_label)
+    by_fixture = completed.loc[(date == date_label) & (home == home_key) & (away == away_key)].copy()
+    return by_fixture.head(1)
+
+
+def _result_import_diagnostics(
+    status: str,
+    match_id: str,
+    ready_after_utc: str,
+    rows_imported: int,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "match_id": match_id,
+        "ready_after_utc": ready_after_utc,
+        "rows_imported": int(rows_imported),
+        "message": message,
+    }
+
+
+def _date_label(value: Any) -> str:
+    ts = pd.to_datetime(value, errors="coerce")
+    return "" if pd.isna(ts) else ts.date().isoformat()
+
+
+def _team_key(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().replace("-", " ").split())
 
 
 def _normalise_fixtures(fixtures_df: pd.DataFrame | None) -> pd.DataFrame:
