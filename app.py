@@ -21,8 +21,8 @@ from src.behavior_driver_report import (
     get_behavior_driver_matches,
 )
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
-from src.config import api_summary
-from src.data_sources import filter_future_fixtures, get_upcoming_fixtures, update_all_sources
+from src.config import DATA_DIR, api_summary
+from src.data_sources import FIXTURE_COLUMNS, filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.environment_response import calculate_environment_response
 from src.external_benchmark_calibration import (
     audit_external_benchmark_coverage,
@@ -84,6 +84,7 @@ _PREDICTION_LEDGER_AUTOMATION_EXPORTS = (
     "dashboard_parameter_set_id",
     "import_completed_result_for_fixture_if_ready",
     "snapshot_selected_match_if_needed",
+    "sync_all_completed_results",
 )
 if not all(hasattr(prediction_ledger_module, name) for name in _PREDICTION_LEDGER_AUTOMATION_EXPORTS):
     # Streamlit keeps imported modules alive across script reruns during local development.
@@ -98,6 +99,7 @@ from src.prediction_ledger import (
     load_results_ledger,
     snapshot_predictions_for_fixtures_with_diagnostics,
     snapshot_selected_match_if_needed,
+    sync_all_completed_results,
 )
 from src.rating_coverage import (
     audit_rating_coverage,
@@ -128,6 +130,7 @@ from src.report_metrics import (
 from src.sensitivity import assess_alpha_robustness, run_sensitivity_analysis
 from src.team_behavior import load_team_behavior
 from src.team_names import load_team_name_aliases_df
+from src.utils import read_csv_with_columns
 from src.timeline import calculate_score_timeline
 from src.tournament_learning import filter_tournament_learning_asof, load_tournament_learning_ledger
 
@@ -253,6 +256,12 @@ def automation_status_display(snapshot_diagnostics: dict, result_diagnostics: di
     snapshot_written = int(snapshot_diagnostics.get("predictions_written", 0) or 0)
     snapshot_status = "saved" if snapshot_written else _first_skip_code(snapshot_diagnostics)
     result_status = str(result_diagnostics.get("status", "") or "")
+    result_rows_changed = int(result_diagnostics.get("rows_imported", result_diagnostics.get("imported_or_updated_rows", 0)) or 0)
+    result_detail = result_diagnostics.get("message", "") or (
+        f"matched={result_diagnostics.get('matched_fixtures', 0)}; "
+        f"unmatched={result_diagnostics.get('unmatched_fixtures', 0)}; "
+        f"conflicts={result_diagnostics.get('conflict_rows', 0)}"
+    )
     rows = [
         {
             "automation": "Pre-kickoff prediction snapshot",
@@ -264,18 +273,18 @@ def automation_status_display(snapshot_diagnostics: dict, result_diagnostics: di
         {
             "automation": "Completed result import",
             "status": result_status,
-            "rows_changed": int(result_diagnostics.get("rows_imported", 0) or 0),
-            "detail": result_diagnostics.get("message", ""),
+            "rows_changed": result_rows_changed,
+            "detail": result_detail,
             "target": "data/results_ledger.csv",
         },
         {
             "automation": "Completed result source",
             "status": str(result_diagnostics.get("completed_source_status", "") or result_status),
-            "rows_changed": int(result_diagnostics.get("completed_rows_loaded", 0) or 0),
+            "rows_changed": int(result_diagnostics.get("completed_rows_loaded", result_diagnostics.get("provider_completed_rows_fetched", 0)) or 0),
             "detail": (
                 f"provider={result_diagnostics.get('provider_checked', '')}; "
                 f"window={result_diagnostics.get('date_window_checked', '')}; "
-                f"updated={result_diagnostics.get('completed_last_updated', '')}"
+                f"updated={result_diagnostics.get('completed_last_updated', result_diagnostics.get('last_refresh_timestamp', ''))}"
             ),
             "target": result_diagnostics.get("local_path_checked", "") or result_diagnostics.get("cache_path_checked", ""),
         },
@@ -302,6 +311,71 @@ def automation_status_display(snapshot_diagnostics: dict, result_diagnostics: di
             }
         )
     return pd.DataFrame(rows)
+
+
+def bulk_result_summary_display(diagnostics: dict) -> pd.DataFrame:
+    fields = [
+        ("status", "Status"),
+        ("total_past_fixtures", "Past fixtures"),
+        ("provider_completed_rows_fetched", "Provider completed rows fetched"),
+        ("completed_rows_loaded", "Completed rows loaded"),
+        ("matched_fixtures", "Matched fixtures"),
+        ("imported_or_updated_rows", "Imported/updated rows"),
+        ("already_present_rows", "Already present rows"),
+        ("conflict_rows", "Conflict rows"),
+        ("unmatched_fixtures", "Unmatched fixtures"),
+        ("skipped_fixtures", "Skipped fixtures"),
+        ("provider_checked", "Provider checked"),
+        ("date_window_checked", "Date window checked"),
+        ("cache_path_checked", "Cache path"),
+        ("last_refresh_timestamp", "Last refresh"),
+    ]
+    return pd.DataFrame([{"metric": label, "value": diagnostics.get(key, "")} for key, label in fields])
+
+
+def bulk_fixture_diagnostics_display(diagnostics: dict) -> pd.DataFrame:
+    rows = diagnostics.get("fixture_diagnostics", []) or []
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "fixture_id",
+                "kickoff_utc",
+                "home",
+                "away",
+                "import_status",
+                "matched_provider_id",
+                "imported_score_90",
+                "score_semantics",
+                "reason",
+            ]
+        )
+    out = pd.DataFrame(rows)
+    for col in [
+        "fixture_id",
+        "kickoff_utc",
+        "home",
+        "away",
+        "import_status",
+        "matched_provider_id",
+        "imported_score_90",
+        "score_semantics",
+        "reason",
+    ]:
+        if col not in out.columns:
+            out[col] = ""
+    return out[
+        [
+            "fixture_id",
+            "kickoff_utc",
+            "home",
+            "away",
+            "import_status",
+            "matched_provider_id",
+            "imported_score_90",
+            "score_semantics",
+            "reason",
+        ]
+    ]
 
 
 def _first_skip_code(snapshot_diagnostics: dict) -> str:
@@ -1554,6 +1628,7 @@ cfg = ModelConfig(
     defense_weight=defense_weight,
     form_weight=form_weight,
 )
+bulk_fixture_table = read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS)
 
 for label in selected_labels:
     match = fixture_view.loc[fixture_view["match_label"] == label].iloc[0]
@@ -1586,9 +1661,11 @@ for label in selected_labels:
         notes="Auto-saved by dashboard selected-match analysis",
         path=PREDICTION_LEDGER_PATH,
     )
-    auto_results_ledger, auto_result_diagnostics = import_completed_result_for_fixture_if_ready(
-        match,
+    auto_results_ledger, auto_result_diagnostics = sync_all_completed_results(
+        bulk_fixture_table,
+        competition="FIFA World Cup",
         path=RESULTS_LEDGER_PATH,
+        force_refresh=False,
     )
 
     probs = result["probs"]
@@ -2475,7 +2552,38 @@ for label in selected_labels:
             "Selected upcoming matches are auto-saved to data/prediction_ledger.csv with a 60-minute duplicate guard. "
             "Completed results are checked automatically after kickoff + 4 hours; Polymarket match outcomes use regular time plus stoppage, not extra time or penalties."
         )
-        if st.button("Refresh completed results", key=f"refresh_completed_results_{match['match_id']}"):
+        st.write("Bulk completed-results sync summary")
+        display_dataframe(
+            bulk_result_summary_display(auto_result_diagnostics),
+            hide_index=True,
+            width="stretch",
+        )
+        with st.expander("Bulk completed-results fixture diagnostics"):
+            display_dataframe(
+                bulk_fixture_diagnostics_display(auto_result_diagnostics),
+                hide_index=True,
+                width="stretch",
+            )
+        if st.button("Refresh and import all finished World Cup results", key=f"refresh_all_completed_results_{match['match_id']}"):
+            auto_results_ledger, auto_result_diagnostics = sync_all_completed_results(
+                bulk_fixture_table,
+                competition="FIFA World Cup",
+                path=RESULTS_LEDGER_PATH,
+                force_refresh=True,
+            )
+            st.cache_data.clear()
+            display_dataframe(
+                bulk_result_summary_display(auto_result_diagnostics),
+                hide_index=True,
+                width="stretch",
+            )
+            with st.expander("Latest bulk completed-results fixture diagnostics", expanded=True):
+                display_dataframe(
+                    bulk_fixture_diagnostics_display(auto_result_diagnostics),
+                    hide_index=True,
+                    width="stretch",
+                )
+        if st.button("Import result for selected fixture", key=f"refresh_completed_results_{match['match_id']}"):
             auto_results_ledger, auto_result_diagnostics = import_completed_result_for_fixture_if_ready(
                 match,
                 path=RESULTS_LEDGER_PATH,

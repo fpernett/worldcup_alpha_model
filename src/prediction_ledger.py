@@ -11,13 +11,16 @@ import pandas as pd
 from src.backtest import classify_actual_result, load_completed_matches_for_backtest
 from src.completed_results import (
     COMPLETED_RESULTS_PATH,
+    COMPLETED_RESULT_COLUMNS,
     completed_results_to_backtest_matches,
+    load_completed_results,
     refresh_completed_results_for_fixture,
 )
 from src.config import DATA_DIR
 from src.model import ModelConfig, run_match_model, score_matrix
 from src.model_policy import get_current_model_policy
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
+from src.team_names import normalize_team_name
 from src.utils import coerce_bool, coerce_float, read_csv_with_columns, utc_now_iso
 from src.weather import load_venues
 
@@ -448,6 +451,147 @@ def import_completed_result_for_fixture_if_ready(
     )
 
 
+def sync_all_completed_results(
+    fixtures: pd.DataFrame | None,
+    competition: str = "FIFA World Cup",
+    date_min: str | None = None,
+    date_max: str | None = None,
+    force_refresh: bool = False,
+    path: str | Path = RESULTS_LEDGER_PATH,
+    now_utc: str | pd.Timestamp | None = None,
+    result_ready_delay_hours: float = DEFAULT_RESULT_READY_DELAY_HOURS,
+    result_source: str = "bulk_completed_results_sync",
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Refresh and import completed results for every finished local fixture."""
+    path = Path(path)
+    existing = load_results_ledger(path)
+    all_fixtures = _normalise_fixtures(fixtures)
+    if competition and not all_fixtures.empty and "competition" in all_fixtures.columns:
+        needle = str(competition).strip().lower()
+        all_fixtures = all_fixtures.loc[all_fixtures["competition"].astype(str).str.lower().str.contains(needle, na=False)].copy()
+
+    now = pd.Timestamp.now(tz="UTC") if now_utc is None else pd.Timestamp(now_utc)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+    prepared, skipped_rows = _bulk_sync_ready_fixtures(
+        all_fixtures,
+        now=now,
+        date_min=date_min,
+        date_max=date_max,
+        result_ready_delay_hours=result_ready_delay_hours,
+    )
+    if prepared.empty:
+        diagnostics = _bulk_sync_diagnostics(
+            status="no_past_fixtures",
+            provider_diagnostics={},
+            fixture_rows=[],
+            skipped_rows=skipped_rows,
+            total_fixtures=len(all_fixtures),
+            past_fixtures=0,
+            existing_rows=len(existing),
+            final_rows=len(existing),
+        )
+        return existing, diagnostics
+
+    start = prepared["_kickoff_utc"].dt.date.min().isoformat()
+    end = prepared["_kickoff_utc"].dt.date.max().isoformat()
+    completed_results, provider_diagnostics = load_completed_results(
+        start,
+        end,
+        teams=None,
+        force_refresh=force_refresh,
+        persist=True,
+    )
+    provider_candidates = _completed_results_to_match_candidates(completed_results)
+    fallback_candidates = load_completed_matches_for_backtest(start_date=start, end_date=end, teams=None)
+    provider_and_fallback = _combine_completed_candidate_frames([provider_candidates, fallback_candidates])
+    existing_candidates = _results_ledger_to_completed_candidates(existing)
+    full_candidate_pool = _combine_completed_candidate_frames([provider_and_fallback, existing_candidates])
+
+    working = existing.copy()
+    rows_to_append: list[dict[str, Any]] = []
+    fixture_rows: list[dict[str, Any]] = []
+    for _, fixture in prepared.iterrows():
+        candidate = _completed_result_for_fixture(fixture, provider_and_fallback)
+        matched_from_existing_only = False
+        if candidate.empty:
+            candidate = _completed_result_for_fixture(fixture, existing_candidates)
+            matched_from_existing_only = not candidate.empty
+        if candidate.empty:
+            fixture_rows.append(
+                _bulk_fixture_diagnostic(
+                    fixture,
+                    "unmatched",
+                    reason="No completed-result row matched this fixture.",
+                    nearest=_nearest_completed_candidates(fixture, full_candidate_pool),
+                )
+            )
+            continue
+
+        result_row = _ledger_result_row_from_candidate(fixture, candidate.iloc[0], result_source)
+        match_id = str(result_row.get("match_id", "") or "").strip()
+        existing_row = _existing_result_for_match_id(working, match_id)
+        if existing_row is not None:
+            old_score = _score_pair(existing_row)
+            new_score = _score_pair(result_row)
+            if old_score == new_score:
+                fixture_rows.append(
+                    _bulk_fixture_diagnostic(
+                        fixture,
+                        "already_present",
+                        candidate.iloc[0],
+                        result_row,
+                        reason="Result already exists in data/results_ledger.csv.",
+                    )
+                )
+                continue
+            fixture_rows.append(
+                _bulk_fixture_diagnostic(
+                    fixture,
+                    "conflict_needs_review",
+                    candidate.iloc[0],
+                    result_row,
+                    reason=f"Existing score {old_score[0]}-{old_score[1]} conflicts with provider score {new_score[0]}-{new_score[1]}.",
+                )
+            )
+            continue
+
+        rows_to_append.append(result_row)
+        fixture_rows.append(
+            _bulk_fixture_diagnostic(
+                fixture,
+                "imported_from_existing_result" if matched_from_existing_only else "imported",
+                candidate.iloc[0],
+                result_row,
+            )
+        )
+
+    if rows_to_append:
+        new_results = pd.DataFrame(rows_to_append, columns=RESULTS_LEDGER_COLUMNS)
+        working = pd.concat([working, new_results], ignore_index=True)
+        working = working.drop_duplicates(subset=["match_id"], keep="last")
+        working = working.sort_values(["date_utc", "match_id"]).reset_index(drop=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        working[RESULTS_LEDGER_COLUMNS].to_csv(path, index=False)
+
+    status = "completed_source_empty" if provider_and_fallback.empty and existing_candidates.empty else "success"
+    diagnostics = _bulk_sync_diagnostics(
+        status=status,
+        provider_diagnostics=provider_diagnostics,
+        fixture_rows=fixture_rows,
+        skipped_rows=skipped_rows,
+        total_fixtures=len(all_fixtures),
+        past_fixtures=len(prepared),
+        existing_rows=len(existing),
+        final_rows=len(working),
+        provider_rows=len(completed_results),
+        provider_candidate_rows=len(provider_candidates),
+        fallback_candidate_rows=len(fallback_candidates) if fallback_candidates is not None else 0,
+        existing_candidate_rows=len(existing_candidates),
+        date_window=f"{start} to {end}",
+    )
+    return working[RESULTS_LEDGER_COLUMNS].copy(), diagnostics
+
+
 def import_completed_results(
     completed_matches_df: pd.DataFrame | None = None,
     start_date: str | None = None,
@@ -677,7 +821,8 @@ def _date_label(value: Any) -> str:
 
 
 def _team_key(value: Any) -> str:
-    return " ".join(str(value or "").strip().lower().replace("-", " ").split())
+    canonical = normalize_team_name(str(value or ""))
+    return " ".join(str(canonical or "").strip().lower().replace("-", " ").split())
 
 
 def _competition_compatible(fixture_competition: Any, candidate_competition: Any) -> bool:
@@ -748,9 +893,17 @@ def _orient_completed_match_to_fixture(fixture: pd.Series, completed: pd.DataFra
             out.at[idx, "away"] = fixture.get("away", row.get("home", ""))
             out.at[idx, "home_goals"] = away_goals
             out.at[idx, "away_goals"] = home_goals
+            out.at[idx, "home_goals_90"] = away_goals
+            out.at[idx, "away_goals_90"] = home_goals
+            out.at[idx, "home_score_90"] = away_goals
+            out.at[idx, "away_score_90"] = home_goals
         else:
             out.at[idx, "home_goals"] = home_goals
             out.at[idx, "away_goals"] = away_goals
+            out.at[idx, "home_goals_90"] = home_goals
+            out.at[idx, "away_goals_90"] = away_goals
+            out.at[idx, "home_score_90"] = home_goals
+            out.at[idx, "away_score_90"] = away_goals
     return out
 
 
@@ -763,6 +916,255 @@ def _first_present(row: pd.Series | dict[str, Any], columns: list[str]) -> Any:
             continue
         return value
     return pd.NA
+
+
+def _bulk_sync_ready_fixtures(
+    fixtures: pd.DataFrame,
+    now: pd.Timestamp,
+    date_min: str | None,
+    date_max: str | None,
+    result_ready_delay_hours: float,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    if fixtures is None or fixtures.empty:
+        return pd.DataFrame(), []
+    out = fixtures.copy()
+    out["_kickoff_utc"] = pd.to_datetime(out.apply(_kickoff_utc, axis=1), errors="coerce", utc=True)
+    if date_min:
+        out = out.loc[out["_kickoff_utc"] >= pd.to_datetime(date_min, errors="coerce", utc=True)].copy()
+    if date_max:
+        max_ts = pd.to_datetime(date_max, errors="coerce", utc=True)
+        if pd.notna(max_ts):
+            out = out.loc[out["_kickoff_utc"] <= max_ts + pd.Timedelta(days=1)].copy()
+    skipped_rows: list[dict[str, Any]] = []
+    invalid = out.loc[out["_kickoff_utc"].isna()].copy()
+    for _, row in invalid.iterrows():
+        skipped_rows.append(_bulk_skipped_fixture(row, "invalid_kickoff", "Fixture kickoff could not be parsed."))
+    out = out.loc[out["_kickoff_utc"].notna()].copy()
+    unresolved = out.loc[out.apply(_fixture_has_unresolved_team, axis=1)].copy()
+    for _, row in unresolved.iterrows():
+        skipped_rows.append(_bulk_skipped_fixture(row, "unresolved_team", "Fixture still contains an unresolved bracket slot."))
+    out = out.loc[~out.apply(_fixture_has_unresolved_team, axis=1)].copy()
+    ready_at = out["_kickoff_utc"] + pd.Timedelta(hours=float(result_ready_delay_hours))
+    not_ready = out.loc[ready_at > now].copy()
+    for _, row in not_ready.iterrows():
+        skipped_rows.append(_bulk_skipped_fixture(row, "not_ready", "Fixture has not reached kickoff plus result-ready delay."))
+    ready = out.loc[ready_at <= now].copy()
+    return ready.sort_values(["_kickoff_utc", "match_id"]).reset_index(drop=True), skipped_rows
+
+
+def _fixture_has_unresolved_team(row: pd.Series) -> bool:
+    home = str(row.get("home", "") or "").strip().lower()
+    away = str(row.get("away", "") or "").strip().lower()
+    unresolved_terms = ("winner ", "loser ", "winner match", "loser match", "tbd", "to be determined")
+    return any(term in home for term in unresolved_terms) or any(term in away for term in unresolved_terms)
+
+
+def _bulk_skipped_fixture(row: pd.Series, status: str, reason: str) -> dict[str, Any]:
+    return {
+        "fixture_id": str(row.get("match_id", "") or ""),
+        "kickoff_utc": str(row.get("_kickoff_utc", "") or ""),
+        "home": str(row.get("home", "") or ""),
+        "away": str(row.get("away", "") or ""),
+        "import_status": status,
+        "matched_provider_id": "",
+        "imported_score_90": "",
+        "score_semantics": "",
+        "reason": reason,
+    }
+
+
+def _completed_results_to_match_candidates(completed_results: pd.DataFrame | None) -> pd.DataFrame:
+    if completed_results is None or completed_results.empty:
+        return pd.DataFrame()
+    df = completed_results.copy()
+    for col in COMPLETED_RESULT_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    out = pd.DataFrame(
+        {
+            "match_id": df["provider_match_id"].fillna("").astype(str),
+            "provider_match_id": df["provider_match_id"].fillna("").astype(str),
+            "provider": df["provider"].fillna("").astype(str),
+            "date_utc": df["date_utc"],
+            "competition": df["competition"],
+            "group": df["group"],
+            "home": df["home"],
+            "away": df["away"],
+            "home_goals": df["home_score_90"],
+            "away_goals": df["away_score_90"],
+            "home_goals_90": df["home_score_90"],
+            "away_goals_90": df["away_score_90"],
+            "score_source": df["score_source"],
+            "score_semantics": df["score_semantics"],
+            "provider_kickoff_utc": df["provider_kickoff_utc"],
+            "result_source": df["source"],
+            "last_updated": df["last_updated"],
+        }
+    )
+    return out
+
+
+def _results_ledger_to_completed_candidates(results_ledger: pd.DataFrame | None) -> pd.DataFrame:
+    if results_ledger is None or results_ledger.empty:
+        return pd.DataFrame()
+    df = _ensure_columns(results_ledger, RESULTS_LEDGER_COLUMNS)
+    out = pd.DataFrame(
+        {
+            "match_id": df["match_id"].fillna("").astype(str),
+            "provider_match_id": df["match_id"].fillna("").astype(str),
+            "provider": "results_ledger",
+            "date_utc": df["date_utc"],
+            "competition": df["competition"],
+            "group": "",
+            "home": df["home"],
+            "away": df["away"],
+            "home_goals": df["home_goals"],
+            "away_goals": df["away_goals"],
+            "home_goals_90": df["home_goals"],
+            "away_goals_90": df["away_goals"],
+            "score_source": "data/results_ledger.csv",
+            "score_semantics": "90-minute regular time",
+            "provider_kickoff_utc": "",
+            "result_source": df["result_source"],
+            "last_updated": df["last_updated"],
+        }
+    )
+    return out
+
+
+def _combine_completed_candidate_frames(frames: list[pd.DataFrame | None]) -> pd.DataFrame:
+    valid = [frame.copy() for frame in frames if frame is not None and not frame.empty]
+    if not valid:
+        return pd.DataFrame()
+    combined = pd.concat(valid, ignore_index=True, sort=False)
+    for col in ["match_id", "date_utc", "competition", "home", "away", "home_goals", "away_goals"]:
+        if col not in combined.columns:
+            combined[col] = pd.NA
+    combined["_dedupe"] = combined.apply(
+        lambda row: "|".join(
+            [
+                str(row.get("match_id", "") or ""),
+                _date_label(row.get("date_utc")),
+                _team_key(row.get("home", "")),
+                _team_key(row.get("away", "")),
+                str(int(coerce_float(row.get("home_goals"), 0))),
+                str(int(coerce_float(row.get("away_goals"), 0))),
+            ]
+        ),
+        axis=1,
+    )
+    return combined.drop_duplicates(subset=["_dedupe"], keep="first").drop(columns=["_dedupe"]).reset_index(drop=True)
+
+
+def _ledger_result_row_from_candidate(fixture: pd.Series, candidate: pd.Series, result_source: str) -> dict[str, Any]:
+    home_goals = coerce_float(_first_present(candidate, HOME_REGULAR_TIME_GOAL_COLUMNS), 0.0)
+    away_goals = coerce_float(_first_present(candidate, AWAY_REGULAR_TIME_GOAL_COLUMNS), 0.0)
+    total = home_goals + away_goals
+    return {
+        "match_id": str(fixture.get("match_id", "") or "").strip(),
+        "date_utc": fixture.get("date_utc", candidate.get("date_utc", "")),
+        "competition": fixture.get("competition", candidate.get("competition", "")),
+        "home": fixture.get("home", candidate.get("home", "")),
+        "away": fixture.get("away", candidate.get("away", "")),
+        "home_goals": int(home_goals),
+        "away_goals": int(away_goals),
+        "actual_result": classify_actual_result(home_goals, away_goals),
+        "total_goals": int(total),
+        "btts_actual": int(home_goals > 0 and away_goals > 0),
+        "over_0_5_actual": int(total > 0.5),
+        "over_1_5_actual": int(total > 1.5),
+        "over_2_5_actual": int(total > 2.5),
+        "over_3_5_actual": int(total > 3.5),
+        "result_source": result_source,
+        "last_updated": utc_now_iso(),
+    }
+
+
+def _existing_result_for_match_id(results: pd.DataFrame, match_id: str) -> pd.Series | None:
+    if results is None or results.empty or "match_id" not in results.columns:
+        return None
+    matched = results.loc[results["match_id"].astype(str) == str(match_id)]
+    if matched.empty:
+        return None
+    return matched.iloc[-1]
+
+
+def _score_pair(row: pd.Series | dict[str, Any]) -> tuple[int, int]:
+    return int(coerce_float(row.get("home_goals"), 0)), int(coerce_float(row.get("away_goals"), 0))
+
+
+def _bulk_fixture_diagnostic(
+    fixture: pd.Series,
+    status: str,
+    candidate: pd.Series | None = None,
+    result_row: dict[str, Any] | None = None,
+    reason: str = "",
+    nearest: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    candidate = candidate if candidate is not None else pd.Series(dtype="object")
+    result_row = result_row or {}
+    home_goals = result_row.get("home_goals", "")
+    away_goals = result_row.get("away_goals", "")
+    score = f"{home_goals}-{away_goals}" if str(home_goals) != "" and str(away_goals) != "" else ""
+    return {
+        "fixture_id": str(fixture.get("match_id", "") or ""),
+        "kickoff_utc": str(fixture.get("_kickoff_utc", "") or _kickoff_utc(fixture)),
+        "home": str(fixture.get("home", "") or ""),
+        "away": str(fixture.get("away", "") or ""),
+        "import_status": status,
+        "matched_provider_id": str(candidate.get("provider_match_id", "") or candidate.get("match_id", "") or ""),
+        "imported_score_90": score,
+        "score_semantics": str(candidate.get("score_semantics", "") or "90-minute regular time") if not candidate.empty else "",
+        "reason": reason,
+        "nearest_candidates": nearest or [],
+    }
+
+
+def _bulk_sync_diagnostics(
+    status: str,
+    provider_diagnostics: dict[str, Any],
+    fixture_rows: list[dict[str, Any]],
+    skipped_rows: list[dict[str, Any]],
+    total_fixtures: int,
+    past_fixtures: int,
+    existing_rows: int,
+    final_rows: int,
+    provider_rows: int = 0,
+    provider_candidate_rows: int = 0,
+    fallback_candidate_rows: int = 0,
+    existing_candidate_rows: int = 0,
+    date_window: str = "",
+) -> dict[str, Any]:
+    statuses = [row.get("import_status", "") for row in fixture_rows]
+    imported = sum(1 for value in statuses if value in {"imported", "imported_from_existing_result", "updated"})
+    summary = {
+        "status": status,
+        "total_fixtures": int(total_fixtures),
+        "total_past_fixtures": int(past_fixtures),
+        "provider_completed_rows_fetched": int(provider_diagnostics.get("normalized_rows_fetched", provider_rows) or provider_rows),
+        "completed_rows_loaded": int(provider_diagnostics.get("completed_rows_loaded", provider_rows) or provider_rows),
+        "provider_candidate_rows": int(provider_candidate_rows),
+        "fallback_candidate_rows": int(fallback_candidate_rows),
+        "existing_candidate_rows": int(existing_candidate_rows),
+        "matched_fixtures": sum(1 for value in statuses if value in {"imported", "imported_from_existing_result", "already_present", "updated", "conflict_needs_review"}),
+        "imported_or_updated_rows": imported,
+        "already_present_rows": statuses.count("already_present"),
+        "conflict_rows": statuses.count("conflict_needs_review"),
+        "unmatched_fixtures": statuses.count("unmatched"),
+        "skipped_fixtures": len(skipped_rows),
+        "existing_ledger_rows": int(existing_rows),
+        "final_ledger_rows": int(final_rows),
+        "provider_checked": provider_diagnostics.get("provider_checked", ""),
+        "date_window_checked": provider_diagnostics.get("date_window_checked", date_window) or date_window,
+        "cache_path_checked": provider_diagnostics.get("cache_path_checked", ""),
+        "local_path_checked": provider_diagnostics.get("local_path_checked", ""),
+        "last_refresh_timestamp": provider_diagnostics.get("last_updated", ""),
+        "completed_source_status": provider_diagnostics.get("status", ""),
+    }
+    summary["fixture_diagnostics"] = fixture_rows + skipped_rows
+    summary["unmatched_rows"] = [row for row in fixture_rows if row.get("import_status") == "unmatched"]
+    summary["conflict_rows_detail"] = [row for row in fixture_rows if row.get("import_status") == "conflict_needs_review"]
+    return summary
 
 
 def _normalise_fixtures(fixtures_df: pd.DataFrame | None) -> pd.DataFrame:

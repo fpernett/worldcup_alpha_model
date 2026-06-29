@@ -496,6 +496,190 @@ def test_auto_result_import_reports_completed_source_empty(monkeypatch, tmp_path
     assert diagnostics["cache_path_checked"] == "data/cache/completed_results_latest.csv"
 
 
+def test_bulk_sync_imports_multiple_finished_fixtures_across_dates(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def fake_load_completed_results(start_date, end_date, **_kwargs):
+        captured["window"] = (start_date, end_date)
+        return (
+            _provider_completed_rows(
+                [
+                    ("p1", "2026-06-22", "Alpha", "Beta", 2, 1),
+                    ("p2", "2026-06-23", "Gamma", "Delta", 0, 0),
+                ]
+            ),
+            {
+                "status": "success",
+                "provider_checked": "football-data.org /matches?status=FINISHED",
+                "date_window_checked": f"{start_date} to {end_date}",
+                "cache_path_checked": "data/cache/completed_results_latest.csv",
+                "completed_rows_loaded": 2,
+                "normalized_rows_fetched": 2,
+                "last_updated": "2026-06-24T00:00:00+00:00",
+            },
+        )
+
+    monkeypatch.setattr(prediction_ledger, "load_completed_results", fake_load_completed_results)
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures(),
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert captured["window"] == ("2026-06-22", "2026-06-23")
+    assert diagnostics["imported_or_updated_rows"] == 2
+    assert diagnostics["unmatched_fixtures"] == 0
+    assert set(results["match_id"]) == {"m1", "m2"}
+
+
+def test_bulk_sync_is_idempotent_and_reports_already_present(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            _provider_completed_rows([("p1", "2026-06-22", "Alpha", "Beta", 2, 1)]),
+            {"status": "success", "normalized_rows_fetched": 1, "completed_rows_loaded": 1},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+    path = tmp_path / "results_ledger.csv"
+
+    prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=path,
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+    results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=path,
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert len(results) == 1
+    assert diagnostics["already_present_rows"] == 1
+    assert diagnostics["imported_or_updated_rows"] == 0
+
+
+def test_bulk_sync_marks_conflicting_existing_score_for_review(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "results_ledger.csv"
+    existing = {col: "" for col in prediction_ledger.RESULTS_LEDGER_COLUMNS}
+    existing.update(
+        {
+            "match_id": "m1",
+            "date_utc": "2026-06-22",
+            "competition": "FIFA World Cup",
+            "home": "Alpha",
+            "away": "Beta",
+            "home_goals": 0,
+            "away_goals": 0,
+            "actual_result": "draw",
+        }
+    )
+    pd.DataFrame([existing]).to_csv(path, index=False)
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            _provider_completed_rows([("p1", "2026-06-22", "Alpha", "Beta", 2, 1)]),
+            {"status": "success", "normalized_rows_fetched": 1, "completed_rows_loaded": 1},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=path,
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert diagnostics["conflict_rows"] == 1
+    assert diagnostics["fixture_diagnostics"][0]["import_status"] == "conflict_needs_review"
+    assert int(results.iloc[0]["home_goals"]) == 0
+
+
+def test_bulk_sync_reorients_reversed_provider_team_rows(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            _provider_completed_rows([("p1", "2026-06-22", "Beta", "Alpha", 0, 2)]),
+            {"status": "success", "normalized_rows_fetched": 1, "completed_rows_loaded": 1},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert diagnostics["imported_or_updated_rows"] == 1
+    assert results.iloc[0]["home"] == "Alpha"
+    assert int(results.iloc[0]["home_goals"]) == 2
+    assert int(results.iloc[0]["away_goals"]) == 0
+
+
+def test_bulk_sync_reports_unmatched_fixture_with_nearest_candidates(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            _provider_completed_rows([("p1", "2026-06-22", "Alpha", "Other", 1, 0)]),
+            {"status": "success", "normalized_rows_fetched": 1, "completed_rows_loaded": 1},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    _results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert diagnostics["unmatched_fixtures"] == 1
+    unmatched = diagnostics["unmatched_rows"][0]
+    assert unmatched["fixture_id"] == "m1"
+    assert unmatched["nearest_candidates"][0]["home"] == "Alpha"
+
+
+def test_bulk_sync_reports_completed_source_empty(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            pd.DataFrame(),
+            {
+                "status": "completed_source_empty",
+                "provider_checked": "football-data.org /matches?status=FINISHED",
+                "date_window_checked": "2026-06-22 to 2026-06-22",
+                "cache_path_checked": "data/cache/completed_results_latest.csv",
+                "completed_rows_loaded": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    _results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert diagnostics["status"] == "completed_source_empty"
+    assert diagnostics["unmatched_fixtures"] == 1
+    assert diagnostics["provider_checked"] == "football-data.org /matches?status=FINISHED"
+
+
 def test_required_prediction_ledger_columns_exist() -> None:
     required = {
         "prediction_id",
@@ -599,6 +783,58 @@ def _fixtures(date_utc: str, time_utc: str) -> pd.DataFrame:
                 "away": "Beta",
                 "venue": "Test",
             }
+        ]
+    )
+
+
+def _bulk_fixtures() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "match_id": "m1",
+                "date_utc": "2026-06-22",
+                "time_utc": "18:00",
+                "competition": "FIFA World Cup",
+                "group": "A",
+                "home": "Alpha",
+                "away": "Beta",
+                "venue": "Test",
+            },
+            {
+                "match_id": "m2",
+                "date_utc": "2026-06-23",
+                "time_utc": "18:00",
+                "competition": "FIFA World Cup",
+                "group": "A",
+                "home": "Gamma",
+                "away": "Delta",
+                "venue": "Test",
+            },
+        ]
+    )
+
+
+def _provider_completed_rows(rows: list[tuple[str, str, str, str, int, int]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "provider": "football-data.org",
+                "provider_match_id": provider_id,
+                "provider_kickoff_utc": f"{date_utc}T18:00:00+00:00",
+                "date_utc": date_utc,
+                "competition": "FIFA World Cup",
+                "group": "A",
+                "home": home,
+                "away": away,
+                "home_score_90": home_goals,
+                "away_score_90": away_goals,
+                "score_source": "score.fullTime",
+                "score_semantics": "90-minute regular time",
+                "is_completed": 1,
+                "source": "football-data.org",
+                "last_updated": "2026-06-24T00:00:00+00:00",
+            }
+            for provider_id, date_utc, home, away, home_goals, away_goals in rows
         ]
     )
 
