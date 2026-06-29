@@ -94,6 +94,25 @@ MARKETS_TAB_COLUMNS = [
     "event_slug",
 ]
 
+MARKET_VALUE_GROUP_NAMES = [
+    "High Scoring",
+    "Low Scoring",
+    "Result Home",
+    "Result Away",
+    "Other Markets",
+]
+
+MARKET_VALUE_DISPLAY_COLUMNS = [
+    "Market",
+    "Model probability",
+    "Fair odds / fair price",
+    "Odds / Price",
+    "EV / Alpha Gap",
+    "Score",
+    "Signal",
+    "Mapping confidence",
+]
+
 
 def get_polymarket_team_code_variants(team: str) -> list[str]:
     """Return Polymarket sports slug code variants, prioritized for slug building."""
@@ -623,33 +642,24 @@ def markets_tab_join_diagnostics(
 
 
 def joined_market_groups(joined_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    groups = {
-        "High Scoring": [],
-        "Low Scoring": [],
-        "Result Home": [],
-        "Result Away": [],
-        "Other Markets": [],
-    }
+    groups = {name: [] for name in MARKET_VALUE_GROUP_NAMES}
     joined = joined_df.copy() if joined_df is not None else pd.DataFrame(columns=JOINED_MARKET_COLUMNS)
     for _, row in joined.iterrows():
         groups[_group_for_joined_row(row)].append(_display_joined_row(row))
-    return {
-        name: pd.DataFrame(rows)
-        if rows
-        else pd.DataFrame(
-            columns=[
-                "Market",
-                "Model probability",
-                "Fair odds / fair price",
-                "Odds / Price",
-                "EV / Alpha Gap",
-                "Score",
-                "Signal",
-                "Mapping confidence",
-            ]
-        )
-        for name, rows in groups.items()
-    }
+    return _materialize_market_value_groups(groups)
+
+
+def market_value_groups(markets_tab_df: pd.DataFrame | None, home: str = "", away: str = "") -> dict[str, pd.DataFrame]:
+    """Group model market rows for the Full report Market Value Tables section."""
+    groups = {name: [] for name in MARKET_VALUE_GROUP_NAMES}
+    table = markets_tab_df.copy() if markets_tab_df is not None else pd.DataFrame(columns=MARKETS_TAB_COLUMNS)
+    for col in MARKETS_TAB_COLUMNS:
+        if col not in table.columns:
+            table[col] = pd.NA
+
+    for _, row in table.iterrows():
+        groups[_group_for_market_value_row(row, home, away)].append(_display_market_value_row(row))
+    return _materialize_market_value_groups(groups)
 
 
 def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
@@ -698,6 +708,39 @@ def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
             "event_slug",
         ]
     ].sort_values("score", ascending=False).reset_index(drop=True)
+
+
+def top_alpha_empty_state_message(
+    joined_alpha_rows: pd.DataFrame | None,
+    filtered_mapped_alpha_rows: pd.DataFrame | None,
+    mapped_alpha_rows: pd.DataFrame | None,
+    diagnostics: dict[str, Any] | None = None,
+    min_liquidity: float = 0.0,
+    min_alpha_gap: float = 0.0,
+) -> str:
+    """Return the Summary tab reason when no top Polymarket alpha rows display."""
+    joined = joined_alpha_rows.copy() if joined_alpha_rows is not None else pd.DataFrame()
+    filtered_mapped = filtered_mapped_alpha_rows.copy() if filtered_mapped_alpha_rows is not None else pd.DataFrame()
+    mapped = mapped_alpha_rows.copy() if mapped_alpha_rows is not None else pd.DataFrame()
+    if not joined.empty or not filtered_mapped.empty:
+        return ""
+
+    if not mapped.empty:
+        filters = []
+        min_liquidity_value = coerce_float(min_liquidity, 0.0)
+        min_alpha_gap_value = coerce_float(min_alpha_gap, 0.0)
+        if min_liquidity_value > 0:
+            filters.append(f"liquidity >= {min_liquidity_value:g}")
+        if min_alpha_gap_value > 0:
+            filters.append(f"alpha gap >= {min_alpha_gap_value:g}c")
+        filter_text = f" ({', '.join(filters)})" if filters else ""
+        return f"No top alpha signals passed the current sidebar filters{filter_text}."
+
+    diagnostics = diagnostics or {}
+    reason = str(diagnostics.get("reason_no_alpha_rows", "") or "").strip()
+    if reason:
+        return reason
+    return "No fixture-specific Polymarket price rows are available for this selected match."
 
 
 def _competition_prefix(competition: str) -> str:
@@ -1122,8 +1165,17 @@ def _signal(alpha_gap: Any, confidence: str, has_price: bool) -> str:
 
 
 def _group_for_joined_row(row: pd.Series) -> str:
+    return _group_for_market_value_row(row)
+
+
+def _group_for_market_value_row(row: pd.Series, home: str = "", away: str = "") -> str:
     market = str(row.get("market", ""))
-    selection = str(row.get("selection", "")).lower()
+    selection_raw = str(row.get("selection", ""))
+    selection = selection_raw.lower()
+    home_key = _market_key(home)
+    away_key = _market_key(away)
+    selection_key = _market_key(selection_raw)
+
     if market == "Total" and "over" in selection:
         return "High Scoring"
     if market == "BTTS" and selection == "yes":
@@ -1132,11 +1184,23 @@ def _group_for_joined_row(row: pd.Series) -> str:
         return "Low Scoring"
     if market == "BTTS" and selection == "no":
         return "Low Scoring"
-    if market in {"1X2", "Handicap"}:
+    if market in {"1X2", "Double Chance", "Handicap"}:
         if "draw" in selection and "/" not in selection:
             return "Other Markets"
-        if "away" in selection or "/draw" in selection:
+        if (
+            selection == "away"
+            or "draw/" in selection
+            or (away_key and (selection_key == away_key or selection_key.startswith(f"{away_key} ")))
+            or (away_key and selection_key == f"draw {away_key}")
+        ):
             return "Result Away"
+        if (
+            selection == "home"
+            or "/draw" in selection
+            or (home_key and (selection_key == home_key or selection_key.startswith(f"{home_key} ")))
+            or (home_key and selection_key == f"{home_key} draw")
+        ):
+            return "Result Home"
         return "Result Home"
     return "Other Markets"
 
@@ -1159,6 +1223,73 @@ def _display_joined_row(row: pd.Series) -> dict[str, Any]:
         "Signal": row.get("signal", "No signal"),
         "Mapping confidence": row.get("mapping_confidence", "low"),
     }
+
+
+def _display_market_value_row(row: pd.Series) -> dict[str, Any]:
+    model_prob = coerce_float(row.get("model_prob"), float("nan"))
+    fair_odds_value = coerce_float(row.get("fair_odds"), float("nan"))
+    fair_price = coerce_float(row.get("fair_price_cents"), float("nan"))
+    market_odds = coerce_float(row.get("market_odds"), float("nan"))
+    market_price = coerce_float(row.get("market_price_cents"), float("nan"))
+    gap = coerce_float(row.get("alpha_gap_cents"), float("nan"))
+    ev = coerce_float(row.get("alpha_ev"), float("nan"))
+    signal = row.get("signal", "No price joined")
+    mapping_confidence = row.get("mapping_confidence", "")
+    return {
+        "Market": f"{row.get('market', '')}: {row.get('selection', '')}".strip(": "),
+        "Model probability": "" if pd.isna(model_prob) else f"{100 * model_prob:.1f}%",
+        "Fair odds / fair price": _fair_value_display(fair_odds_value, fair_price),
+        "Odds / Price": _odds_price_display(market_odds, market_price),
+        "EV / Alpha Gap": _edge_display(ev, gap),
+        "Score": row.get("score", 0.0),
+        "Signal": "No price joined" if pd.isna(signal) else signal,
+        "Mapping confidence": "" if pd.isna(mapping_confidence) else mapping_confidence,
+    }
+
+
+def _materialize_market_value_groups(groups: dict[str, list[dict[str, Any]]]) -> dict[str, pd.DataFrame]:
+    return {
+        name: pd.DataFrame(rows, columns=MARKET_VALUE_DISPLAY_COLUMNS)
+        if rows
+        else pd.DataFrame(columns=MARKET_VALUE_DISPLAY_COLUMNS)
+        for name, rows in groups.items()
+    }
+
+
+def _fair_value_display(fair_odds_value: Any, fair_price: Any) -> str:
+    has_odds = pd.notna(fair_odds_value)
+    has_price = pd.notna(fair_price)
+    if has_odds and has_price:
+        return f"{float(fair_odds_value):.2f} / {float(fair_price):.1f}c"
+    if has_odds:
+        return f"{float(fair_odds_value):.2f}"
+    if has_price:
+        return f"{float(fair_price):.1f}c"
+    return ""
+
+
+def _odds_price_display(market_odds: Any, market_price: Any) -> str:
+    has_odds = pd.notna(market_odds)
+    has_price = pd.notna(market_price)
+    if has_odds and has_price:
+        return f"{float(market_odds):.2f} / {float(market_price):.1f}c"
+    if has_odds:
+        return f"{float(market_odds):.2f}"
+    if has_price:
+        return f"{float(market_price):.1f}c"
+    return ""
+
+
+def _edge_display(ev: Any, gap: Any) -> str:
+    has_ev = pd.notna(ev)
+    has_gap = pd.notna(gap)
+    if has_ev and has_gap:
+        return f"{100 * float(ev):.1f}% / {float(gap):+.1f}c"
+    if has_ev:
+        return f"{100 * float(ev):.1f}%"
+    if has_gap:
+        return f"{float(gap):+.1f}c"
+    return ""
 
 
 def _market_types_found(df: pd.DataFrame) -> list[str]:

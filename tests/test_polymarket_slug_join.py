@@ -12,9 +12,11 @@ from src.polymarket_slug_join import (
     joined_market_groups,
     join_polymarket_prices_to_model_markets,
     load_polymarket_event_markets_by_slug,
+    market_value_groups,
     markets_tab_export_dataframe,
     polymarket_alpha_rows,
     resolve_polymarket_slug_for_fixture,
+    top_alpha_empty_state_message,
 )
 
 
@@ -240,6 +242,47 @@ def test_markets_tab_model_only_keeps_fair_odds_without_prices() -> None:
     assert diagnostics["reason_if_zero"] == "No Polymarket prices joined because no event slug was resolved."
 
 
+def test_market_value_groups_populate_model_rows_without_polymarket_event() -> None:
+    table, _diagnostics = build_markets_tab_joined_dataframe(
+        _model_markets(),
+        pd.DataFrame(),
+        {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+    )
+
+    groups = market_value_groups(table, "Uruguay", "Spain")
+
+    assert all(not groups[name].empty for name in ["High Scoring", "Low Scoring", "Result Home", "Result Away", "Other Markets"])
+    assert groups["High Scoring"]["Fair odds / fair price"].astype(str).str.strip().any()
+    assert groups["Result Home"]["Market"].str.contains("1X2: Home", regex=False).any()
+    assert groups["Result Away"]["Market"].str.contains("1X2: Away", regex=False).any()
+    assert groups["Other Markets"]["Market"].str.contains("1X2: Draw", regex=False).any()
+    assert groups["Result Home"]["Odds / Price"].eq("").all()
+    assert groups["Result Home"]["Signal"].eq("No price joined").all()
+
+
+def test_market_value_groups_bucket_actual_team_names_by_fixture_side() -> None:
+    model = pd.DataFrame(
+        [
+            {"market": "1X2", "selection": "Uruguay", "model_prob": 0.42, "fair_odds": 2.38},
+            {"market": "1X2", "selection": "Draw", "model_prob": 0.28, "fair_odds": 3.57},
+            {"market": "1X2", "selection": "Spain", "model_prob": 0.30, "fair_odds": 3.33},
+            {"market": "Double Chance", "selection": "Uruguay/Draw", "model_prob": 0.70, "fair_odds": 1.43},
+            {"market": "Double Chance", "selection": "Draw/Spain", "model_prob": 0.58, "fair_odds": 1.72},
+        ]
+    )
+    table, _diagnostics = build_markets_tab_joined_dataframe(
+        model,
+        pd.DataFrame(),
+        {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+    )
+
+    groups = market_value_groups(table, "Uruguay", "Spain")
+
+    assert set(groups["Result Home"]["Market"]) == {"1X2: Uruguay", "Double Chance: Uruguay/Draw"}
+    assert set(groups["Result Away"]["Market"]) == {"1X2: Spain", "Double Chance: Draw/Spain"}
+    assert set(groups["Other Markets"]["Market"]) == {"1X2: Draw"}
+
+
 def test_markets_tab_joined_moneyline_populates_market_odds_alpha_ev_source_and_timestamp() -> None:
     joined = join_polymarket_prices_to_model_markets(_model_markets().head(3), _event_markets(), "Uruguay", "Spain")
     table, diagnostics = build_markets_tab_joined_dataframe(
@@ -293,6 +336,48 @@ def test_markets_tab_uses_mapped_polymarket_alpha_when_event_join_is_empty() -> 
     assert diagnostics["mapped_alpha_rows"] == 1
     assert diagnostics["rows_with_market_odds"] == 1
     assert diagnostics["reason_if_zero"] == ""
+
+
+def test_top_alpha_empty_state_reports_filters_when_mapped_rows_are_filtered_out() -> None:
+    mapped_alpha = pd.DataFrame(
+        [
+            {
+                "market_id": "PM-URY",
+                "market": "1X2",
+                "selection": "Uruguay",
+                "polymarket_price_cents": 35.0,
+                "alpha_gap_cents": 2.0,
+            }
+        ]
+    )
+
+    message = top_alpha_empty_state_message(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        mapped_alpha,
+        {"reason_no_alpha_rows": "No Polymarket event resolved for this fixture."},
+        min_liquidity=100.0,
+        min_alpha_gap=5.0,
+    )
+
+    assert message == "No top alpha signals passed the current sidebar filters (liquidity >= 100, alpha gap >= 5c)."
+
+
+def test_top_alpha_empty_state_uses_polymarket_diagnostic_when_no_prices_exist() -> None:
+    message = top_alpha_empty_state_message(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        {"reason_no_alpha_rows": "Polymarket event resolved, but no nested market prices were loaded."},
+    )
+
+    assert message == "Polymarket event resolved, but no nested market prices were loaded."
+
+
+def test_top_alpha_empty_state_has_generic_selected_match_price_message() -> None:
+    message = top_alpha_empty_state_message(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {})
+
+    assert message == "No fixture-specific Polymarket price rows are available for this selected match."
 
 
 def test_markets_tab_export_dataframe_equals_display_dataframe() -> None:

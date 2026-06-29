@@ -66,10 +66,11 @@ from src.polymarket_slug_join import (
     build_polymarket_alpha_for_fixture,
     build_polymarket_sports_slug_candidates,
     build_markets_tab_joined_dataframe,
-    joined_market_groups,
     load_polymarket_event_markets_by_slug,
+    market_value_groups,
     markets_tab_export_dataframe,
     polymarket_alpha_rows,
+    top_alpha_empty_state_message,
 )
 from src.postmortem import (
     build_postmortem_action_plan,
@@ -1678,7 +1679,7 @@ for label in selected_labels:
     expected_goals_df = build_expected_goals_df(result)
     rating_percentiles = calculate_team_rating_percentiles(teams, result["home"], result["away"])
     climate_factors = build_climate_factor_table(result, venue_env)
-    market_groups = joined_market_groups(joined_polymarket_markets)
+    market_groups = market_value_groups(markets_tab_df, result["home"], result["away"])
 
     st.divider()
     st.header(f"{result['home']} vs {result['away']}")
@@ -1833,7 +1834,16 @@ for label in selected_labels:
         if not top_mapped_alpha_signals.empty:
             top_mapped_alpha_signals = top_mapped_alpha_signals.sort_values("alpha_gap_cents", ascending=False, na_position="last").head(10)
         if top_alpha_signals.empty and top_mapped_alpha_signals.empty:
-            st.info("No Top Alpha Signals because no joined Polymarket price rows are available.")
+            st.info(
+                top_alpha_empty_state_message(
+                    top_alpha_signals,
+                    top_mapped_alpha_signals,
+                    polymarket_alpha,
+                    polymarket_alpha_diagnostics,
+                    min_liquidity=min_liquidity,
+                    min_alpha_gap=min_alpha_gap,
+                )
+            )
             display_dataframe(
                 pd.DataFrame(
                     [
@@ -1842,6 +1852,10 @@ for label in selected_labels:
                             "resolved_slug": polymarket_alpha_diagnostics.get("resolved_slug", ""),
                             "event_markets_loaded_count": polymarket_alpha_diagnostics.get("event_markets_loaded_count", 0),
                             "joined_markets_count": polymarket_alpha_diagnostics.get("joined_markets_count", 0),
+                            "mapped_alpha_rows_count": len(polymarket_alpha),
+                            "mapped_alpha_rows_after_filters": len(filtered_polymarket_alpha),
+                            "min_liquidity": min_liquidity,
+                            "min_alpha_gap_cents": min_alpha_gap,
                             "reason_no_alpha_rows": polymarket_alpha_diagnostics.get("reason_no_alpha_rows", ""),
                         }
                     ]
@@ -2005,22 +2019,19 @@ for label in selected_labels:
         markets_loaded_count = len(resolved_event_markets)
         markets_joined_count = int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0
         if slug_resolution.get("resolution_status") != "resolved":
-            st.warning("No Polymarket event resolved for this fixture.")
+            st.info("No Polymarket event resolved; showing model fair values without Polymarket prices.")
         elif markets_loaded_count == 0:
-            st.warning("Polymarket event resolved, but no nested market prices were loaded.")
+            st.info("Polymarket event resolved, but no nested market prices were loaded. Showing model fair values without prices.")
         elif markets_joined_count == 0:
-            st.warning("Polymarket event resolved, but no matching market prices were found for the local market groups.")
+            st.info("Polymarket event resolved, but no matching market prices were found. Showing model fair values without prices.")
         for group_name, group_df in market_groups.items():
             st.markdown(f"**{group_name}**")
             if group_df.empty:
-                if slug_resolution.get("resolution_status") != "resolved":
-                    st.caption("No Polymarket event resolved for this fixture.")
-                else:
-                    st.caption("Polymarket event resolved, but no matching market prices were found for this market group.")
+                st.caption("No model market rows for this group.")
             else:
                 display_dataframe(group_df, hide_index=True, width="stretch")
                 if "Odds / Price" in group_df.columns and not group_df["Odds / Price"].astype(str).str.strip().any():
-                    st.caption("Polymarket event resolved, but no matching market prices were found for this market group.")
+                    st.caption("No Polymarket price joined for this group; fair values are model-only.")
 
     with tabs[2]:
         mat = result["score_matrix"].copy()
