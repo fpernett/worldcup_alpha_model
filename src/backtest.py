@@ -12,6 +12,7 @@ from src.backtest_diagnostics import (
     audit_backtest_team_aliases,
     build_backtest_qa_summary,
 )
+from src.completed_results import completed_results_to_backtest_matches, load_completed_results
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches
 from src.model import ModelConfig, run_match_model
 from src.model_policy import get_current_model_policy, policy_export_fields
@@ -128,7 +129,10 @@ def load_completed_matches_for_backtest(
     The current historical layer stores national-team results in long format,
     so those rows are deduplicated into home/away match rows here.
     """
+    completed_results, completed_diagnostics = load_completed_results(start_date, end_date, teams=teams, force_refresh=False, persist=True)
+    completed_results_matches = completed_results_to_backtest_matches(completed_results)
     frames = [
+        completed_results_matches,
         _completed_matches_from_fixtures(),
         _completed_matches_from_historical(load_historical_matches(use_cache=False)),
     ]
@@ -139,6 +143,9 @@ def load_completed_matches_for_backtest(
     completed = _normalise_completed_matches(completed)
     completed = _filter_completed_matches(completed, start_date, end_date, teams)
     completed = _deduplicate_completed_matches(completed)
+    completed.attrs["completed_results_status"] = completed_diagnostics.get("status", "")
+    completed.attrs["completed_results_provider"] = completed_diagnostics.get("provider_checked", "")
+    completed.attrs["completed_results_rows"] = completed_diagnostics.get("completed_rows_loaded", 0)
     return completed[COMPLETED_MATCH_COLUMNS].reset_index(drop=True)
 
 

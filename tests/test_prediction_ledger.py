@@ -321,6 +321,181 @@ def test_auto_result_import_uses_selected_fixture_match_id(tmp_path) -> None:
     assert results.iloc[0]["actual_result"] == "home_win"
 
 
+def test_auto_result_import_refreshes_provider_rows_for_brazil_japan_like_fixture(monkeypatch, tmp_path) -> None:
+    provider_rows = pd.DataFrame(
+        [
+            {
+                "provider": "football-data.org",
+                "provider_match_id": "provider_bra_jpn",
+                "provider_kickoff_utc": "2026-06-29T17:00:00+00:00",
+                "date_utc": "2026-06-29",
+                "competition": "FIFA World Cup",
+                "group": "Round of 32",
+                "home": "Brazil",
+                "away": "Japan",
+                "home_score_90": 1,
+                "away_score_90": 0,
+                "score_source": "score.fullTime",
+                "score_semantics": "90-minute regular time",
+                "is_completed": 1,
+                "source": "football-data.org",
+                "last_updated": "2026-06-29T21:15:00+00:00",
+            }
+        ]
+    )
+    fixture = _fixtures("2026-06-29", "17:00").iloc[0].copy()
+    fixture["match_id"] = "wc2026_76"
+    fixture["group"] = "Round of 32"
+    fixture["home"] = "Brazil"
+    fixture["away"] = "Japan"
+    monkeypatch.setattr(
+        prediction_ledger,
+        "refresh_completed_results_for_fixture",
+        lambda *_args, **_kwargs: (
+            provider_rows,
+            {
+                "status": "success",
+                "provider_checked": "football-data.org /matches?status=FINISHED",
+                "date_window_checked": "2026-06-28 to 2026-06-30",
+                "cache_path_checked": "data/cache/completed_results_latest.csv",
+                "local_path_checked": "data/completed_results.csv",
+                "completed_rows_loaded": 1,
+                "last_updated": "2026-06-29T21:15:00+00:00",
+            },
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.import_completed_result_for_fixture_if_ready(
+        fixture,
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-29T22:01:00+00:00",
+    )
+
+    assert diagnostics["status"] == "imported"
+    assert diagnostics["provider_checked"] == "football-data.org /matches?status=FINISHED"
+    assert diagnostics["score_semantics"] == "90-minute regular time"
+    assert diagnostics["imported_score"] == "1-0"
+    row = results.iloc[0]
+    assert row["match_id"] == "wc2026_76"
+    assert row["actual_result"] == "home_win"
+
+
+def test_auto_result_import_matches_nearby_reversed_provider_fixture(tmp_path) -> None:
+    completed = pd.DataFrame(
+        [
+            {
+                "match_id": "provider_external_id",
+                "date_utc": "2026-06-21",
+                "competition": "World Cup",
+                "home": "Beta",
+                "away": "Alpha",
+                "home_goals": 0,
+                "away_goals": 2,
+            }
+        ]
+    )
+
+    results, diagnostics = prediction_ledger.import_completed_result_for_fixture_if_ready(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        completed_matches_df=completed,
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-22T22:01:00+00:00",
+    )
+
+    assert diagnostics["status"] == "imported"
+    row = results.iloc[0]
+    assert row["match_id"] == "m1"
+    assert row["home"] == "Alpha"
+    assert row["away"] == "Beta"
+    assert int(row["home_goals"]) == 2
+    assert int(row["away_goals"]) == 0
+    assert row["actual_result"] == "home_win"
+
+
+def test_auto_result_import_rejects_one_day_mismatch_with_incompatible_competition(tmp_path) -> None:
+    completed = pd.DataFrame(
+        [
+            {
+                "match_id": "friendly_external_id",
+                "date_utc": "2026-06-21",
+                "competition": "Friendly",
+                "home": "Beta",
+                "away": "Alpha",
+                "home_goals": 0,
+                "away_goals": 2,
+            }
+        ]
+    )
+
+    results, diagnostics = prediction_ledger.import_completed_result_for_fixture_if_ready(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        completed_matches_df=completed,
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-22T22:01:00+00:00",
+    )
+
+    assert results.empty
+    assert diagnostics["status"] == "completed_rows_exist_no_fixture_match"
+    assert diagnostics["completed_rows_loaded"] == 1
+    assert diagnostics["nearest_candidate_rows"][0]["competition"] == "Friendly"
+
+
+def test_results_import_prefers_regular_time_scores_for_polymarket_markets(tmp_path) -> None:
+    completed = pd.DataFrame(
+        [
+            {
+                "match_id": "knockout_1",
+                "date_utc": "2026-06-22",
+                "competition": "World Cup",
+                "home": "Alpha",
+                "away": "Beta",
+                "home_goals_90": 1,
+                "away_goals_90": 1,
+                "home_goals": 2,
+                "away_goals": 1,
+            }
+        ]
+    )
+
+    results = prediction_ledger.import_completed_results(completed, path=tmp_path / "results_ledger.csv")
+
+    row = results.iloc[0]
+    assert int(row["home_goals"]) == 1
+    assert int(row["away_goals"]) == 1
+    assert row["actual_result"] == "draw"
+
+
+def test_auto_result_import_reports_completed_source_empty(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        prediction_ledger,
+        "refresh_completed_results_for_fixture",
+        lambda *_args, **_kwargs: (
+            pd.DataFrame(),
+            {
+                "status": "completed_source_empty",
+                "provider_checked": "football-data.org /matches?status=FINISHED",
+                "date_window_checked": "2026-06-21 to 2026-06-23",
+                "cache_path_checked": "data/cache/completed_results_latest.csv",
+                "local_path_checked": "data/completed_results.csv",
+                "completed_rows_loaded": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.import_completed_result_for_fixture_if_ready(
+        _fixtures("2026-06-22", "18:00").iloc[0],
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-22T22:01:00+00:00",
+    )
+
+    assert results.empty
+    assert diagnostics["status"] == "completed_source_empty"
+    assert diagnostics["provider_checked"] == "football-data.org /matches?status=FINISHED"
+    assert diagnostics["cache_path_checked"] == "data/cache/completed_results_latest.csv"
+
+
 def test_required_prediction_ledger_columns_exist() -> None:
     required = {
         "prediction_id",

@@ -253,24 +253,55 @@ def automation_status_display(snapshot_diagnostics: dict, result_diagnostics: di
     snapshot_written = int(snapshot_diagnostics.get("predictions_written", 0) or 0)
     snapshot_status = "saved" if snapshot_written else _first_skip_code(snapshot_diagnostics)
     result_status = str(result_diagnostics.get("status", "") or "")
-    return pd.DataFrame(
-        [
+    rows = [
+        {
+            "automation": "Pre-kickoff prediction snapshot",
+            "status": snapshot_status,
+            "rows_changed": snapshot_written,
+            "detail": _snapshot_detail(snapshot_diagnostics),
+            "target": snapshot_diagnostics.get("output_path", "data/prediction_ledger.csv"),
+        },
+        {
+            "automation": "Completed result import",
+            "status": result_status,
+            "rows_changed": int(result_diagnostics.get("rows_imported", 0) or 0),
+            "detail": result_diagnostics.get("message", ""),
+            "target": "data/results_ledger.csv",
+        },
+        {
+            "automation": "Completed result source",
+            "status": str(result_diagnostics.get("completed_source_status", "") or result_status),
+            "rows_changed": int(result_diagnostics.get("completed_rows_loaded", 0) or 0),
+            "detail": (
+                f"provider={result_diagnostics.get('provider_checked', '')}; "
+                f"window={result_diagnostics.get('date_window_checked', '')}; "
+                f"updated={result_diagnostics.get('completed_last_updated', '')}"
+            ),
+            "target": result_diagnostics.get("local_path_checked", "") or result_diagnostics.get("cache_path_checked", ""),
+        },
+    ]
+    if result_diagnostics.get("imported_score") or result_diagnostics.get("score_semantics"):
+        rows.append(
             {
-                "automation": "Pre-kickoff prediction snapshot",
-                "status": snapshot_status,
-                "rows_changed": snapshot_written,
-                "detail": _snapshot_detail(snapshot_diagnostics),
-                "target": snapshot_diagnostics.get("output_path", "data/prediction_ledger.csv"),
-            },
-            {
-                "automation": "Completed result import",
-                "status": result_status,
+                "automation": "Imported score semantics",
+                "status": str(result_diagnostics.get("score_semantics", "") or "90-minute regular time"),
                 "rows_changed": int(result_diagnostics.get("rows_imported", 0) or 0),
-                "detail": result_diagnostics.get("message", ""),
-                "target": "data/results_ledger.csv",
-            },
-        ]
-    )
+                "detail": f"score={result_diagnostics.get('imported_score', '')}",
+                "target": "regular-time settlement",
+            }
+        )
+    nearest = result_diagnostics.get("nearest_candidate_rows", []) or []
+    if nearest and result_status == "completed_rows_exist_no_fixture_match":
+        rows.append(
+            {
+                "automation": "Nearest completed-result candidate",
+                "status": "not_matched",
+                "rows_changed": len(nearest),
+                "detail": str(nearest[0]),
+                "target": "completed source diagnostics",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _first_skip_code(snapshot_diagnostics: dict) -> str:
@@ -2442,8 +2473,20 @@ for label in selected_labels:
         )
         st.caption(
             "Selected upcoming matches are auto-saved to data/prediction_ledger.csv with a 60-minute duplicate guard. "
-            "Completed results are checked automatically after kickoff + 4 hours, which allows for extra time, penalties, and a one-hour reporting delay."
+            "Completed results are checked automatically after kickoff + 4 hours; Polymarket match outcomes use regular time plus stoppage, not extra time or penalties."
         )
+        if st.button("Refresh completed results", key=f"refresh_completed_results_{match['match_id']}"):
+            auto_results_ledger, auto_result_diagnostics = import_completed_result_for_fixture_if_ready(
+                match,
+                path=RESULTS_LEDGER_PATH,
+                result_source="manual_dashboard_completed_results_refresh",
+            )
+            st.cache_data.clear()
+            display_dataframe(
+                automation_status_display(auto_snapshot_diagnostics, auto_result_diagnostics),
+                hide_index=True,
+                width="stretch",
+            )
         allow_post_kickoff_snapshot = st.checkbox(
             "Allow manual post-kickoff snapshot for diagnostics",
             value=False,

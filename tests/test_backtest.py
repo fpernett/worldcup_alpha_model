@@ -48,6 +48,7 @@ def _long_historical_rows() -> pd.DataFrame:
 def test_completed_match_loader_deduplicates_long_format(monkeypatch) -> None:
     monkeypatch.setattr(backtest, "_completed_matches_from_fixtures", lambda: pd.DataFrame(columns=backtest.COMPLETED_MATCH_COLUMNS))
     monkeypatch.setattr(backtest, "load_historical_matches", lambda use_cache=False: _long_historical_rows())
+    monkeypatch.setattr(backtest, "load_completed_results", lambda *_args, **_kwargs: (pd.DataFrame(), {}))
 
     completed = backtest.load_completed_matches_for_backtest()
 

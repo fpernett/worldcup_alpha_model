@@ -874,6 +874,11 @@ Required result columns:
 match_id,home,away,home_goals,away_goals,result_home_win,result_draw,result_away_win,over_2_5,under_2_5,btts_yes,btts_no,completed,result_source,last_updated
 ```
 
+For Polymarket football match markets, result rows should represent regular
+time plus stoppage only. If a source exposes both 90-minute and final
+extra-time scores, the prediction/result ledger importer uses the 90-minute
+columns for 1X2/win, totals, BTTS, and backtesting outcomes.
+
 The **Backtesting** tab can load both logs and report simple Brier score, log loss, mean alpha gap, hit rate by signal strength, and calibration buckets when completed results exist. These diagnostics are opt-in so normal match selection does not parse heavy logs or run expensive backtests automatically.
 
 If `data/prediction_log.csv` becomes unreadable because old and new dashboard schemas were appended into the same file, quarantine and rebuild it with:

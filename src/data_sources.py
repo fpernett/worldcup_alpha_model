@@ -14,6 +14,7 @@ from src.cache import (
     write_dataframe_cache,
     write_json_cache,
 )
+from src.completed_results import extract_regular_time_score
 from src.config import DATA_DIR, SOURCE_API, SOURCE_CACHE, SOURCE_LOCAL, get_config
 from src.historical_data import build_historical_matches_from_results, load_historical_matches, merge_and_save_historical_matches
 from src.odds import ODDS_COLUMNS, load_market_odds, update_market_odds_for_fixtures
@@ -630,9 +631,7 @@ def _normalise_football_data_results(payload: dict[str, Any]) -> pd.DataFrame:
         kickoff = pd.to_datetime(match.get("utcDate"), utc=True, errors="coerce")
         if pd.isna(kickoff):
             continue
-        score = (match.get("score") or {}).get("fullTime") or {}
-        home_goals = score.get("home")
-        away_goals = score.get("away")
+        home_goals, away_goals, _score_source, _score_semantics = extract_regular_time_score(match)
         if home_goals is None or away_goals is None:
             continue
         home = _team_name(match.get("homeTeam", {}))

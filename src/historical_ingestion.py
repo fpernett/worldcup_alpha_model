@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from src.cache import set_source_attrs, utc_now_iso, write_dataframe_cache
+from src.completed_results import extract_regular_time_score
 from src.config import DATA_DIR, SOURCE_API, SOURCE_CACHE, SOURCE_LOCAL
 from src.football_api import fetch_finished_matches
 from src.historical_data import HISTORICAL_MATCH_COLUMNS, load_historical_matches, normalise_historical_matches
@@ -186,13 +187,7 @@ def _match_payload_to_result_row(match: dict[str, Any]) -> dict[str, Any] | None
     kickoff = pd.to_datetime(match.get("utcDate") or match.get("date_utc"), utc=True, errors="coerce")
     if pd.isna(kickoff):
         return None
-    score = match.get("score") or {}
-    full_time = score.get("fullTime") if isinstance(score, dict) else {}
-    if not isinstance(full_time, dict):
-        full_time = {}
-
-    home_goals = match.get("home_goals", full_time.get("home"))
-    away_goals = match.get("away_goals", full_time.get("away"))
+    home_goals, away_goals, _score_source, _score_semantics = extract_regular_time_score(match)
     if home_goals is None or away_goals is None:
         return None
 

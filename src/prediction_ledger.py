@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, is_dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from src.backtest import classify_actual_result, load_completed_matches_for_backtest
+from src.completed_results import (
+    COMPLETED_RESULTS_PATH,
+    completed_results_to_backtest_matches,
+    refresh_completed_results_for_fixture,
+)
 from src.config import DATA_DIR
 from src.model import ModelConfig, run_match_model, score_matrix
 from src.model_policy import get_current_model_policy
@@ -69,6 +75,24 @@ RESULTS_LEDGER_COLUMNS = [
 
 DEFAULT_AUTO_SNAPSHOT_MIN_INTERVAL_MINUTES = 60
 DEFAULT_RESULT_READY_DELAY_HOURS = 4.0
+RESULT_IMPORT_DATE_TOLERANCE_DAYS = 1
+
+HOME_REGULAR_TIME_GOAL_COLUMNS = [
+    "home_goals_90",
+    "home_score_90",
+    "regular_time_home_goals",
+    "regular_time_home_score",
+    "home_goals_regular",
+    "home_goals",
+]
+AWAY_REGULAR_TIME_GOAL_COLUMNS = [
+    "away_goals_90",
+    "away_score_90",
+    "regular_time_away_goals",
+    "regular_time_away_score",
+    "away_goals_regular",
+    "away_goals",
+]
 
 
 def load_prediction_ledger(path: str | Path = PREDICTION_LEDGER_PATH) -> pd.DataFrame:
@@ -343,9 +367,10 @@ def import_completed_result_for_fixture_if_ready(
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Import one selected fixture result after a conservative post-game delay.
 
-    The app waits four hours after kickoff by default: roughly three hours for
-    regulation, extra time, penalties, and stoppage, plus one hour before trying
-    to pull completed-result data.
+    The app waits four hours after kickoff by default. Imported market outcomes
+    use regulation time plus stoppage when a completed-result source exposes
+    90-minute score columns, because Polymarket match markets settle on the
+    regular-time result rather than extra time or penalties.
     """
     fixture = pd.Series(fixture_row).copy()
     path = Path(path)
@@ -370,15 +395,32 @@ def import_completed_result_for_fixture_if_ready(
     if not existing.empty and "match_id" in existing.columns and (existing["match_id"].astype(str) == match_id).any():
         return existing, _result_import_diagnostics("already_imported", match_id, ready_at.isoformat(), 0, "Result already exists in the ledger.")
 
-    completed = completed_matches_df.copy() if completed_matches_df is not None else _completed_candidates_for_fixture(fixture)
+    if completed_matches_df is not None:
+        completed = completed_matches_df.copy()
+        completed_source_diagnostics: dict[str, Any] = {
+            "status": "provided_completed_matches",
+            "provider_checked": "provided dataframe",
+            "completed_rows_loaded": len(completed),
+        }
+    else:
+        completed, completed_source_diagnostics = _completed_candidates_for_fixture(fixture)
     candidate = _completed_result_for_fixture(fixture, completed)
     if candidate.empty:
+        completed_rows_loaded = int(completed_source_diagnostics.get("completed_rows_loaded", len(completed)) or 0)
+        status = "completed_source_empty" if completed_rows_loaded <= 0 else "completed_rows_exist_no_fixture_match"
+        message = (
+            "No completed-result source rows were available for this fixture window."
+            if status == "completed_source_empty"
+            else "Completed-result rows were loaded, but none matched this fixture."
+        )
         return existing, _result_import_diagnostics(
-            "result_not_found",
+            status,
             match_id,
             ready_at.isoformat(),
             0,
-            "No completed-result row matched this fixture yet.",
+            message,
+            source_diagnostics=completed_source_diagnostics,
+            candidate_rows=_nearest_completed_candidates(fixture, completed),
         )
 
     result_row = candidate.iloc[0].copy()
@@ -387,7 +429,23 @@ def import_completed_result_for_fixture_if_ready(
         if col in fixture.index:
             result_row[col] = fixture.get(col, result_row.get(col, ""))
     combined = import_completed_results(pd.DataFrame([result_row]), path=path, result_source=result_source)
-    return combined, _result_import_diagnostics("imported", match_id, ready_at.isoformat(), 1, "Completed result imported.")
+    imported_score = f"{int(coerce_float(result_row.get('home_goals'), 0))}-{int(coerce_float(result_row.get('away_goals'), 0))}"
+    return combined, _result_import_diagnostics(
+        "imported",
+        match_id,
+        ready_at.isoformat(),
+        1,
+        "Completed result imported.",
+        source_diagnostics=completed_source_diagnostics,
+        candidate_rows=_nearest_completed_candidates(fixture, candidate),
+        matched_row={
+            "home": result_row.get("home", ""),
+            "away": result_row.get("away", ""),
+            "score": imported_score,
+            "score_semantics": str(result_row.get("score_semantics", "") or "90-minute regular time"),
+            "score_source": str(result_row.get("score_source", "") or ""),
+        },
+    )
 
 
 def import_completed_results(
@@ -413,8 +471,8 @@ def import_completed_results(
     rows = []
     now = utc_now_iso()
     for _, match in matches.iterrows():
-        home_goals = coerce_float(match.get("home_goals"), 0.0)
-        away_goals = coerce_float(match.get("away_goals"), 0.0)
+        home_goals = coerce_float(_first_present(match, HOME_REGULAR_TIME_GOAL_COLUMNS), 0.0)
+        away_goals = coerce_float(_first_present(match, AWAY_REGULAR_TIME_GOAL_COLUMNS), 0.0)
         total = home_goals + away_goals
         rows.append(
             {
@@ -517,11 +575,33 @@ def _fresh_existing_prediction(
     return bool(latest >= now - pd.Timedelta(minutes=int(min_interval_minutes)))
 
 
-def _completed_candidates_for_fixture(fixture: pd.Series) -> pd.DataFrame:
+def _completed_candidates_for_fixture(fixture: pd.Series) -> tuple[pd.DataFrame, dict[str, Any]]:
     date_label = _date_label(fixture.get("date_utc"))
+    fixture_date = pd.to_datetime(date_label, errors="coerce")
+    if pd.isna(fixture_date):
+        return pd.DataFrame(), {"status": "invalid_fixture_date", "completed_rows_loaded": 0}
+    start = (fixture_date.date() - timedelta(days=RESULT_IMPORT_DATE_TOLERANCE_DAYS)).isoformat()
+    end = (fixture_date.date() + timedelta(days=RESULT_IMPORT_DATE_TOLERANCE_DAYS)).isoformat()
     teams = [str(fixture.get("home", "") or ""), str(fixture.get("away", "") or "")]
     teams = [team for team in teams if team.strip()]
-    return load_completed_matches_for_backtest(start_date=date_label, end_date=date_label, teams=teams or None)
+    refreshed, diagnostics = refresh_completed_results_for_fixture(
+        fixture,
+        window_days=RESULT_IMPORT_DATE_TOLERANCE_DAYS,
+        force_refresh=True,
+        path=COMPLETED_RESULTS_PATH,
+    )
+    completed_matches = completed_results_to_backtest_matches(refreshed)
+    fallback_matches = load_completed_matches_for_backtest(start_date=start, end_date=end, teams=teams or None)
+    frames = [df for df in [completed_matches, fallback_matches] if df is not None and not df.empty]
+    if frames:
+        combined = pd.concat(frames, ignore_index=True)
+        combined = combined.drop_duplicates(subset=["match_id", "date_utc", "home", "away"], keep="first")
+    else:
+        combined = pd.DataFrame()
+    diagnostics["completed_rows_loaded"] = int(len(combined))
+    diagnostics["completed_rows_from_refresh"] = int(len(completed_matches))
+    diagnostics["completed_rows_from_fallback"] = int(len(fallback_matches))
+    return combined, diagnostics
 
 
 def _completed_result_for_fixture(fixture: pd.Series, completed_matches_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -535,15 +615,27 @@ def _completed_result_for_fixture(fixture: pd.Series, completed_matches_df: pd.D
     if fixture_match_id:
         by_id = completed.loc[completed["match_id"].astype(str) == fixture_match_id].copy()
         if not by_id.empty:
-            return by_id.head(1)
+            return _orient_completed_match_to_fixture(fixture, by_id).head(1)
     date_label = _date_label(fixture.get("date_utc"))
+    fixture_date = pd.to_datetime(date_label, errors="coerce")
     home_key = _team_key(fixture.get("home", ""))
     away_key = _team_key(fixture.get("away", ""))
     home = completed["home"].map(_team_key)
     away = completed["away"].map(_team_key)
-    date = completed["date_utc"].map(_date_label)
-    by_fixture = completed.loc[(date == date_label) & (home == home_key) & (away == away_key)].copy()
-    return by_fixture.head(1)
+    same_order = (home == home_key) & (away == away_key)
+    reverse_order = (home == away_key) & (away == home_key)
+    if not home_key or not away_key:
+        return pd.DataFrame()
+    date_delta = _date_delta_days(completed["date_utc"], fixture_date)
+    competition_ok = completed.apply(lambda row: _competition_compatible(fixture.get("competition", ""), row.get("competition", "")), axis=1)
+    by_fixture = completed.loc[(same_order | reverse_order) & competition_ok & (date_delta <= RESULT_IMPORT_DATE_TOLERANCE_DAYS)].copy()
+    if by_fixture.empty:
+        return by_fixture
+    by_fixture["_date_delta"] = date_delta.loc[by_fixture.index]
+    by_fixture["_same_order"] = same_order.loc[by_fixture.index].astype(int)
+    by_fixture = by_fixture.sort_values(["_date_delta", "_same_order"], ascending=[True, False])
+    by_fixture = by_fixture.drop(columns=["_date_delta", "_same_order"], errors="ignore")
+    return _orient_completed_match_to_fixture(fixture, by_fixture).head(1)
 
 
 def _result_import_diagnostics(
@@ -552,13 +644,30 @@ def _result_import_diagnostics(
     ready_after_utc: str,
     rows_imported: int,
     message: str,
+    source_diagnostics: dict[str, Any] | None = None,
+    candidate_rows: list[dict[str, Any]] | None = None,
+    matched_row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    source_diagnostics = source_diagnostics or {}
     return {
         "status": status,
         "match_id": match_id,
         "ready_after_utc": ready_after_utc,
         "rows_imported": int(rows_imported),
         "message": message,
+        "provider_checked": source_diagnostics.get("provider_checked", ""),
+        "date_window_checked": source_diagnostics.get("date_window_checked", ""),
+        "cache_path_checked": source_diagnostics.get("cache_path_checked", ""),
+        "local_path_checked": source_diagnostics.get("local_path_checked", ""),
+        "completed_rows_loaded": int(source_diagnostics.get("completed_rows_loaded", 0) or 0),
+        "completed_rows_from_refresh": int(source_diagnostics.get("completed_rows_from_refresh", 0) or 0),
+        "completed_rows_from_fallback": int(source_diagnostics.get("completed_rows_from_fallback", 0) or 0),
+        "completed_source_status": source_diagnostics.get("status", ""),
+        "completed_last_updated": source_diagnostics.get("last_updated", ""),
+        "score_semantics": (matched_row or {}).get("score_semantics", ""),
+        "imported_score": (matched_row or {}).get("score", ""),
+        "matched_row": matched_row or {},
+        "nearest_candidate_rows": candidate_rows or [],
     }
 
 
@@ -569,6 +678,91 @@ def _date_label(value: Any) -> str:
 
 def _team_key(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().replace("-", " ").split())
+
+
+def _competition_compatible(fixture_competition: Any, candidate_competition: Any) -> bool:
+    fixture_key = _team_key(fixture_competition)
+    candidate_key = _team_key(candidate_competition)
+    if not fixture_key or not candidate_key:
+        return True
+    if fixture_key == candidate_key:
+        return True
+    if "world cup" in fixture_key and "world cup" in candidate_key:
+        return True
+    return fixture_key in candidate_key or candidate_key in fixture_key
+
+
+def _date_delta_days(values: pd.Series, fixture_date: pd.Timestamp) -> pd.Series:
+    if pd.isna(fixture_date):
+        return pd.Series([9999] * len(values), index=values.index)
+    dates = pd.to_datetime(values.map(_date_label), errors="coerce")
+    return (dates - fixture_date).abs().dt.days.fillna(9999).astype(int)
+
+
+def _nearest_completed_candidates(fixture: pd.Series, completed: pd.DataFrame | None, limit: int = 5) -> list[dict[str, Any]]:
+    if completed is None or completed.empty:
+        return []
+    out = completed.copy()
+    for col in ["date_utc", "home", "away", "home_goals", "away_goals", "competition"]:
+        if col not in out.columns:
+            out[col] = ""
+    fixture_date = pd.to_datetime(_date_label(fixture.get("date_utc")), errors="coerce")
+    out["_date_delta"] = _date_delta_days(out["date_utc"], fixture_date)
+    fixture_teams = {_team_key(fixture.get("home", "")), _team_key(fixture.get("away", ""))}
+    out["_team_overlap"] = out.apply(
+        lambda row: len(fixture_teams & {_team_key(row.get("home", "")), _team_key(row.get("away", ""))}),
+        axis=1,
+    )
+    out = out.sort_values(["_team_overlap", "_date_delta"], ascending=[False, True]).head(limit)
+    rows = []
+    for _, row in out.iterrows():
+        rows.append(
+            {
+                "date_utc": str(row.get("date_utc", "") or ""),
+                "competition": str(row.get("competition", "") or ""),
+                "home": str(row.get("home", "") or ""),
+                "away": str(row.get("away", "") or ""),
+                "score": f"{int(coerce_float(row.get('home_goals'), 0))}-{int(coerce_float(row.get('away_goals'), 0))}",
+                "date_delta_days": int(row.get("_date_delta", 9999)),
+                "team_overlap": int(row.get("_team_overlap", 0)),
+            }
+        )
+    return rows
+
+
+def _orient_completed_match_to_fixture(fixture: pd.Series, completed: pd.DataFrame) -> pd.DataFrame:
+    if completed is None or completed.empty:
+        return pd.DataFrame()
+    out = completed.copy()
+    home_key = _team_key(fixture.get("home", ""))
+    away_key = _team_key(fixture.get("away", ""))
+    if not home_key or not away_key:
+        return out
+    for idx, row in out.iterrows():
+        row_home = _team_key(row.get("home", ""))
+        row_away = _team_key(row.get("away", ""))
+        home_goals = _first_present(row, HOME_REGULAR_TIME_GOAL_COLUMNS)
+        away_goals = _first_present(row, AWAY_REGULAR_TIME_GOAL_COLUMNS)
+        if row_home == away_key and row_away == home_key:
+            out.at[idx, "home"] = fixture.get("home", row.get("away", ""))
+            out.at[idx, "away"] = fixture.get("away", row.get("home", ""))
+            out.at[idx, "home_goals"] = away_goals
+            out.at[idx, "away_goals"] = home_goals
+        else:
+            out.at[idx, "home_goals"] = home_goals
+            out.at[idx, "away_goals"] = away_goals
+    return out
+
+
+def _first_present(row: pd.Series | dict[str, Any], columns: list[str]) -> Any:
+    for col in columns:
+        if col not in row:
+            continue
+        value = row.get(col)
+        if pd.isna(value) or str(value).strip() == "":
+            continue
+        return value
+    return pd.NA
 
 
 def _normalise_fixtures(fixtures_df: pd.DataFrame | None) -> pd.DataFrame:

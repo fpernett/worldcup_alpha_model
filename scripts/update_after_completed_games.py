@@ -38,8 +38,13 @@ def main() -> None:
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--competition", default="World Cup")
     parser.add_argument("--teams", nargs="*", default=None)
+    parser.add_argument("--force-refresh", action="store_true", help="Refresh completed-result provider/cache before post-match updates.")
     args = parser.parse_args()
 
+    if args.force_refresh:
+        from src.completed_results import load_completed_results  # noqa: WPS433
+
+        load_completed_results(args.start_date, args.end_date, teams=args.teams, force_refresh=True, persist=True)
     matches = load_completed_matches_for_backtest(start_date=args.start_date, end_date=args.end_date, teams=args.teams)
     results = import_completed_results(matches, competition=args.competition, path=RESULTS_LEDGER_PATH)
     existing_learning = load_tournament_learning_ledger()

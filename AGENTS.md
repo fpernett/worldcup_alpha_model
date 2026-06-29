@@ -133,6 +133,11 @@ Polymarket APIs are read-only market-data sources in this project. The presence
 of `POLYMARKET_CLOB_API_URL` must not imply wallet authentication, order
 placement, signing, cancellation, private-key handling, or any execution flow.
 
+For Polymarket match-result markets, use the regular 90 minutes plus stoppage
+time only. Do not resolve 1X2/win, totals, BTTS, prediction-ledger imports, or
+backtesting outcomes with extra-time or penalty-shootout scores unless the
+specific market text says otherwise.
+
 Polymarket sports event slugs can use Polymarket-specific team codes and local
 event dates that differ from local fixture naming. Preserve these resolver
 rules:
