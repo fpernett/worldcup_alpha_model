@@ -1241,9 +1241,9 @@ def _display_market_value_row(row: pd.Series) -> dict[str, Any]:
         "Fair odds / fair price": _fair_value_display(fair_odds_value, fair_price),
         "Odds / Price": _odds_price_display(market_odds, market_price),
         "EV / Alpha Gap": _edge_display(ev, gap),
-        "Score": row.get("score", 0.0),
-        "Signal": "No price joined" if pd.isna(signal) else signal,
-        "Mapping confidence": "" if pd.isna(mapping_confidence) else mapping_confidence,
+        "Score": coerce_float(row.get("score"), 0.0),
+        "Signal": _display_text(signal, "No price joined"),
+        "Mapping confidence": _display_text(mapping_confidence, ""),
     }
 
 
@@ -1290,6 +1290,18 @@ def _edge_display(ev: Any, gap: Any) -> str:
     if has_gap:
         return f"{float(gap):+.1f}c"
     return ""
+
+
+def _display_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    text = str(value)
+    return default if text == "<NA>" else text
 
 
 def _market_types_found(df: pd.DataFrame) -> list[str]:

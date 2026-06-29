@@ -1679,7 +1679,18 @@ for label in selected_labels:
     expected_goals_df = build_expected_goals_df(result)
     rating_percentiles = calculate_team_rating_percentiles(teams, result["home"], result["away"])
     climate_factors = build_climate_factor_table(result, venue_env)
-    market_groups = market_value_groups(markets_tab_df, result["home"], result["away"])
+    try:
+        market_groups = market_value_groups(markets_tab_df, result["home"], result["away"])
+    except Exception as exc:
+        markets_tab_diagnostics["market_value_warning"] = (
+            f"Market Value Tables fell back to model-only values after a display preparation error: {exc}"
+        )
+        fallback_markets_tab_df, _fallback_markets_tab_diagnostics = build_markets_tab_joined_dataframe(
+            alpha,
+            pd.DataFrame(),
+            {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+        )
+        market_groups = market_value_groups(fallback_markets_tab_df, result["home"], result["away"])
 
     st.divider()
     st.header(f"{result['home']} vs {result['away']}")
@@ -2024,6 +2035,8 @@ for label in selected_labels:
             st.info("Polymarket event resolved, but no nested market prices were loaded. Showing model fair values without prices.")
         elif markets_joined_count == 0:
             st.info("Polymarket event resolved, but no matching market prices were found. Showing model fair values without prices.")
+        if markets_tab_diagnostics.get("market_value_warning"):
+            st.warning(markets_tab_diagnostics["market_value_warning"])
         for group_name, group_df in market_groups.items():
             st.markdown(f"**{group_name}**")
             if group_df.empty:

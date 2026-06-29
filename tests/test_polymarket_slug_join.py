@@ -260,6 +260,26 @@ def test_market_value_groups_populate_model_rows_without_polymarket_event() -> N
     assert groups["Result Home"]["Signal"].eq("No price joined").all()
 
 
+def test_market_value_groups_render_safe_missing_values_without_polymarket_event() -> None:
+    table, _diagnostics = build_markets_tab_joined_dataframe(
+        _model_markets().head(1),
+        pd.DataFrame(),
+        {"slug_resolution_status": "unresolved", "event_markets_loaded_count": 0, "joined_markets_count": 0},
+    )
+    table.loc[:, "signal"] = pd.NA
+    table.loc[:, "mapping_confidence"] = pd.NA
+    table["score"] = table["score"].astype("object")
+    table.loc[:, "score"] = pd.NA
+
+    groups = market_value_groups(table, "Uruguay", "Spain")
+    row = groups["Result Home"].iloc[0]
+
+    assert row["Signal"] == "No price joined"
+    assert row["Mapping confidence"] == ""
+    assert row["Score"] == 0.0
+    assert "<NA>" not in row.astype(str).to_string()
+
+
 def test_market_value_groups_bucket_actual_team_names_by_fixture_side() -> None:
     model = pd.DataFrame(
         [
