@@ -468,6 +468,14 @@ Some Polymarket sports events use abbreviations that differ from FIFA-style coun
 https://polymarket.com/sports/world-cup/fifwc-col-cdr-2026-06-23
 ```
 
+The resolver must preserve known Polymarket-specific country codes and local-date slugs. For example, Netherlands can appear as `NLD` rather than `NED`, and late UTC kickoffs can use the previous local date in the Polymarket URL:
+
+```text
+https://polymarket.com/sports/world-cup/fifwc-nld-mar-2026-06-29
+```
+
+That URL maps to Netherlands vs Morocco for the `2026-06-30 01:00 UTC` fixture. Do not remove the `NLD -> Netherlands` alias or the prior-local-date slug candidate logic unless Polymarket changes this convention.
+
 The URL/slug resolver parses exact sports event URLs, validates the slug against the selected fixture, fetches the event from Gamma by exact slug, and extracts nested markets for local scoring. This is different from automatic search: automatic search tries to discover possible markets, while the URL resolver starts from a user-supplied event URL or slug.
 
 Supported parsed fields include:

@@ -84,6 +84,36 @@ def test_slug_fixture_scoring_is_high_for_colombia_dr_congo() -> None:
     assert score["rejected"] is False
 
 
+def test_slug_fixture_scoring_accepts_prior_local_date_for_late_utc_fixture() -> None:
+    score = score_polymarket_event_slug_for_fixture(
+        "fifwc-nld-mar-2026-06-29",
+        "Netherlands",
+        "Morocco",
+        fixture_date="2026-06-30",
+    )
+
+    assert score["confidence"] == "high"
+    assert score["matched_home"] is True
+    assert score["matched_away"] is True
+    assert score["matched_date"] is True
+    assert score["rejected"] is False
+
+
+def test_slug_fixture_scoring_accepts_mexico_code_and_prior_local_date() -> None:
+    score = score_polymarket_event_slug_for_fixture(
+        "fifwc-mex-ecu-2026-06-30",
+        "Mexico",
+        "Ecuador",
+        fixture_date="2026-07-01",
+    )
+
+    assert score["confidence"] == "high"
+    assert score["matched_home"] is True
+    assert score["matched_away"] is True
+    assert score["matched_date"] is True
+    assert score["rejected"] is False
+
+
 def test_query_generation_includes_polymarket_slug_codes() -> None:
     queries = build_polymarket_match_queries("Colombia", "DR Congo", "World Cup")
 
@@ -107,6 +137,28 @@ def test_market_extraction_from_synthetic_event(monkeypatch) -> None:
     assert len(markets) == 3
     assert set(markets["market_type"]) == {"moneyline", "spread", "total"}
     assert diagnostics["markets_extracted"] == 3
+
+
+def test_html_fetch_without_exact_event_payload_does_not_resolve(monkeypatch) -> None:
+    import src.polymarket_url_resolver as resolver
+
+    monkeypatch.setattr(resolver, "_fetch_event_by_slug_param", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(resolver, "_fetch_event_by_slug_path", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(resolver, "_fetch_event_by_exact_search", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(resolver, "_fetch_event_from_cache", lambda *_args, **_kwargs: None)
+
+    class FakeResponse:
+        text = "<html><head><title>World Cup Odds &amp; Prediction Markets 2026 | Polymarket</title></head></html>"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(resolver.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+
+    event, diagnostics = resolver.fetch_polymarket_event_by_slug_with_diagnostics("fifwc-ned-mar-2026-06-30")
+
+    assert event is None
+    assert "HTML page loaded, but no exact event payload matched the slug." in diagnostics["warnings"]
 
 
 def test_wrong_fixture_is_rejected_or_low_confidence() -> None:

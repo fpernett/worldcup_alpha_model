@@ -128,16 +128,17 @@ def build_polymarket_sports_slug_candidates(
     competition: str = "World Cup",
 ) -> list[str]:
     prefix = _competition_prefix(competition)
-    date_slug = _fixture_date_slug(fixture_date)
+    date_slugs = _fixture_date_slug_candidates(fixture_date)
     home_codes = get_polymarket_team_code_variants(home)
     away_codes = get_polymarket_team_code_variants(away)
-    if not prefix or not date_slug or not home_codes or not away_codes:
+    if not prefix or not date_slugs or not home_codes or not away_codes:
         return []
 
     candidates: list[str] = []
-    for home_code, away_code in product(home_codes, away_codes):
-        candidates.append(f"{prefix}-{home_code.lower()}-{away_code.lower()}-{date_slug}")
-        candidates.append(f"{prefix}-{away_code.lower()}-{home_code.lower()}-{date_slug}")
+    for date_slug in date_slugs:
+        for home_code, away_code in product(home_codes, away_codes):
+            candidates.append(f"{prefix}-{home_code.lower()}-{away_code.lower()}-{date_slug}")
+            candidates.append(f"{prefix}-{away_code.lower()}-{home_code.lower()}-{date_slug}")
     return list(dict.fromkeys(candidates))
 
 
@@ -748,10 +749,16 @@ def _competition_prefix(competition: str) -> str:
 
 
 def _fixture_date_slug(value: Any) -> str:
+    candidates = _fixture_date_slug_candidates(value)
+    return candidates[0] if candidates else ""
+
+
+def _fixture_date_slug_candidates(value: Any) -> list[str]:
     timestamp = pd.to_datetime(value, errors="coerce")
     if pd.isna(timestamp):
-        return ""
-    return timestamp.date().isoformat()
+        return []
+    dates = [timestamp.date(), (timestamp - pd.Timedelta(days=1)).date()]
+    return list(dict.fromkeys(day.isoformat() for day in dates))
 
 
 def _event_url(slug: str, competition: str) -> str:

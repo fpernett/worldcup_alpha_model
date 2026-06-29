@@ -166,6 +166,24 @@ def test_portugal_code_variants_and_colombia_portugal_candidates() -> None:
     assert "fifwc-por-col-2026-06-27" in candidates
 
 
+def test_netherlands_morocco_slug_generation_includes_fifa_codes_and_prior_local_date() -> None:
+    netherlands_codes = get_polymarket_team_code_variants("Netherlands")
+    morocco_codes = get_polymarket_team_code_variants("Morocco")
+    candidates = build_polymarket_sports_slug_candidates("Netherlands", "Morocco", "2026-06-30")
+
+    assert "NLD" in netherlands_codes
+    assert "NED" in netherlands_codes
+    assert "MAR" in morocco_codes
+    assert "fifwc-nld-mar-2026-06-30" in candidates
+    assert "fifwc-mar-nld-2026-06-30" in candidates
+    assert "fifwc-nld-mar-2026-06-29" in candidates
+    assert "fifwc-mar-nld-2026-06-29" in candidates
+    assert "fifwc-ned-mar-2026-06-30" in candidates
+    assert "fifwc-mar-ned-2026-06-30" in candidates
+    assert "fifwc-ned-mar-2026-06-29" in candidates
+    assert "fifwc-mar-ned-2026-06-29" in candidates
+
+
 def test_user_supplied_slug_is_parsed_and_validated() -> None:
     resolved = resolve_polymarket_slug_for_fixture(
         "Uruguay",

@@ -407,9 +407,8 @@ def _fetch_event_from_html(slug: str, source_url: str | None, diagnostics: dict[
     event = _extract_event_from_next_data(html, slug)
     if event:
         return event
-    title_match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.I | re.S)
-    title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else slug
-    return {"slug": slug, "title": title, "markets": []}
+    diagnostics["warnings"].append("HTML page loaded, but no exact event payload matched the slug.")
+    return None
 
 
 def _extract_event_from_next_data(html: str, slug: str) -> dict | None:
@@ -471,7 +470,8 @@ def _dates_match(slug_date: str, fixture_date: str | None) -> bool:
     fixture_ts = pd.to_datetime(fixture_date, errors="coerce")
     if pd.isna(slug_ts) or pd.isna(fixture_ts):
         return False
-    return slug_ts.date() == fixture_ts.date()
+    delta_days = (fixture_ts.date() - slug_ts.date()).days
+    return delta_days in {0, 1}
 
 
 def _normalise(value: Any) -> str:

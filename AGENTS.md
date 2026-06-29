@@ -133,6 +133,18 @@ Polymarket APIs are read-only market-data sources in this project. The presence
 of `POLYMARKET_CLOB_API_URL` must not imply wallet authentication, order
 placement, signing, cancellation, private-key handling, or any execution flow.
 
+Polymarket sports event slugs can use Polymarket-specific team codes and local
+event dates that differ from local fixture naming. Preserve these resolver
+rules:
+
+* Netherlands can appear as `NLD`, for example
+  `fifwc-nld-mar-2026-06-29` for Netherlands vs Morocco.
+* Late UTC kickoffs can use the previous local date in the Polymarket slug. A
+  `2026-06-30 01:00 UTC` fixture can map to a `2026-06-29` Polymarket event.
+* Keep prior-local-date slug candidates and exact slug validation tests so
+  Market Value Tables do not fall back to model-only values when a real event
+  exists.
+
 For a market like:
 
 Will England beat Croatia?
