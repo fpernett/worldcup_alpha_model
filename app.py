@@ -53,7 +53,7 @@ from src.model_policy import (
     behavior_disagreement_warning,
     get_current_model_policy,
 )
-from src.odds import load_market_odds
+from src.odds import ensure_market_odds_for_fixtures, load_market_odds
 from src.polymarket import get_match_polymarket_markets, get_polymarket_markets, update_polymarket_markets
 from src.polymarket_match_search import build_polymarket_match_queries, score_polymarket_markets_for_match
 from src.polymarket_sports_discovery import polymarket_discovery_cache_status
@@ -1237,6 +1237,7 @@ def load_inputs(
     teams = get_team_ratings()
     venues = load_venues()
     odds = load_market_odds()
+    odds = ensure_market_odds_for_fixtures(fixtures, teams, venues, odds)
     recent_matches = load_recent_matches()
     historical_long_matches = load_historical_matches()
     team_behavior = load_team_behavior()
@@ -1525,7 +1526,9 @@ with st.sidebar:
         hide_index=True,
         width="stretch",
     )
-    st.caption("Source labels are API, cache, or local CSV. API keys are optional; failed requests fall back safely.")
+    st.caption(
+        "Source labels are API, cache, local CSV, or generated benchmark. API keys are optional; failed requests fall back safely."
+    )
     for _, source_row in source_status.iterrows():
         if source_row.get("missing_columns"):
             st.warning(f"{source_row['input']} missing columns: {source_row['missing_columns']}")

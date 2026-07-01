@@ -10,7 +10,7 @@ from scipy.stats import poisson
 
 from src.climate import get_venue_environment, summarize_environment_adjustment
 from src.model_policy import get_current_model_policy, model_policy_label
-from src.odds import decimal_odds_or_nan
+from src.odds import GENERATED_ODDS_SOURCE_ALIASES, decimal_odds_or_nan
 from src.ratings import neutral_team_rating, rating_row_for_team
 from src.utils import clamp, coerce_bool, coerce_float
 from src.venue_features import altitude_log_penalty, venue_log_adjustments
@@ -345,8 +345,15 @@ def model_confidence(
         reasons.append("venue environment used neutral fallback")
 
     if match_odds is not None and not match_odds.empty:
-        score += 1
-        reasons.append("market odds available")
+        generated_mask = _generated_benchmark_odds_mask(match_odds)
+        if bool(generated_mask.all()):
+            reasons.append("local benchmark odds available; alpha EV is benchmark-only")
+        elif bool(generated_mask.any()):
+            score += 1
+            reasons.append("market odds available; local benchmark filled missing selections")
+        else:
+            score += 1
+            reasons.append("market odds available")
     else:
         reasons.append("market odds missing; alpha EV left blank")
 
@@ -363,6 +370,15 @@ def model_confidence(
         label = "Low"
 
     return {"label": label, "score": score, "reasons": reasons}
+
+
+def _generated_benchmark_odds_mask(match_odds: pd.DataFrame) -> pd.Series:
+    if match_odds is None or match_odds.empty or "source" not in match_odds.columns:
+        index = match_odds.index if match_odds is not None else pd.RangeIndex(0)
+        return pd.Series(False, index=index)
+    aliases = {source.lower() for source in GENERATED_ODDS_SOURCE_ALIASES}
+    sources = match_odds["source"].fillna("").astype(str).str.strip().str.lower()
+    return sources.isin(aliases)
 
 
 def run_match_model(

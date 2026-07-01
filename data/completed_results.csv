@@ -1,7 +1,7 @@
 provider,provider_match_id,provider_kickoff_utc,date_utc,competition,group,home,away,home_score_90,away_score_90,score_source,score_semantics,is_completed,source,last_updated
-football-data.org,537397,2026-06-17T01:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_J,Argentina,Algeria,3,0,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T04:43:29+00:00
-football-data.org,537398,2026-06-17T04:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_J,Austria,Jordan,3,1,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T04:43:29+00:00
-football-data.org,537403,2026-06-17T17:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_K,Portugal,DR Congo,1,1,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T04:43:29+00:00
-football-data.org,537409,2026-06-17T20:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_L,England,Croatia,4,2,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T04:43:29+00:00
-football-data.org,537410,2026-06-17T23:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_L,Ghana,Panama,1,0,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T04:43:29+00:00
+football-data.org,537397,2026-06-17T01:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_J,Argentina,Algeria,3,0,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T18:03:04+00:00
+football-data.org,537398,2026-06-17T04:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_J,Austria,Jordan,3,1,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T18:03:04+00:00
+football-data.org,537403,2026-06-17T17:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_K,Portugal,DR Congo,1,1,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T18:03:04+00:00
+football-data.org,537409,2026-06-17T20:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_L,England,Croatia,4,2,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T18:03:04+00:00
+football-data.org,537410,2026-06-17T23:00:00+00:00,2026-06-17,FIFA World Cup,GROUP_L,Ghana,Panama,1,0,score.fullTime,90-minute regular time,1,football-data.org,2026-07-01T18:03:04+00:00
 football-data.org,1001,2026-06-29T17:00:00+00:00,2026-06-29,FIFA World Cup,,Brazil,Japan,1,0,score.fullTime,90-minute regular time,1,football-data.org,2026-06-29T22:22:00+00:00

@@ -16,10 +16,17 @@ from src.cache import (
     write_json_cache,
 )
 from src.config import DATA_DIR, SOURCE_API, SOURCE_CACHE, SOURCE_LOCAL, get_config
+from src.team_names import is_unresolved_team_slot
 from src.utils import coerce_float, read_csv_with_columns
 
 
 ODDS_COLUMNS = ["match_id", "market", "selection", "odds", "source", "last_updated"]
+GENERATED_ODDS_SOURCE = "local_model_benchmark"
+GENERATED_ODDS_SOURCE_ALIASES = {GENERATED_ODDS_SOURCE, "local_fallback_seed"}
+GENERATED_ODDS_WARNING = (
+    "Missing fixture odds were filled with generated local model benchmark odds. "
+    "These are not live market prices."
+)
 
 
 def load_market_odds(force_cache: bool = False) -> pd.DataFrame:
@@ -109,6 +116,92 @@ def update_market_odds_for_fixtures(fixtures: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def ensure_market_odds_for_fixtures(
+    fixtures: pd.DataFrame,
+    teams: pd.DataFrame,
+    venues: pd.DataFrame | None = None,
+    market_odds: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Return odds with generated benchmark rows for missing fixture markets.
+
+    Real/API/manual odds remain first priority. Generated rows are only a local
+    benchmark fallback so the dashboard can keep alpha EV populated when a live
+    or manual market source has not been entered yet.
+    """
+    attrs = getattr(market_odds, "attrs", {}).copy() if market_odds is not None else {}
+    odds = _normalise_odds(market_odds.copy() if market_odds is not None else pd.DataFrame(columns=ODDS_COLUMNS))
+    generated = build_generated_benchmark_market_odds(fixtures, teams, venues, odds)
+    if generated.empty:
+        odds.attrs = attrs
+        return odds
+
+    valid_mask = _valid_odds_mask(odds)
+    combined = pd.concat([odds.loc[valid_mask], generated, odds.loc[~valid_mask]], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["match_id", "market", "selection"], keep="first")
+    combined = _normalise_odds(combined)
+    combined.attrs = attrs
+    combined.attrs["source_label"] = _with_generated_source_label(attrs.get("source_label", SOURCE_LOCAL))
+    combined.attrs["source_detail"] = _with_generated_source_detail(
+        attrs.get("source_detail", "data/market_odds.csv")
+    )
+    combined.attrs["last_updated"] = utc_now_iso()
+    combined.attrs["warning"] = _combine_warnings(attrs.get("warning", ""), GENERATED_ODDS_WARNING)
+    combined.attrs["generated_rows"] = int(len(generated))
+    return combined
+
+
+def build_generated_benchmark_market_odds(
+    fixtures: pd.DataFrame,
+    teams: pd.DataFrame,
+    venues: pd.DataFrame | None = None,
+    existing_odds: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    fixtures_df = fixtures.copy() if fixtures is not None else pd.DataFrame()
+    if fixtures_df.empty:
+        return pd.DataFrame(columns=ODDS_COLUMNS)
+
+    odds = _normalise_odds(existing_odds.copy() if existing_odds is not None else pd.DataFrame(columns=ODDS_COLUMNS))
+    existing_keys = _valid_market_keys(odds)
+    generated_keys: set[tuple[str, str, str]] = set()
+    rows: list[dict[str, Any]] = []
+    timestamp = utc_now_iso()
+
+    for _, fixture in fixtures_df.iterrows():
+        match_id = str(fixture.get("match_id", "") or "").strip()
+        home = str(fixture.get("home", "") or "").strip()
+        away = str(fixture.get("away", "") or "").strip()
+        if not match_id or not home or not away:
+            continue
+        if is_unresolved_team_slot(home) or is_unresolved_team_slot(away):
+            continue
+
+        try:
+            probability_map = _benchmark_probability_map(fixture, teams)
+        except Exception:
+            continue
+
+        for (market, selection), probability in probability_map.items():
+            key = (match_id, str(market), str(selection))
+            if key in existing_keys or key in generated_keys:
+                continue
+            odds_value = _fair_decimal_odds(probability)
+            if pd.isna(odds_value):
+                continue
+            generated_keys.add(key)
+            rows.append(
+                {
+                    "match_id": match_id,
+                    "market": market,
+                    "selection": selection,
+                    "odds": odds_value,
+                    "source": GENERATED_ODDS_SOURCE,
+                    "last_updated": timestamp,
+                }
+            )
+
+    return _normalise_odds(pd.DataFrame(rows, columns=ODDS_COLUMNS))
+
+
 def decimal_odds_or_nan(value: Any) -> float:
     odds = coerce_float(value, np.nan)
     if np.isnan(odds) or odds <= 1.0:
@@ -173,3 +266,89 @@ def _csv_last_modified(filename: str) -> str:
     if not path.exists():
         return ""
     return pd.Timestamp(path.stat().st_mtime, unit="s", tz="UTC").isoformat()
+
+
+def _benchmark_probability_map(fixture: pd.Series, teams: pd.DataFrame) -> dict[tuple[str, str], float]:
+    from src.model import ModelConfig, expected_goals, market_probability_map, outcome_probs, score_matrix
+    from src.ratings import neutral_team_rating, rating_row_for_team
+
+    home_name = str(fixture.get("home", "") or "")
+    away_name = str(fixture.get("away", "") or "")
+    home = rating_row_for_team(teams, home_name)
+    away = rating_row_for_team(teams, away_name)
+    if home.empty:
+        home = neutral_team_rating(home_name)
+    if away.empty:
+        away = neutral_team_rating(away_name)
+
+    cfg = ModelConfig()
+    hxg, axg, _ = expected_goals(home, away, _neutral_benchmark_environment(), cfg)
+    probs = outcome_probs(score_matrix(hxg, axg, cfg.max_goals))
+    return market_probability_map(home_name, away_name, probs)
+
+
+def _neutral_benchmark_environment() -> dict[str, Any]:
+    return {
+        "environment_source": "local_model_benchmark_neutral_environment",
+        "source_label": SOURCE_LOCAL,
+        "roof_expected_closed": 0,
+        "temp_c": 22.0,
+        "effective_temp_c": 22.0,
+        "humidity_pct": 55.0,
+        "effective_humidity_pct": 55.0,
+        "wind_kmh": 0.0,
+        "effective_wind_kmh": 0.0,
+        "precipitation_mm": 0.0,
+        "effective_precipitation_mm": 0.0,
+        "altitude_m": 0.0,
+        "neutral_site": 1,
+    }
+
+
+def _fair_decimal_odds(probability: Any) -> float | pd.NA:
+    probability_value = coerce_float(probability, np.nan)
+    if np.isnan(probability_value) or probability_value <= 0:
+        return pd.NA
+    odds = 1.0 / probability_value
+    if not np.isfinite(odds) or odds <= 1.0:
+        return pd.NA
+    return round(float(odds), 4)
+
+
+def _valid_odds_mask(odds: pd.DataFrame) -> pd.Series:
+    if odds is None or odds.empty or "odds" not in odds.columns:
+        return pd.Series(dtype=bool)
+    values = pd.to_numeric(odds["odds"], errors="coerce")
+    return values.gt(1.0) & np.isfinite(values)
+
+
+def _valid_market_keys(odds: pd.DataFrame) -> set[tuple[str, str, str]]:
+    if odds is None or odds.empty:
+        return set()
+    valid = odds.loc[_valid_odds_mask(odds)].copy()
+    if valid.empty:
+        return set()
+    return {
+        (str(row.get("match_id", "")), str(row.get("market", "")), str(row.get("selection", "")))
+        for _, row in valid.iterrows()
+    }
+
+
+def _with_generated_source_label(source_label: Any) -> str:
+    base = str(source_label or SOURCE_LOCAL).strip() or SOURCE_LOCAL
+    if "generated benchmark" in base.lower():
+        return base
+    return f"{base} + generated benchmark"
+
+
+def _with_generated_source_detail(source_detail: Any) -> str:
+    base = str(source_detail or "data/market_odds.csv").strip() or "data/market_odds.csv"
+    generated = "generated local model benchmark odds"
+    if generated in base.lower():
+        return base
+    return f"{base} + {generated}"
+
+
+def _combine_warnings(*warnings: Any) -> str:
+    parts = [str(warning).strip() for warning in warnings if str(warning or "").strip()]
+    return "; ".join(dict.fromkeys(parts))

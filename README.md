@@ -323,6 +323,11 @@ match_id,market,selection,odds,source,last_updated
 
 Decimal odds are used. Missing odds do not break the app; alpha EV is left blank.
 
+When a selected fixture window has no valid manual/API odds, the dashboard
+generates temporary `local_model_benchmark` rows in memory from the transparent
+local model so market tables and alpha EV stay populated. These generated rows
+are benchmark-only and are not live market prices.
+
 ### Polymarket Markets
 
 The app uses the public Polymarket Gamma API as the default read-only market source:
