@@ -20,6 +20,7 @@ from src.behavior_driver_report import (
     calculate_opponent_tier_breakdown,
     get_behavior_driver_matches,
 )
+from src.calibration import build_calibration_backtest_report, build_calibration_evaluation_dataset
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
 from src.config import DATA_DIR, api_summary
 from src.data_sources import FIXTURE_COLUMNS, filter_future_fixtures, get_upcoming_fixtures, update_all_sources
@@ -1899,7 +1900,7 @@ for label in selected_labels:
             "Venue/environment",
             "Historical behavior",
             "Model notes",
-            "Post-mortem Training",
+            "Calibration / Post-mortem",
         ]
     )
 
@@ -2490,6 +2491,7 @@ for label in selected_labels:
                             "liquidity",
                             "volume",
                             "signal_strength",
+                            "signal_policy_reasons",
                             "mapping_confidence",
                             "warning",
                         ]
@@ -3177,14 +3179,14 @@ for label in selected_labels:
         )
 
     with tabs[11]:
-        st.subheader("Post-mortem Training")
+        st.subheader("Calibration / Post-mortem")
         st.caption(
             "This section evaluates saved pre-match predictions after results are known. "
             "It supports evidence-based model improvement without tuning to one match or copying another model."
         )
         pm_key = str(match.get("match_id", label)).replace(" ", "_")
         if not st.checkbox("Load post-mortem diagnostics", value=False, key=f"load_postmortem_{pm_key}"):
-            st.info("Post-mortem diagnostics are idle. Enable them to load ledgers, candidate reports, and rolling tournament learning state.")
+            st.info("Calibration and post-mortem diagnostics are idle. Enable them to load ledgers, candidate reports, and rolling tournament learning state.")
             st.caption(
                 "Training uses walk-forward validation. Historical senior national-team games before each prediction date are included with relevance weights. "
                 "This is evaluation-only and does not provide staking, trade execution, Kelly sizing, or betting advice."
@@ -3195,6 +3197,13 @@ for label in selected_labels:
             joined_pm = join_predictions_to_results(ledger, results_ledger)
             errors_pm = calculate_prediction_errors(joined_pm)
             report_pm = build_postmortem_report(errors_pm, joined_pm)
+            calibration_eval = build_calibration_evaluation_dataset(
+                ledger,
+                results_ledger,
+                venues_df=venues,
+                market_odds_df=market_odds,
+            )
+            calibration_report = build_calibration_backtest_report(calibration_eval, min_train=30)
             training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
             latest_training = training_reports[-1] if training_reports else None
             if latest_training is not None:
@@ -3208,14 +3217,41 @@ for label in selected_labels:
             pm1, pm2, pm3 = st.columns(3)
             pm1.metric("Prediction ledger rows", f"{len(ledger):,}")
             pm2.metric("Completed result rows", f"{len(results_ledger):,}")
-            pm3.metric("Scored pre-kickoff predictions", f"{len(errors_pm):,}")
+            pm3.metric("Scored pre-kickoff predictions", f"{len(calibration_eval):,}")
+
+            st.divider()
+            st.write("Calibration summary")
+            cal_summary = calibration_report.get("summary", pd.DataFrame())
+            if isinstance(cal_summary, pd.DataFrame) and not cal_summary.empty:
+                display_dataframe(cal_summary, hide_index=True, width="stretch")
+            else:
+                st.info("No valid 90-minute 1X2 rows are available for calibration metrics.")
+
+            cal_diagnostics = calibration_report.get("diagnostics", {})
+            if isinstance(cal_diagnostics, dict) and cal_diagnostics.get("warning"):
+                st.warning(cal_diagnostics["warning"])
+            variant_metrics = calibration_report.get("variant_metrics", pd.DataFrame())
+            if isinstance(variant_metrics, pd.DataFrame) and not variant_metrics.empty:
+                st.write("Walk-forward calibration variants")
+                display_dataframe(variant_metrics, hide_index=True, width="stretch")
+                st.caption("Negative deltas versus baseline indicate lower Brier score or log loss.")
+
+            reliability = calibration_report.get("reliability", pd.DataFrame())
+            if isinstance(reliability, pd.DataFrame) and not reliability.empty:
+                with st.expander("Reliability curves by home/draw/away probability", expanded=False):
+                    display_dataframe(reliability, hide_index=True, width="stretch")
+
+            diagnostic_matches = calibration_report.get("diagnostic_matches", pd.DataFrame())
+            if isinstance(diagnostic_matches, pd.DataFrame) and not diagnostic_matches.empty:
+                st.write("Recent diagnostic match set")
+                display_dataframe(diagnostic_matches, hide_index=True, width="stretch")
 
             st.divider()
             st.write("What to do next")
             action_plan = build_postmortem_action_plan(
                 prediction_rows=len(ledger),
                 result_rows=len(results_ledger),
-                scored_prediction_rows=len(errors_pm),
+                scored_prediction_rows=len(calibration_eval),
                 leaderboard_df=leaderboard,
             )
             display_dataframe(action_plan, hide_index=True, width="stretch")

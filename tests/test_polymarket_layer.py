@@ -111,6 +111,26 @@ def test_alpha_gap_calculation() -> None:
     assert round(float(alpha.iloc[0]["alpha_gap_cents"]), 1) == 7.1
 
 
+def test_alpha_signal_gating_requires_calibration_support_for_strong_edge() -> None:
+    result = sample_model_result()
+    result["confidence"] = {"label": "High"}
+    alpha = calculate_polymarket_alpha(result, sample_mapping("YES"))
+
+    assert alpha.iloc[0]["signal_strength"] == "Watchlist"
+    assert "calibrated probability unavailable" in alpha.iloc[0]["signal_policy_reasons"]
+
+
+def test_alpha_signal_gating_allows_strong_edge_only_when_supported() -> None:
+    result = sample_model_result()
+    result["probs"]["home_win"] = 0.54
+    result["confidence"] = {"label": "High"}
+    result["calibrated_probability_available"] = True
+    result["historical_support"] = True
+    alpha = calculate_polymarket_alpha(result, sample_mapping("YES"))
+
+    assert alpha.iloc[0]["signal_strength"] == "Strong edge"
+
+
 def test_polymarket_alpha_rows_include_dashboard_market_selection() -> None:
     alpha = calculate_polymarket_alpha(sample_model_result(), sample_mapping("YES"))
 

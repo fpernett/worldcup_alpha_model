@@ -30,7 +30,11 @@ ALPHA_COLUMNS = [
     "liquidity",
     "volume",
     "mapping_confidence",
+    "model_confidence",
     "signal_strength",
+    "calibrated_probability_available",
+    "historical_support",
+    "signal_policy_reasons",
     "warning",
 ]
 
@@ -73,7 +77,22 @@ def calculate_polymarket_alpha(
         liquidity = coerce_float(mapping.get("liquidity"), float("nan"))
         volume = coerce_float(mapping.get("volume"), float("nan"))
         warning = alpha_warnings(mapping, yes_price, no_price, liquidity, min_liquidity)
-        signal = classify_signal(alpha_gap, mapping.get("mapping_confidence", ""), liquidity, warning, min_liquidity)
+        confidence_label = ""
+        if isinstance(model_result.get("confidence"), dict):
+            confidence_label = str(model_result.get("confidence", {}).get("label", "") or "")
+        calibrated_available = bool(model_result.get("calibrated_probability_available", False))
+        historical_support = bool(model_result.get("historical_support", False))
+        signal, signal_reasons = classify_signal(
+            alpha_gap,
+            mapping.get("mapping_confidence", ""),
+            liquidity,
+            warning,
+            min_liquidity,
+            model_confidence=confidence_label,
+            behavior_probability_delta=mapping.get("behavior_probability_delta", pd.NA),
+            calibrated_probability_available=calibrated_available,
+            historical_support=historical_support,
+        )
         market, selection = dashboard_market_selection(mapping)
 
         rows.append(
@@ -99,7 +118,11 @@ def calculate_polymarket_alpha(
                 "liquidity": liquidity,
                 "volume": volume,
                 "mapping_confidence": mapping.get("mapping_confidence", ""),
+                "model_confidence": confidence_label,
                 "signal_strength": signal,
+                "calibrated_probability_available": calibrated_available,
+                "historical_support": historical_support,
+                "signal_policy_reasons": signal_reasons,
                 "warning": warning,
             }
         )
@@ -163,22 +186,85 @@ def classify_signal(
     liquidity: float,
     warning: str,
     min_liquidity: float = 100.0,
-) -> str:
+    model_confidence: Any = "",
+    behavior_probability_delta: Any = pd.NA,
+    calibrated_probability_available: bool = False,
+    historical_support: bool = False,
+) -> tuple[str, str]:
+    reasons: list[str] = []
     if pd.isna(alpha_gap_cents):
-        return "No signal"
+        return "No trade", "missing alpha gap"
     gap = float(alpha_gap_cents)
     confidence = str(mapping_confidence).lower()
     high_confidence = confidence in {"high", "manual"}
     liquidity_ok = pd.notna(liquidity) and liquidity >= min_liquidity
-    if gap >= 8.0 and high_confidence and liquidity_ok:
-        return "Strong"
+    warning_text = str(warning or "").lower()
+    if gap <= 0.0:
+        return "No trade", "non-positive model gap"
+    if gap < 3.0:
+        return "No trade", "gap below watchlist threshold"
+    if any(token in warning_text for token in ["mapping uncertain", "manual confirmation required", "market closed", "price missing"]):
+        reasons.append("unresolved mapping or price status")
+    if not liquidity_ok:
+        reasons.append("insufficient liquidity")
+    if not high_confidence:
+        reasons.append("mapping confidence below high/manual")
+    model_conf = str(model_confidence or "").strip().lower()
+    if model_conf == "low":
+        reasons.append("low model confidence")
+    if not calibrated_probability_available:
+        reasons.append("calibrated probability unavailable")
+    if not historical_support:
+        reasons.append("insufficient historical support")
+    behavior_delta = coerce_float(behavior_probability_delta, float("nan"))
+    if pd.notna(behavior_delta) and abs(behavior_delta) >= 0.10:
+        reasons.append("large behavior disagreement")
+    if gap >= 20.0 and not historical_support:
+        reasons.append("extreme model-market gap without validation")
+
+    if any(reason in reasons for reason in ["unresolved mapping or price status", "insufficient liquidity"]):
+        return "No trade", "; ".join(dict.fromkeys(reasons))
+    if reasons:
+        return "Watchlist", "; ".join(dict.fromkeys(reasons))
+    if gap >= 8.0:
+        return "Strong edge", ""
     if gap >= 5.0:
-        return "Moderate"
-    if gap >= 3.0:
-        return "Weak"
-    if -3.0 <= gap <= 3.0:
-        return "No signal"
-    return "Avoid"
+        return "Small edge", ""
+    return "Watchlist", ""
+
+
+def apply_signal_policy(
+    alpha_df: pd.DataFrame | None,
+    model_confidence: Any = "",
+    calibrated_probability_available: bool = False,
+    historical_support: bool = False,
+    min_liquidity: float = 100.0,
+) -> pd.DataFrame:
+    out = alpha_df.copy() if alpha_df is not None else pd.DataFrame(columns=ALPHA_COLUMNS)
+    for col in ALPHA_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+    if out.empty:
+        return out
+    signals = []
+    reasons = []
+    for _, row in out.iterrows():
+        signal, reason = classify_signal(
+            row.get("alpha_gap_cents", pd.NA),
+            row.get("mapping_confidence", ""),
+            coerce_float(row.get("liquidity"), float("nan")),
+            str(row.get("warning", "") or ""),
+            min_liquidity=min_liquidity,
+            model_confidence=row.get("model_confidence", model_confidence),
+            behavior_probability_delta=row.get("behavior_probability_delta", pd.NA),
+            calibrated_probability_available=coerce_bool(row.get("calibrated_probability_available", calibrated_probability_available)),
+            historical_support=coerce_bool(row.get("historical_support", historical_support)),
+        )
+        signals.append(signal)
+        reasons.append(reason)
+    out["signal_strength"] = signals
+    out["signal_policy_reasons"] = reasons
+    return out
 
 
 def alpha_warnings(

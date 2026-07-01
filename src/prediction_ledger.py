@@ -22,6 +22,7 @@ from src.model_policy import get_current_model_policy
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
 from src.team_names import normalize_team_name
 from src.utils import coerce_bool, coerce_float, read_csv_with_columns, utc_now_iso
+from src.venue_features import classify_venue_context
 from src.weather import load_venues
 
 
@@ -51,6 +52,20 @@ PREDICTION_LEDGER_COLUMNS = [
     "over_2_5_prob",
     "over_3_5_prob",
     "btts_yes_prob",
+    "model_confidence",
+    "behavior_home_prob",
+    "behavior_draw_prob",
+    "behavior_away_prob",
+    "market_home_prob",
+    "market_draw_prob",
+    "market_away_prob",
+    "venue_country",
+    "neutral_site",
+    "venue_context",
+    "altitude",
+    "temperature",
+    "humidity",
+    "wind",
     "source_status",
     "market_snapshot_available",
     "prediction_before_kickoff",
@@ -72,6 +87,8 @@ RESULTS_LEDGER_COLUMNS = [
     "over_1_5_actual",
     "over_2_5_actual",
     "over_3_5_actual",
+    "actual_advancing_team",
+    "result_semantics",
     "result_source",
     "last_updated",
 ]
@@ -246,6 +263,25 @@ def snapshot_predictions_for_fixtures_with_diagnostics(
         matrix = result.get("score_matrix")
         over_0_5 = _over_probability(matrix, 0)
         over_1_5 = _over_probability(matrix, 1)
+        components = result.get("components", {}) if isinstance(result.get("components", {}), dict) else {}
+        environment = result.get("environment", {}) if isinstance(result.get("environment", {}), dict) else {}
+        confidence = result.get("confidence", {}) if isinstance(result.get("confidence", {}), dict) else {}
+        market_home_prob, market_draw_prob, market_away_prob = _market_1x2_probabilities(
+            odds,
+            match_id_raw,
+            fixture.get("home", ""),
+            fixture.get("away", ""),
+        )
+        venue_country = str(components.get("venue_country", "") or environment.get("country", "") or "")
+        neutral_site = components.get("neutral_site", environment.get("neutral_site", pd.NA))
+        venue_context = str(
+            components.get("venue_context", "")
+            or classify_venue_context(
+                fixture.get("home", ""),
+                fixture.get("away", ""),
+                {"country": venue_country, "neutral_site": neutral_site},
+            )
+        )
         match_id = match_id_raw
         prediction_id = _prediction_id(snapshot_utc, match_id, model_version, parameter_set_id)
         rows.append(
@@ -272,6 +308,20 @@ def snapshot_predictions_for_fixtures_with_diagnostics(
                 "over_2_5_prob": float(probs.get("over_2_5", 0.0)),
                 "over_3_5_prob": float(probs.get("over_3_5", 0.0)),
                 "btts_yes_prob": float(probs.get("btts_yes", 0.0)),
+                "model_confidence": confidence.get("label", ""),
+                "behavior_home_prob": pd.NA,
+                "behavior_draw_prob": pd.NA,
+                "behavior_away_prob": pd.NA,
+                "market_home_prob": market_home_prob,
+                "market_draw_prob": market_draw_prob,
+                "market_away_prob": market_away_prob,
+                "venue_country": venue_country,
+                "neutral_site": neutral_site,
+                "venue_context": venue_context,
+                "altitude": components.get("altitude_m", environment.get("altitude_m", pd.NA)),
+                "temperature": components.get("effective_temp_c", environment.get("effective_temp_c", environment.get("temp_c", pd.NA))),
+                "humidity": components.get("effective_humidity_pct", environment.get("effective_humidity_pct", environment.get("humidity_pct", pd.NA))),
+                "wind": components.get("effective_wind_kmh", environment.get("effective_wind_kmh", environment.get("wind_kmh", pd.NA))),
                 "source_status": f"policy={policy.get('primary_model_mode', primary_model_mode)}; offline_csv_safe",
                 "market_snapshot_available": bool(_market_snapshot_available(odds, match_id)),
                 "prediction_before_kickoff": bool(before_kickoff),
@@ -634,6 +684,8 @@ def import_completed_results(
                 "over_1_5_actual": int(total > 1.5),
                 "over_2_5_actual": int(total > 2.5),
                 "over_3_5_actual": int(total > 3.5),
+                "actual_advancing_team": match.get("actual_advancing_team", pd.NA),
+                "result_semantics": match.get("result_semantics", match.get("score_semantics", "90-minute regular time")),
                 "result_source": result_source,
                 "last_updated": now,
             }
@@ -1023,7 +1075,7 @@ def _results_ledger_to_completed_candidates(results_ledger: pd.DataFrame | None)
             "home_goals_90": df["home_goals"],
             "away_goals_90": df["away_goals"],
             "score_source": "data/results_ledger.csv",
-            "score_semantics": "90-minute regular time",
+            "score_semantics": df["result_semantics"].fillna("90-minute regular time"),
             "provider_kickoff_utc": "",
             "result_source": df["result_source"],
             "last_updated": df["last_updated"],
@@ -1075,6 +1127,8 @@ def _ledger_result_row_from_candidate(fixture: pd.Series, candidate: pd.Series, 
         "over_1_5_actual": int(total > 1.5),
         "over_2_5_actual": int(total > 2.5),
         "over_3_5_actual": int(total > 3.5),
+        "actual_advancing_team": candidate.get("actual_advancing_team", pd.NA),
+        "result_semantics": candidate.get("result_semantics", candidate.get("score_semantics", "90-minute regular time")),
         "result_source": result_source,
         "last_updated": utc_now_iso(),
     }
@@ -1209,6 +1263,34 @@ def _over_probability(matrix: pd.DataFrame | None, threshold_goals: int) -> floa
         return 0.0
     total = pd.to_numeric(mat["home_goals"], errors="coerce") + pd.to_numeric(mat["away_goals"], errors="coerce")
     return float(pd.to_numeric(mat["prob"], errors="coerce").fillna(0.0).loc[total > float(threshold_goals)].sum())
+
+
+def _market_1x2_probabilities(market_odds_df: pd.DataFrame, match_id: Any, home: Any, away: Any) -> tuple[Any, Any, Any]:
+    odds = market_odds_df.copy() if market_odds_df is not None else pd.DataFrame()
+    if odds.empty or not {"match_id", "market", "selection", "odds"}.issubset(odds.columns):
+        return pd.NA, pd.NA, pd.NA
+    selected = odds.loc[
+        (odds["match_id"].astype(str) == str(match_id))
+        & (odds["market"].astype(str).str.lower() == "1x2")
+    ].copy()
+    if selected.empty:
+        return pd.NA, pd.NA, pd.NA
+    lookup = {
+        str(row.get("selection", "")).strip().lower(): coerce_float(row.get("odds"), float("nan"))
+        for _, row in selected.iterrows()
+    }
+    decimal_odds = [
+        lookup.get(str(home).strip().lower(), float("nan")),
+        lookup.get("draw", float("nan")),
+        lookup.get(str(away).strip().lower(), float("nan")),
+    ]
+    if not all(pd.notna(value) and value > 1.0 for value in decimal_odds):
+        return pd.NA, pd.NA, pd.NA
+    implied = [1.0 / value for value in decimal_odds]
+    total = sum(implied)
+    if total <= 0:
+        return pd.NA, pd.NA, pd.NA
+    return tuple(value / total for value in implied)
 
 
 def _kickoff_utc(row: pd.Series) -> str:

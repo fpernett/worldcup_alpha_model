@@ -179,10 +179,16 @@ def annotate_polymarket_alpha_with_policy(
                 prob = 1.0 - float(prob)
             values.append(prob)
         behavior_probability = pd.Series(values, index=out.index, dtype="object")
-    return add_policy_columns_to_alpha(
+    annotated = add_policy_columns_to_alpha(
         out,
         "model_probability",
         behavior_probability=behavior_probability,
         show_behavior_diagnostic=show_behavior_diagnostic,
         policy=policy,
     )
+    try:
+        from src.alpha import apply_signal_policy
+
+        return apply_signal_policy(annotated)
+    except Exception:
+        return annotated

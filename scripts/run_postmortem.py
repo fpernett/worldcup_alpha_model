@@ -12,7 +12,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.postmortem import build_postmortem_report, calculate_prediction_errors, join_predictions_to_results  # noqa: E402
 from src.prediction_ledger import load_prediction_ledger, load_results_ledger  # noqa: E402
+from src.calibration import (  # noqa: E402
+    build_calibration_backtest_report,
+    build_calibration_evaluation_dataset,
+    write_calibration_artifacts,
+)
+from src.odds import load_market_odds  # noqa: E402
 from src.utils import today_iso  # noqa: E402
+from src.weather import load_venues  # noqa: E402
 
 
 def main() -> None:
@@ -20,6 +27,7 @@ def main() -> None:
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--competition", default=None)
+    parser.add_argument("--min-train", type=int, default=30)
     parser.add_argument("--save-report", action="store_true")
     args = parser.parse_args()
 
@@ -30,10 +38,18 @@ def main() -> None:
     joined = join_predictions_to_results(predictions, results)
     errors = calculate_prediction_errors(joined)
     report = build_postmortem_report(errors, joined)
+    calibration_eval = build_calibration_evaluation_dataset(
+        predictions,
+        results,
+        venues_df=load_venues(),
+        market_odds_df=load_market_odds(),
+    )
+    calibration_report = build_calibration_backtest_report(calibration_eval, min_train=args.min_train)
 
     print(f"prediction ledger rows: {len(predictions):,}")
     print(f"results ledger rows: {len(results):,}")
     print(f"joined valid predictions: {len(errors):,}")
+    print(f"calibration evaluation rows: {len(calibration_eval):,}")
     summary = report.get("summary_metrics", pd.DataFrame())
     print("\nSummary metrics")
     print(_printable(summary).to_string(index=False) if not summary.empty else "No scored pre-kickoff predictions available.")
@@ -41,12 +57,17 @@ def main() -> None:
     print(_printable(report.get("worst_misses", pd.DataFrame()).head(5)).to_string(index=False))
     print("\nBest calls")
     print(_printable(report.get("best_calls", pd.DataFrame()).head(5)).to_string(index=False))
+    print("\nCalibration summary")
+    print(_printable(calibration_report.get("summary", pd.DataFrame())).to_string(index=False))
+    print("\nWalk-forward calibration variants")
+    print(_printable(calibration_report.get("variant_metrics", pd.DataFrame())).to_string(index=False))
 
     reports = PROJECT_ROOT / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     today = today_iso()
     predictions_path = reports / f"postmortem_predictions_{today}.csv"
     errors.to_csv(predictions_path, index=False)
+    artifact_paths = write_calibration_artifacts(calibration_eval, calibration_report, reports_dir=reports, report_date=today)
     report_path = reports / f"postmortem_report_{today}.md"
     if args.save_report:
         report_path.write_text(
@@ -80,6 +101,8 @@ def main() -> None:
             encoding="utf-8",
         )
     print(f"\npostmortem predictions: {predictions_path.relative_to(PROJECT_ROOT)}")
+    print(f"prediction performance: {artifact_paths['performance_csv'].relative_to(PROJECT_ROOT)}")
+    print(f"calibration report: {artifact_paths['markdown_report'].relative_to(PROJECT_ROOT)}")
     if args.save_report:
         print(f"report: {report_path.relative_to(PROJECT_ROOT)}")
 

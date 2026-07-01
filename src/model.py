@@ -13,6 +13,7 @@ from src.model_policy import get_current_model_policy, model_policy_label
 from src.odds import decimal_odds_or_nan
 from src.ratings import neutral_team_rating, rating_row_for_team
 from src.utils import clamp, coerce_bool, coerce_float
+from src.venue_features import altitude_log_penalty, venue_log_adjustments
 
 
 MAX_GOALS = 7
@@ -91,10 +92,10 @@ def environmental_adjustments(
             0.45 * temp_gap + 0.18 * humidity_gap + heat_stress + humid_heat
         )
 
-        # Altitude mainly matters above roughly 1000-1200 m. Without team-level
-        # altitude adaptation data, keep this as a small generic penalty.
-        if altitude_m > 1200.0:
-            penalty += -0.000035 * (altitude_m - 1200.0)
+        # Altitude mainly matters above roughly 1000-1200 m. Teams with known
+        # high-altitude familiarity receive a smaller penalty, while venue-host
+        # advantage is handled separately in expected_goals.
+        penalty += altitude_log_penalty(team, altitude_m, team.get("team", ""))
         return clamp(penalty, -0.14, 0.04)
 
     total_drag = 0.0
@@ -140,6 +141,7 @@ def expected_goals(
     away_form = coerce_float(away.get("recent_form"), 0.55) - 0.60
 
     env_adj = environmental_adjustments(home, away, env, cfg)
+    venue_adj = venue_log_adjustments(home.get("team", ""), away.get("team", ""), env)
 
     h_log = (
         cfg.neutral_home_bias
@@ -148,6 +150,7 @@ def expected_goals(
         - cfg.defense_weight * away_def
         + cfg.form_weight * home_form
         + float(env_adj["home_environment_log_adj"])
+        + float(venue_adj["home_venue_log_adj"])
     )
 
     a_log = (
@@ -157,6 +160,7 @@ def expected_goals(
         - cfg.defense_weight * home_def
         + cfg.form_weight * away_form
         + float(env_adj["away_environment_log_adj"])
+        + float(venue_adj["away_venue_log_adj"])
     )
 
     raw_h = math.exp(h_log)
@@ -182,6 +186,7 @@ def expected_goals(
         "home_defense_input": coerce_float(home.get("defense"), 0.55),
         "away_defense_input": coerce_float(away.get("defense"), 0.55),
         **env_adj,
+        **venue_adj,
     }
     return hxg, axg, components
 
