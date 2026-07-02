@@ -16,6 +16,7 @@ from src.polymarket_sports_discovery import (
     GAMMA_EVENT_MARKET_COLUMNS,
     MARKETS_CACHE_PATH,
     flatten_gamma_events_to_markets,
+    write_polymarket_discovery_cache,
 )
 from src.polymarket_url_resolver import (
     DEFAULT_POLYMARKET_WEB_URL,
@@ -251,6 +252,7 @@ def load_polymarket_event_markets_by_slug(slug: str) -> pd.DataFrame:
     event, diagnostics = fetch_polymarket_event_by_slug_with_diagnostics(slug)
     if event:
         flat = flatten_gamma_events_to_markets([event])
+        _cache_resolved_event(event, flat, diagnostics)
         out = _outcome_level_market_rows(flat, fallback_slug=slug, source=SOURCE_API)
         if not out.empty:
             out.attrs["source_label"] = f"Polymarket event {diagnostics.get('method', 'api')}"
@@ -286,6 +288,15 @@ def load_polymarket_event_markets_by_slug(slug: str) -> pd.DataFrame:
         warnings = [*warnings, html_warning]
     out.attrs["warning"] = "; ".join(warnings)
     return out
+
+
+def _cache_resolved_event(event: dict[str, Any], flat_markets: pd.DataFrame, diagnostics: dict[str, Any]) -> None:
+    if str(diagnostics.get("method", "") or "").lower() == "synthetic":
+        return
+    try:
+        write_polymarket_discovery_cache([event], flat_markets)
+    except Exception:
+        return
 
 
 def load_polymarket_event_page_html(slug_or_url: str) -> str:
@@ -1146,7 +1157,11 @@ def _expected_outcome(model_row: pd.Series, home: str, away: str) -> tuple[str, 
 
 
 def _market_key(value: Any) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9.+-]+", " ", str(value or "").lower())).strip()
+    text = str(value or "").strip()
+    canonical = normalize_team_name(text)
+    if canonical and canonical != text:
+        text = canonical
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9.+-]+", " ", text.lower())).strip()
 
 
 def _clean_text(value: Any) -> str:

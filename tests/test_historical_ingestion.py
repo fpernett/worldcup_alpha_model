@@ -31,6 +31,7 @@ def test_team_name_normalization() -> None:
     assert normalize_team_name("Czech Republic") == "Czechia"
     assert normalize_team_name("Bosnia-Herzegovina") == "Bosnia and Herzegovina"
     assert normalize_team_name("Congo DR") == "DR Congo"
+    assert normalize_team_name("Cabo Verde") == "Cape Verde"
     assert normalize_team_name("Côte d'Ivoire") == "Ivory Coast"
 
 

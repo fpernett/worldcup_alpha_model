@@ -35,6 +35,8 @@ DEFAULT_TEAM_ALIASES = {
     "congo dr": "DR Congo",
     "congo, the democratic republic of the": "DR Congo",
     "democratic republic of congo": "DR Congo",
+    "cabo verde": "Cape Verde",
+    "cabo-verde": "Cape Verde",
     "ivory coast": "Ivory Coast",
     "cote d'ivoire": "Ivory Coast",
     "cote divoire": "Ivory Coast",

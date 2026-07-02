@@ -219,6 +219,41 @@ def test_moneyline_markets_join_home_draw_away() -> None:
     assert set(joined["polymarket_market_id"]) == {"ML-URY", "ML-DRAW", "ML-ESP"}
 
 
+def test_moneyline_join_normalizes_cabo_verde_to_cape_verde() -> None:
+    model = pd.DataFrame(
+        [
+            {"market": "1X2", "selection": "Away", "model_prob": 0.12, "fair_odds": 8.33},
+        ]
+    )
+    event_markets = pd.DataFrame(
+        [
+            {
+                "event_slug": "fifwc-arg-cvi-2026-07-03",
+                "event_title": "Argentina vs. Cabo Verde",
+                "market_id": "ML-CVI",
+                "market_slug": "fifwc-arg-cvi-2026-07-03-cvi",
+                "question": "Will Cabo Verde win on 2026-07-03?",
+                "market_title": "",
+                "market_type": "moneyline",
+                "outcomes": '["Yes","No"]',
+                "outcome_name": "Cabo Verde",
+                "price_cents": 9.0,
+                "odds_decimal": 11.11,
+                "liquidity": 1000,
+                "volume": 2000,
+                "source": "test",
+                "last_updated": "2026-07-03T00:00:00Z",
+            },
+        ]
+    )
+
+    joined = join_polymarket_prices_to_model_markets(model, event_markets, "Argentina", "Cape Verde")
+
+    assert joined.iloc[0]["polymarket_market_id"] == "ML-CVI"
+    assert joined.iloc[0]["market_price_cents"] == 9.0
+    assert joined.iloc[0]["mapping_confidence"] == "high"
+
+
 def test_totals_markets_join_over_under_2_5() -> None:
     model = _model_markets().loc[_model_markets()["market"] == "Total"]
     joined = join_polymarket_prices_to_model_markets(model, _event_markets(), "Uruguay", "Spain")
@@ -610,10 +645,15 @@ def test_user_supplied_url_overrides_registry_for_colombia_portugal(monkeypatch)
 
 def test_event_market_loader_extracts_outcome_rows(monkeypatch) -> None:
     event = _synthetic_event()
+    cache_calls = []
 
     monkeypatch.setattr(
         "src.polymarket_slug_join.fetch_polymarket_event_by_slug_with_diagnostics",
-        lambda *_args, **_kwargs: (event, {"method": "synthetic", "warnings": []}),
+        lambda *_args, **_kwargs: (event, {"method": "gamma_events_slug_filter", "warnings": []}),
+    )
+    monkeypatch.setattr(
+        "src.polymarket_slug_join.write_polymarket_discovery_cache",
+        lambda events, markets: cache_calls.append((events, markets.copy())),
     )
 
     markets = load_polymarket_event_markets_by_slug("fifwc-ury-esp-2026-06-26")
@@ -621,6 +661,9 @@ def test_event_market_loader_extracts_outcome_rows(monkeypatch) -> None:
     assert set(markets["market_type"]) == {"moneyline", "total"}
     assert "Uruguay" in set(markets["outcome_name"])
     assert "Over 2.5" in set(markets["outcome_name"])
+    assert len(cache_calls) == 1
+    assert cache_calls[0][0] == [event]
+    assert set(cache_calls[0][1]["market_id"]) == {"ML-URY", "TOT-OVER", "TOT-UNDER"}
 
 
 def _synthetic_event() -> dict:

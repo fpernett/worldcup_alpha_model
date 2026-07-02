@@ -170,6 +170,9 @@ def get_match_polymarket_markets(home: str, away: str, date_utc: Any | None = No
     back to team searches. The mapper still validates each market before use.
     """
     event_markets, event_error = _fetch_event_markets_from_api(_match_event_slug_candidates(home, away, date_utc))
+    if event_markets is not None and not event_markets.empty:
+        return event_markets
+
     frames = [event_markets]
     frames.extend(
         get_polymarket_markets(query=query, use_cache=False, force_refresh=True, write_cache=False)

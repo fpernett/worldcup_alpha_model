@@ -348,7 +348,10 @@ def test_selected_match_search_loads_gamma_event_markets(monkeypatch) -> None:
         def json(self):
             return self.records
 
+    calls = []
+
     def fake_get(url, params=None, timeout=0):
+        calls.append((url, params or {}))
         if url == "https://gamma-api.polymarket.com/events":
             return FakeResponse(event_payload if (params or {}).get("slug") == "fifwc-can-qat-2026-06-18" else [])
         return FakeResponse([])
@@ -370,6 +373,7 @@ def test_selected_match_search_loads_gamma_event_markets(monkeypatch) -> None:
     assert set(markets["market_id"]) == {"1897112", "1897113", "1897114"}
     assert set(mapped["model_side"]) == {"home_win", "draw", "away_win"}
     assert mapped.loc[mapped["model_side"] == "home_win", "yes_price"].iloc[0] == 0.765
+    assert not any(url.endswith("/markets") for url, _params in calls)
 
 
 def test_mexico_korea_event_slug_uses_polymarket_team_code_and_local_date(monkeypatch) -> None:
