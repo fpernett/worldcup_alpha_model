@@ -33,6 +33,8 @@ def test_team_name_normalization() -> None:
     assert normalize_team_name("Congo DR") == "DR Congo"
     assert normalize_team_name("Cabo Verde") == "Cape Verde"
     assert normalize_team_name("Côte d'Ivoire") == "Ivory Coast"
+    assert normalize_team_name("Hrvatska") == "Croatia"
+    assert normalize_team_name("HRV") == "Croatia"
 
 
 def test_competition_type_classification() -> None:

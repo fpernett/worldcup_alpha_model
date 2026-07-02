@@ -675,51 +675,37 @@ def market_value_groups(markets_tab_df: pd.DataFrame | None, home: str = "", awa
 
 
 def polymarket_alpha_rows(joined_df: pd.DataFrame) -> pd.DataFrame:
+    display_columns = [
+        "market",
+        "model_probability",
+        "fair_price_cents",
+        "market_price_cents",
+        "polymarket_price_cents",
+        "alpha_gap_cents",
+        "alpha_ev",
+        "score",
+        "signal",
+        "signal_strength",
+        "polymarket_question",
+        "question",
+        "mapping_confidence",
+        "event_slug",
+    ]
     joined = joined_df.copy() if joined_df is not None else pd.DataFrame(columns=JOINED_MARKET_COLUMNS)
+    for col in JOINED_MARKET_COLUMNS:
+        if col not in joined.columns:
+            joined[col] = pd.NA
     if joined.empty:
-        return pd.DataFrame(
-            columns=[
-                "market",
-                "model_probability",
-                "fair_price_cents",
-                "market_price_cents",
-                "alpha_gap_cents",
-                "score",
-                "signal",
-                "polymarket_question",
-                "mapping_confidence",
-                "event_slug",
-            ]
-        )
+        return pd.DataFrame(columns=display_columns)
     available = joined.loc[joined["market_price_cents"].notna()].copy()
     if available.empty:
-        return pd.DataFrame(columns=[
-            "market",
-            "model_probability",
-            "fair_price_cents",
-            "market_price_cents",
-            "alpha_gap_cents",
-            "score",
-            "signal",
-            "polymarket_question",
-            "mapping_confidence",
-            "event_slug",
-        ])
+        return pd.DataFrame(columns=display_columns)
     available["market"] = available["market"].astype(str) + ": " + available["selection"].astype(str)
-    return available[
-        [
-            "market",
-            "model_probability",
-            "fair_price_cents",
-            "market_price_cents",
-            "alpha_gap_cents",
-            "score",
-            "signal",
-            "polymarket_question",
-            "mapping_confidence",
-            "event_slug",
-        ]
-    ].sort_values("score", ascending=False).reset_index(drop=True)
+    available["polymarket_price_cents"] = available["market_price_cents"]
+    available["alpha_ev"] = available["ev"]
+    available["signal_strength"] = available["signal"]
+    available["question"] = available["polymarket_question"]
+    return available[display_columns].sort_values("score", ascending=False).reset_index(drop=True)
 
 
 def top_alpha_empty_state_message(

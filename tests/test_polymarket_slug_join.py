@@ -166,6 +166,16 @@ def test_portugal_code_variants_and_colombia_portugal_candidates() -> None:
     assert "fifwc-por-col-2026-06-27" in candidates
 
 
+def test_portugal_croatia_slug_generation_includes_polymarket_hrv_code() -> None:
+    croatia_codes = get_polymarket_team_code_variants("Croatia")
+    candidates = build_polymarket_sports_slug_candidates("Portugal", "Croatia", "2026-07-02")
+
+    assert "CRO" in croatia_codes
+    assert "HRV" in croatia_codes
+    assert "fifwc-prt-hrv-2026-07-02" in candidates
+    assert "fifwc-hrv-prt-2026-07-02" in candidates
+
+
 def test_netherlands_morocco_slug_generation_includes_fifa_codes_and_prior_local_date() -> None:
     netherlands_codes = get_polymarket_team_code_variants("Netherlands")
     morocco_codes = get_polymarket_team_code_variants("Morocco")
@@ -209,6 +219,22 @@ def test_reversed_slug_order_still_validates() -> None:
     assert resolved["matched_home"] is True
     assert resolved["matched_away"] is True
     assert resolved["team_order"] == "away-home"
+
+
+def test_portugal_croatia_user_supplied_hrv_slug_validates() -> None:
+    resolved = resolve_polymarket_slug_for_fixture(
+        "Portugal",
+        "Croatia",
+        "2026-07-02",
+        user_supplied_slug_or_url="fifwc-prt-hrv-2026-07-02",
+    )
+
+    assert resolved["resolution_status"] == "resolved"
+    assert resolved["resolved_slug"] == "fifwc-prt-hrv-2026-07-02"
+    assert resolved["matched_home"] is True
+    assert resolved["matched_away"] is True
+    assert resolved["matched_date"] is True
+    assert resolved["team_order"] == "home-away"
 
 
 def test_moneyline_markets_join_home_draw_away() -> None:
@@ -495,6 +521,10 @@ def test_polymarket_alpha_table_not_empty_when_markets_match() -> None:
 
     assert not alpha_rows.empty
     assert "market_price_cents" in alpha_rows.columns
+    assert "polymarket_price_cents" in alpha_rows.columns
+    assert "alpha_ev" in alpha_rows.columns
+    assert "signal_strength" in alpha_rows.columns
+    assert alpha_rows["polymarket_price_cents"].notna().all()
 
 
 def test_tournament_context_not_displayed_in_dashboard_by_default() -> None:

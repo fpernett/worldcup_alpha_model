@@ -2032,10 +2032,15 @@ for label in selected_labels:
     with tabs[1]:
         st.subheader("Alpha Read")
         top_alpha_rows = alpha.loc[alpha["alpha_ev"].notna()].sort_values("alpha_ev", ascending=False)
-        top_pm_source = filtered_polymarket_alpha if not filtered_polymarket_alpha.empty else polymarket_alpha
-        top_pm_rows = top_pm_source.loc[top_pm_source["alpha_gap_cents"].notna()].sort_values(
-            "alpha_gap_cents", ascending=False
-        ) if not top_pm_source.empty else pd.DataFrame()
+        if not joined_polymarket_alpha_rows.empty:
+            top_pm_rows = joined_polymarket_alpha_rows.loc[
+                joined_polymarket_alpha_rows["alpha_gap_cents"].notna()
+            ].sort_values("alpha_gap_cents", ascending=False)
+        else:
+            top_pm_source = filtered_polymarket_alpha if not filtered_polymarket_alpha.empty else polymarket_alpha
+            top_pm_rows = top_pm_source.loc[top_pm_source["alpha_gap_cents"].notna()].sort_values(
+                "alpha_gap_cents", ascending=False
+            ) if not top_pm_source.empty else pd.DataFrame()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Model confidence", confidence["label"])
         c2.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
@@ -2363,65 +2368,77 @@ for label in selected_labels:
                 st.write("Rejected search candidates")
                 display_dataframe(rejected_search[[col for col in diag_cols if col in rejected_search.columns]], hide_index=True, width="stretch")
         if mapping_market_pool.empty:
-            st.warning(
-                "No Polymarket market data is loaded, so there is nothing to map for this match. "
-                "Click **Update Polymarket markets** to refresh the default Gamma API, broaden the "
-                "sidebar market search query, or add fallback rows to `data/polymarket_markets.csv`."
-            )
-            st.caption(
-                "Required CSV columns: market_id, question, slug, event_title, category, start_date, "
-                "end_date, active, closed, outcomes, yes_price, no_price, liquidity, volume, source, last_updated."
-            )
-        elif mapped_markets.empty:
-            mostly_outrights = (
-                not unmapped_diagnostics.empty
-                and unmapped_diagnostics["rejection_reason"]
-                .astype(str)
-                .str.contains("Tournament outright", case=False, na=False)
-                .all()
-            )
-            search_detail = (
-                " The app also searched Gamma by the selected home and away team names."
-                if search_selected_match
-                else " Turn on **Search selected match markets** to query Gamma by the selected teams."
-            )
-            reason_detail = (
-                " Gamma only returned tournament-winner markets for these teams."
-                if mostly_outrights
-                else ""
-            )
-            st.warning(
-                f"Checked {len(mapping_market_pool)} Polymarket market row(s), but none matched "
-                f"{result['home']} vs {result['away']}.{search_detail}{reason_detail} Add a confirmed row to "
-                "`data/market_mappings.csv` or adjust the Polymarket market data/query. Turn off "
-                "**Show only mapped markets** to inspect the loaded Gamma rows."
-            )
-            if not unmapped_diagnostics.empty:
-                diagnostic_display = unmapped_diagnostics.head(25).copy()
-                for col in ["yes_price", "no_price"]:
-                    if col in diagnostic_display.columns:
-                        diagnostic_display[col] = diagnostic_display[col].map(
-                            lambda x: "" if pd.isna(x) else f"{100*float(x):.1f}"
-                        )
-                display_dataframe(
-                    diagnostic_display[
-                        [
-                            "market_id",
-                            "question",
-                            "event_title",
-                            "has_home",
-                            "has_away",
-                            "market_type_guess",
-                            "rejection_reason",
-                            "yes_price",
-                            "no_price",
-                            "liquidity",
-                            "volume",
-                        ]
-                    ],
-                    hide_index=True,
-                    width="stretch",
+            if not joined_polymarket_alpha_rows.empty:
+                st.info(
+                    "The event-slug resolver found matching Polymarket markets for this fixture. "
+                    "The broader legacy market pool is empty, so the alpha table below uses the resolved event rows."
                 )
+            else:
+                st.warning(
+                    "No Polymarket market data is loaded, so there is nothing to map for this match. "
+                    "Click **Update Polymarket markets** to refresh the default Gamma API, broaden the "
+                    "sidebar market search query, or add fallback rows to `data/polymarket_markets.csv`."
+                )
+                st.caption(
+                    "Required CSV columns: market_id, question, slug, event_title, category, start_date, "
+                    "end_date, active, closed, outcomes, yes_price, no_price, liquidity, volume, source, last_updated."
+                )
+        elif mapped_markets.empty:
+            if not joined_polymarket_alpha_rows.empty:
+                st.info(
+                    "The event-slug resolver found matching Polymarket markets for this fixture. "
+                    "The broader legacy fuzzy mapper did not add separate candidate rows."
+                )
+            else:
+                mostly_outrights = (
+                    not unmapped_diagnostics.empty
+                    and unmapped_diagnostics["rejection_reason"]
+                    .astype(str)
+                    .str.contains("Tournament outright", case=False, na=False)
+                    .all()
+                )
+                search_detail = (
+                    " The app also searched Gamma by the selected home and away team names."
+                    if search_selected_match
+                    else " Turn on **Search selected match markets** to query Gamma by the selected teams."
+                )
+                reason_detail = (
+                    " Gamma only returned tournament-winner markets for these teams."
+                    if mostly_outrights
+                    else ""
+                )
+                st.warning(
+                    f"Checked {len(mapping_market_pool)} Polymarket market row(s), but none matched "
+                    f"{result['home']} vs {result['away']}.{search_detail}{reason_detail} Add a confirmed row to "
+                    "`data/market_mappings.csv` or adjust the Polymarket market data/query. Turn off "
+                    "**Show only mapped markets** to inspect the loaded Gamma rows."
+                )
+                if not unmapped_diagnostics.empty:
+                    diagnostic_display = unmapped_diagnostics.head(25).copy()
+                    for col in ["yes_price", "no_price"]:
+                        if col in diagnostic_display.columns:
+                            diagnostic_display[col] = diagnostic_display[col].map(
+                                lambda x: "" if pd.isna(x) else f"{100*float(x):.1f}"
+                            )
+                    display_dataframe(
+                        diagnostic_display[
+                            [
+                                "market_id",
+                                "question",
+                                "event_title",
+                                "has_home",
+                                "has_away",
+                                "market_type_guess",
+                                "rejection_reason",
+                                "yes_price",
+                                "no_price",
+                                "liquidity",
+                                "volume",
+                            ]
+                        ],
+                        hide_index=True,
+                        width="stretch",
+                    )
         else:
             candidate_display = mapped_markets.copy()
             for col in ["yes_price", "no_price"]:
@@ -2451,7 +2468,30 @@ for label in selected_labels:
             )
 
         st.subheader("Polymarket Alpha")
-        if filtered_polymarket_alpha.empty:
+        if not joined_polymarket_alpha_rows.empty:
+            st.caption("Showing event-slug joined rows from the resolved Polymarket fixture event.")
+            display_dataframe(
+                polymarket_alpha_display(
+                    joined_polymarket_alpha_rows[
+                        [
+                            "market",
+                            "question",
+                            "model_probability",
+                            "fair_price_cents",
+                            "polymarket_price_cents",
+                            "alpha_gap_cents",
+                            "alpha_ev",
+                            "score",
+                            "signal_strength",
+                            "mapping_confidence",
+                            "event_slug",
+                        ]
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        elif filtered_polymarket_alpha.empty:
             reason_no_rows = polymarket_alpha_diagnostics.get("reason_no_alpha_rows", "") or "No joined Polymarket alpha rows are available."
             if polymarket_alpha.empty:
                 st.info(reason_no_rows)
@@ -2505,23 +2545,25 @@ for label in selected_labels:
             )
             st.caption("Mapped Polymarket rows use loaded Gamma/cache/local market data. This is a statistical screen, not betting advice.")
 
-        if not joined_polymarket_alpha_rows.empty:
-            st.write("Event-slug joined Polymarket rows")
+        if not joined_polymarket_alpha_rows.empty and not filtered_polymarket_alpha.empty:
+            st.write("Additional mapped Polymarket rows")
             display_dataframe(
-                joined_polymarket_alpha_rows[
-                    [
-                        "market",
-                        "model_probability",
-                        "fair_price_cents",
-                        "market_price_cents",
-                        "alpha_gap_cents",
-                        "score",
-                        "signal",
-                        "polymarket_question",
-                        "mapping_confidence",
-                        "event_slug",
+                polymarket_alpha_display(
+                    filtered_polymarket_alpha[
+                        [
+                            "market",
+                            "selection",
+                            "question",
+                            "model_probability",
+                            "fair_price_cents",
+                            "polymarket_price_cents",
+                            "alpha_gap_cents",
+                            "alpha_ev",
+                            "signal_strength",
+                            "mapping_confidence",
+                        ]
                     ]
-                ],
+                ),
                 hide_index=True,
                 width="stretch",
             )
