@@ -4,7 +4,7 @@ import pandas as pd
 
 from src.climate import environment_from_venue_row
 from src.data_sources import filter_future_fixtures
-from src.model import ModelConfig, environmental_adjustments, fair_odds, outcome_probs, run_match_model, score_matrix
+from src.model import ModelConfig, environmental_adjustments, expected_goals, fair_odds, outcome_probs, run_match_model, score_matrix
 
 
 def sample_teams() -> pd.DataFrame:
@@ -118,6 +118,45 @@ def test_roof_closed_reduces_weather_impact() -> None:
 
     assert abs(roof_adj["total_environment_log_adj"]) < abs(open_adj["total_environment_log_adj"])
     assert roof_adj["weather_impact_multiplier"] < open_adj["weather_impact_multiplier"]
+
+
+def test_expected_goals_uses_natural_matchup_total_not_fixed_anchor() -> None:
+    def team(name: str, attack: float, defense: float) -> pd.Series:
+        return pd.Series(
+            {
+                "team": name,
+                "elo": 1700,
+                "attack": attack,
+                "defense": defense,
+                "recent_form": 0.60,
+                "training_temp_c": 22,
+                "training_humidity_pct": 55,
+            }
+        )
+
+    env = {
+        "venue": "Neutral Test",
+        "country": "USA",
+        "altitude_m": 0,
+        "temp_c": 22,
+        "humidity_pct": 55,
+        "wind_kmh": 0,
+        "precipitation_mm": 0,
+        "roof_expected_closed": 0,
+        "neutral_site": 1,
+    }
+    cfg = ModelConfig(base_total_goals=2.50)
+
+    high_hxg, high_axg, high_components = expected_goals(team("Alpha", 0.90, 0.40), team("Beta", 0.90, 0.40), env, cfg)
+    low_hxg, low_axg, low_components = expected_goals(team("Gamma", 0.50, 0.80), team("Delta", 0.50, 0.80), env, cfg)
+
+    assert high_hxg + high_axg > low_hxg + low_axg
+    assert abs((high_hxg + high_axg) - cfg.base_total_goals) > 0.05
+    assert abs((low_hxg + low_axg) - cfg.base_total_goals) > 0.05
+    assert high_components["old_base_total_goals_anchored_total_xg"] == cfg.base_total_goals
+    assert low_components["old_base_total_goals_anchored_total_xg"] == cfg.base_total_goals
+    assert high_components["home_raw_xg_before_adjustments"] > 0
+    assert high_components["home_final_xg"] == high_hxg
 
 
 def test_future_fixture_filter_excludes_past_and_keeps_tomorrow() -> None:

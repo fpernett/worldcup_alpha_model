@@ -28,6 +28,7 @@ def fair_odds(prob: float) -> float:
 @dataclass
 class ModelConfig:
     base_total_goals: float = 2.50
+    global_xg_calibration_multiplier: float = 1.00
     elo_xg_weight: float = 0.0032
     attack_weight: float = 0.55
     defense_weight: float = 0.45
@@ -143,44 +144,71 @@ def expected_goals(
     env_adj = environmental_adjustments(home, away, env, cfg)
     venue_adj = venue_log_adjustments(home.get("team", ""), away.get("team", ""), env)
 
-    h_log = (
+    h_base_log = (
         cfg.neutral_home_bias
         + cfg.elo_xg_weight * cfg.rating_gap_to_xg_scale * elo_diff
         + cfg.attack_weight * home_attack
         - cfg.defense_weight * away_def
         + cfg.form_weight * home_form
-        + float(env_adj["home_environment_log_adj"])
-        + float(venue_adj["home_venue_log_adj"])
     )
 
-    a_log = (
+    a_base_log = (
         -cfg.neutral_home_bias
         - cfg.elo_xg_weight * cfg.rating_gap_to_xg_scale * elo_diff
         + cfg.attack_weight * away_attack
         - cfg.defense_weight * home_def
         + cfg.form_weight * away_form
-        + float(env_adj["away_environment_log_adj"])
-        + float(venue_adj["away_venue_log_adj"])
     )
 
+    h_log = h_base_log + float(env_adj["home_environment_log_adj"]) + float(venue_adj["home_venue_log_adj"])
+    a_log = a_base_log + float(env_adj["away_environment_log_adj"]) + float(venue_adj["away_venue_log_adj"])
+
+    base_raw_h = math.exp(h_base_log)
+    base_raw_a = math.exp(a_base_log)
     raw_h = math.exp(h_log)
     raw_a = math.exp(a_log)
-    adjusted_total = cfg.base_total_goals * math.exp(float(env_adj["total_environment_log_adj"]))
-    total_scale = adjusted_total / (raw_h + raw_a)
-    hxg = clamp(raw_h * total_scale, 0.15, 3.80)
-    axg = clamp(raw_a * total_scale, 0.15, 3.80)
+    weather_xg_multiplier = math.exp(float(env_adj["total_environment_log_adj"]))
+    global_xg_multiplier = max(coerce_float(cfg.global_xg_calibration_multiplier, 1.0), 0.0)
+    unclamped_hxg = raw_h * weather_xg_multiplier * global_xg_multiplier
+    unclamped_axg = raw_a * weather_xg_multiplier * global_xg_multiplier
+    hxg = clamp(unclamped_hxg, 0.15, 3.80)
+    axg = clamp(unclamped_axg, 0.15, 3.80)
+
+    old_adjusted_total = cfg.base_total_goals * weather_xg_multiplier
+    old_total_scale = old_adjusted_total / (raw_h + raw_a)
+    old_anchored_hxg = clamp(raw_h * old_total_scale, 0.15, 3.80)
+    old_anchored_axg = clamp(raw_a * old_total_scale, 0.15, 3.80)
 
     components: Dict[str, Any] = {
         "elo_diff": elo_diff,
         "elo_xg_weight": cfg.elo_xg_weight,
         "rating_gap_to_xg_scale": cfg.rating_gap_to_xg_scale,
         "base_total_goals": cfg.base_total_goals,
+        "global_xg_calibration_multiplier": global_xg_multiplier,
         "draw_inflation_factor": cfg.draw_inflation_factor,
         "favorite_strength_scale": cfg.favorite_strength_scale,
         "underdog_resistance_scale": cfg.underdog_resistance_scale,
         "external_prior_weight": cfg.external_prior_weight,
         "goal_correlation_adjustment": cfg.goal_correlation_adjustment,
-        "adjusted_total_goals": adjusted_total,
+        "home_base_log_strength": h_base_log,
+        "away_base_log_strength": a_base_log,
+        "home_final_log_strength": h_log,
+        "away_final_log_strength": a_log,
+        "home_raw_xg_before_adjustments": base_raw_h,
+        "away_raw_xg_before_adjustments": base_raw_a,
+        "home_raw_xg": raw_h,
+        "away_raw_xg": raw_a,
+        "weather_xg_multiplier": weather_xg_multiplier,
+        "home_unclamped_xg": unclamped_hxg,
+        "away_unclamped_xg": unclamped_axg,
+        "home_final_xg": hxg,
+        "away_final_xg": axg,
+        "adjusted_total_goals": hxg + axg,
+        "old_base_total_goals_adjusted_total": old_adjusted_total,
+        "old_base_total_goals_total_scale": old_total_scale,
+        "old_base_total_goals_anchored_home_xg": old_anchored_hxg,
+        "old_base_total_goals_anchored_away_xg": old_anchored_axg,
+        "old_base_total_goals_anchored_total_xg": old_anchored_hxg + old_anchored_axg,
         "home_attack_input": coerce_float(home.get("attack"), 0.55),
         "away_attack_input": coerce_float(away.get("attack"), 0.55),
         "home_defense_input": coerce_float(home.get("defense"), 0.55),
