@@ -1,0 +1,4 @@
+model,outcome,probability_bin,n,avg_predicted_probability,observed_frequency,calibration_error
+raw_model,home_win,0.40-0.60,2,0.4525145067210511,1.0,0.5474854932789489
+raw_model,draw,0.20-0.40,2,0.26480767462965815,0.0,0.26480767462965815
+raw_model,away_win,0.20-0.40,2,0.28267781864929076,0.0,0.28267781864929076

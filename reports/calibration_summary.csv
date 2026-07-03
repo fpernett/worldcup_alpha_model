@@ -1,0 +1,2 @@
+model,n,top_pick_accuracy,brier_score,multiclass_log_loss,expected_calibration_error,mean_actual_result_probability,calibration_slope,calibration_intercept,status
+raw_model,2,1.0,0.44977021904998227,0.7929354573039902,0.36499032885263266,0.4525145067210511,,,ok

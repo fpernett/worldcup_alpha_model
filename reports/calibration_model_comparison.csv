@@ -1,0 +1,8 @@
+model,n,brier_score,log_loss,top_pick_accuracy,expected_calibration_error,brier_delta_vs_raw,log_loss_delta_vs_raw,production_status,notes
+raw_model,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.
+temperature_scaling,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.
+shrinkage_to_base_rates,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.
+market_prior_blend,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.
+behavior_gated_shrinkage,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.
+confidence_gated_shrinkage,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.
+combined_conservative_calibrated_model,0,,,,,,,not_promoted_sample_too_small,Need more than 30 completed pre-kickoff predictions for walk-forward scoring.

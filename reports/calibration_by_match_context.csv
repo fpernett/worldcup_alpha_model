@@ -1,0 +1,7 @@
+dimension,segment,n,top_pick_accuracy,brier_score,multiclass_log_loss
+favorite_probability_band,0.40-0.60,2,1.0,0.44977021904998227,0.7929354573039902
+draw_probability_band,0.20-0.40,2,1.0,0.44977021904998227,0.7929354573039902
+behavior_disagreement_band,missing,2,1.0,0.44977021904998227,0.7929354573039902
+market_disagreement_band,missing,2,1.0,0.44977021904998227,0.7929354573039902
+market_join_status,no_event_resolved,2,1.0,0.44977021904998227,0.7929354573039902
+match_context,knockout,2,1.0,0.44977021904998227,0.7929354573039902

@@ -1,0 +1,1 @@
+model,prediction_id,match_id,generated_at_utc,kickoff_utc,home_team,away_team,actual_result_1x2,home_prob,draw_prob,away_prob,brier_score,log_loss,top_pick_correct,probability_assigned_to_actual

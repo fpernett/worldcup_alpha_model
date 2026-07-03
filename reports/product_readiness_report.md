@@ -83,3 +83,33 @@ The Milestone 1 subscriber-facing issues are fixed for the two verified reports,
 - More completed prediction snapshots are needed before performance claims can be made responsibly.
 
 Current recommended status: internal beta / controlled reviewer access only.
+
+## Milestone 2 predictive calibration addendum
+
+Date: 2026-07-03
+
+Milestone 2 adds a formal evaluation pipeline and does not change the Milestone 1 production-clean report status above.
+
+- Generated `reports/evaluation_dataset.csv` from pre-kickoff prediction snapshots joined to completed 90-minute results.
+- Generated calibration outputs: `reports/calibration_summary.csv`, `reports/calibration_by_bin.csv`, `reports/calibration_by_confidence.csv`, `reports/calibration_by_match_context.csv`, `reports/worst_model_misses.csv`, and `reports/calibration_report.md`.
+- Generated walk-forward candidate outputs: `reports/calibration_model_comparison.csv` and `reports/walk_forward_calibration_results.csv`.
+- Generated market benchmark outputs: `reports/model_vs_market_benchmark.csv` and `reports/model_vs_market_report.md`.
+- Generated recent diagnostic post-mortem outputs: `reports/recent_match_postmortem.csv` and `reports/recent_match_postmortem.md`.
+- Added evidence-based confidence scoring with explicit caps for small calibration sample, missing market joins, behavior disagreement, venue uncertainty, knockout/draw risk, and extreme favorite probabilities.
+
+Current Milestone 2 evidence:
+
+- Usable evaluated prediction snapshots: 2.
+- Raw model on usable rows: Brier 0.4498, log loss 0.7929, top-pick accuracy 100.0%.
+- Calibrated probabilities are not production-eligible; the sample is too small for walk-forward promotion.
+- Market benchmark sample is too small for reliable conclusions.
+- Mexico vs Ecuador is documented as a diagnostic miss; it should trigger low-confidence, behavior-disagreement, venue-context, and calibration cautions in similar future cases.
+
+Current subscription readiness after Milestone 2: still not ready for broad paid-subscriber launch.
+
+Exact remaining blockers:
+
+- Need materially more completed pre-kickoff prediction snapshots before accuracy, calibration, or market-edge claims are credible.
+- Need semantically matched 90-minute 1X2 market samples before claiming the model beats or complements market-implied probabilities.
+- Need browser/manual click-through QA in addition to generated-report and unit-test verification.
+- Need result-ledger coverage for the recent diagnostic knockout matches before those cases can enter formal calibration metrics rather than diagnostic post-mortem only.

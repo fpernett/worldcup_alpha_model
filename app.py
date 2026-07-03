@@ -23,8 +23,10 @@ from src.behavior_driver_report import (
 from src.calibration import build_calibration_backtest_report, build_calibration_evaluation_dataset
 from src.climate import get_team_training_climate, get_venue_environment, load_venues
 from src.config import DATA_DIR, api_summary
+from src.confidence import calibration_status_label, model_market_benchmark_status, score_forecast_confidence
 from src.data_sources import FIXTURE_COLUMNS, filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.environment_response import calculate_environment_response
+from src.evaluation import build_formal_evaluation_dataset, model_vs_market_benchmark
 from src.external_benchmark_calibration import (
     audit_external_benchmark_coverage,
     build_external_calibration_proposals,
@@ -488,6 +490,39 @@ def behavior_delta_display(value: float) -> str:
     if pd.isna(value):
         return ""
     return f"{float(value):+.3f}"
+
+
+def probability_gap_pp(left: list[Any], right: list[Any]) -> float | pd.NA:
+    values = []
+    for left_value, right_value in zip(left, right):
+        try:
+            left_num = float(left_value)
+            right_num = float(right_value)
+        except (TypeError, ValueError):
+            continue
+        if pd.notna(left_num) and pd.notna(right_num):
+            values.append(abs(left_num - right_num) * 100.0)
+    return max(values) if values else pd.NA
+
+
+def current_behavior_disagreement_pp(probs: dict[str, float], behavior_result: dict | None) -> float | pd.NA:
+    if not behavior_result:
+        return pd.NA
+    behavior_probs = behavior_result.get("probs", {}) if isinstance(behavior_result, dict) else {}
+    return probability_gap_pp(
+        [probs.get("home_win"), probs.get("draw"), probs.get("away_win")],
+        [behavior_probs.get("home_win"), behavior_probs.get("draw"), behavior_probs.get("away_win")],
+    )
+
+
+def current_market_disagreement_pp(joined_alpha_rows: pd.DataFrame, mapped_alpha_rows: pd.DataFrame) -> float | pd.NA:
+    candidates = joined_alpha_rows.copy() if joined_alpha_rows is not None else pd.DataFrame()
+    if candidates.empty and mapped_alpha_rows is not None:
+        candidates = mapped_alpha_rows.copy()
+    if candidates.empty or "alpha_gap_cents" not in candidates.columns:
+        return pd.NA
+    values = pd.to_numeric(candidates["alpha_gap_cents"], errors="coerce").dropna().abs()
+    return float(values.max()) if not values.empty else pd.NA
 
 
 def build_source_status(fixtures, teams, venues, odds, historical_long_matches=None, team_behavior=None) -> pd.DataFrame:
@@ -1834,6 +1869,46 @@ for label in selected_labels:
         )
         market_groups = market_value_groups(fallback_markets_tab_df, result["home"], result["away"])
 
+    confidence_evaluation = build_formal_evaluation_dataset(
+        load_prediction_ledger(),
+        load_results_ledger(),
+        market_odds_df=market_odds,
+    )
+    calibration_sample_size = len(confidence_evaluation)
+    calibration_status = calibration_status_label(calibration_sample_size)
+    market_benchmark_df = model_vs_market_benchmark(confidence_evaluation)
+    market_benchmark_status = (
+        str(market_benchmark_df.iloc[0].get("status", "No market data"))
+        if isinstance(market_benchmark_df, pd.DataFrame) and not market_benchmark_df.empty
+        else "No market data"
+    )
+    if market_benchmark_status == "Market benchmark sample too small for reliable conclusions.":
+        market_benchmark_status = model_market_benchmark_status(
+            int(market_benchmark_df.iloc[0].get("n", 0)) if not market_benchmark_df.empty else 0
+        )
+    behavior_gap_pp = current_behavior_disagreement_pp(probs, behavior_diagnostic_result)
+    market_gap_pp = current_market_disagreement_pp(joined_polymarket_alpha_rows, filtered_polymarket_alpha)
+    venue_context = str(result.get("components", {}).get("venue_context", "") or "")
+    min_team_sample = min(
+        int(data_support.get("home_team_match_count", 0) or 0),
+        int(data_support.get("away_team_match_count", 0) or 0),
+    )
+    evidence_confidence = score_forecast_confidence(
+        calibration_sample_size=calibration_sample_size,
+        calibration_status=calibration_status,
+        market_join_status=str(markets_tab_diagnostics.get("market_join_status", "model_only")),
+        behavior_disagreement_pp=behavior_gap_pp,
+        market_disagreement_pp=market_gap_pp,
+        venue_context=venue_context or "neutral",
+        venue_uncertainty=not bool(venue_context),
+        data_recency_hours=pd.NA,
+        team_sample_size=min_team_sample,
+        match_round=str(match.get("group", "")),
+        draw_probability=probs.get("draw", pd.NA),
+        favorite_probability=max(probs.get("home_win", 0.0), probs.get("away_win", 0.0)),
+        injuries_news_integrated=False,
+    )
+
     st.divider()
     st.header(f"{result['home']} vs {result['away']}")
     st.caption(
@@ -1976,8 +2051,18 @@ for label in selected_labels:
             display_dataframe(display_diag, hide_index=True, width="stretch")
             st.caption("Behavior probabilities are diagnostic-only and do not drive the primary alpha tables.")
 
-        st.subheader("Model Confidence")
-        st.write(f"**{confidence['label']} confidence**: {', '.join(confidence['reasons'])}.")
+        st.subheader("Forecast Confidence")
+        fc1, fc2, fc3 = st.columns(3)
+        fc1.metric(
+            "Evidence confidence",
+            f"{evidence_confidence['confidence_label']} ({evidence_confidence['confidence_score']:.0f}/100)",
+        )
+        fc2.metric("Calibration status", calibration_status)
+        fc3.metric("Market benchmark", market_benchmark_status)
+        st.write(f"**Input confidence**: {confidence['label']}. {', '.join(confidence['reasons'])}.")
+        st.write(f"**Evidence reason**: {evidence_confidence['confidence_reason']}")
+        if evidence_confidence.get("confidence_flags"):
+            st.caption(f"Confidence flags: {evidence_confidence['confidence_flags']}")
 
         st.subheader("Top Alpha Signals")
         top_alpha_signals = joined_polymarket_alpha_rows.copy()
@@ -2062,7 +2147,10 @@ for label in selected_labels:
     with tabs[1]:
         st.subheader("Alpha Read")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Model confidence", confidence["label"])
+        c1.metric(
+            "Forecast confidence",
+            f"{evidence_confidence['confidence_label']} ({evidence_confidence['confidence_score']:.0f}/100)",
+        )
         c2.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
         local_headline = local_edge_headline_metric(alpha)
         polymarket_headline = polymarket_gap_headline_metric(
@@ -2148,6 +2236,10 @@ for label in selected_labels:
                     {"Item": "Model version", "Value": "Match report v1 / transparent Poisson xG model"},
                     {"Item": "Primary model mode", "Value": current_model_policy["primary_model_mode"]},
                     {"Item": "Behavior status", "Value": current_model_policy["behavior_status"]},
+                    {"Item": "Evidence confidence", "Value": f"{evidence_confidence['confidence_label']} ({evidence_confidence['confidence_score']:.0f}/100)"},
+                    {"Item": "Calibration status", "Value": calibration_status},
+                    {"Item": "Model-market benchmark status", "Value": market_benchmark_status},
+                    {"Item": "Confidence flags", "Value": evidence_confidence.get("confidence_flags", "") or "None"},
                     {"Item": "Behavior default blend", "Value": f"{float(current_model_policy['behavior_default_blend']):.2f}"},
                     {"Item": "Strict validation summary", "Value": current_model_policy["reason"]},
                     {"Item": "Last validation report", "Value": current_model_policy["last_validated_report"]},
@@ -3262,6 +3354,21 @@ for label in selected_labels:
                 venues_df=venues,
                 market_odds_df=market_odds,
             )
+            formal_calibration_eval = build_formal_evaluation_dataset(
+                ledger,
+                results_ledger,
+                market_odds_df=market_odds,
+            )
+            formal_market_benchmark = model_vs_market_benchmark(formal_calibration_eval)
+            formal_market_status = (
+                str(formal_market_benchmark.iloc[0].get("status", "No market data"))
+                if isinstance(formal_market_benchmark, pd.DataFrame) and not formal_market_benchmark.empty
+                else "No market data"
+            )
+            if formal_market_status == "Market benchmark sample too small for reliable conclusions.":
+                formal_market_status = model_market_benchmark_status(
+                    int(formal_market_benchmark.iloc[0].get("n", 0)) if not formal_market_benchmark.empty else 0
+                )
             calibration_report = build_calibration_backtest_report(calibration_eval, min_train=30)
             training_reports = sorted((Path(__file__).resolve().parent / "reports").glob("model_training_candidates_*.csv"))
             latest_training = training_reports[-1] if training_reports else None
@@ -3277,6 +3384,7 @@ for label in selected_labels:
             pm1.metric("Prediction ledger rows", f"{len(ledger):,}")
             pm2.metric("Completed result rows", f"{len(results_ledger):,}")
             pm3.metric("Scored pre-kickoff predictions", f"{len(calibration_eval):,}")
+            st.caption(f"Formal Milestone 2 evaluation rows: {len(formal_calibration_eval):,}. Model-market benchmark status: {formal_market_status}.")
 
             st.divider()
             st.write("Raw model calibration summary")
@@ -3296,6 +3404,7 @@ for label in selected_labels:
                             {"item": "Primary probability source", "status": probability_policy.get("primary_probability_source", "Unavailable")},
                             {"item": "Calibrated probability status", "status": probability_policy.get("calibrated_probability_status", "Unavailable")},
                             {"item": "Production gate", "status": probability_policy.get("production_gate", "Unavailable")},
+                            {"item": "Model-market benchmark status", "status": formal_market_status},
                         ]
                     ),
                     hide_index=True,
