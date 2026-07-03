@@ -1,2 +1,2 @@
 confidence_label,n,top_pick_accuracy,brier_score,multiclass_log_loss
-Low,2,1.0,0.44977021904998227,0.7929354573039902
+Low,1,1.0,0.44977021904998243,0.7929354573039903

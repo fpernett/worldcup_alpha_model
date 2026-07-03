@@ -26,7 +26,12 @@ from src.config import DATA_DIR, api_summary
 from src.confidence import calibration_status_label, model_market_benchmark_status, score_forecast_confidence
 from src.data_sources import FIXTURE_COLUMNS, filter_future_fixtures, get_upcoming_fixtures, update_all_sources
 from src.environment_response import calculate_environment_response
-from src.evaluation import build_formal_evaluation_dataset, model_vs_market_benchmark
+from src.evaluation import (
+    build_formal_evaluation_dataset,
+    build_result_prediction_join_audit,
+    evaluation_coverage_summary,
+    model_vs_market_benchmark,
+)
 from src.external_benchmark_calibration import (
     audit_external_benchmark_coverage,
     build_external_calibration_proposals,
@@ -3357,6 +3362,13 @@ for label in selected_labels:
             formal_calibration_eval = build_formal_evaluation_dataset(
                 ledger,
                 results_ledger,
+                fixtures_df=bulk_fixture_table,
+                market_odds_df=market_odds,
+            )
+            join_audit = build_result_prediction_join_audit(
+                ledger,
+                results_ledger,
+                fixtures_df=bulk_fixture_table,
                 market_odds_df=market_odds,
             )
             formal_market_benchmark = model_vs_market_benchmark(formal_calibration_eval)
@@ -3385,6 +3397,26 @@ for label in selected_labels:
             pm2.metric("Completed result rows", f"{len(results_ledger):,}")
             pm3.metric("Scored pre-kickoff predictions", f"{len(calibration_eval):,}")
             st.caption(f"Formal Milestone 2 evaluation rows: {len(formal_calibration_eval):,}. Model-market benchmark status: {formal_market_status}.")
+
+            st.write("Evaluation workflow")
+            st.caption(
+                "Prediction snapshot: saved when the model is run in data/prediction_ledger.csv and must be generated before kickoff. "
+                "Result ledger: populated by import/sync code in data/results_ledger.csv with regulation-time goals and 1X2 result. "
+                "Evaluation: joins snapshots to results, selects the latest valid pre-kickoff snapshot per resolved match, scores 90-minute 1X2 only, and tracks advancement separately."
+            )
+            coverage_summary = evaluation_coverage_summary(join_audit)
+            display_dataframe(coverage_summary, hide_index=True, width="stretch")
+            if not join_audit.empty:
+                top_exclusions = (
+                    join_audit.loc[~join_audit["usable_for_evaluation"].astype(bool), "join_status"]
+                    .value_counts(dropna=False)
+                    .rename_axis("join_status")
+                    .reset_index(name="count")
+                    .head(8)
+                )
+                if not top_exclusions.empty:
+                    st.write("Top exclusion reasons")
+                    display_dataframe(top_exclusions, hide_index=True, width="stretch")
 
             st.divider()
             st.write("Raw model calibration summary")

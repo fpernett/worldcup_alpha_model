@@ -17,6 +17,7 @@ from src.completed_results import (
     refresh_completed_results_for_fixture,
 )
 from src.config import DATA_DIR
+from src.match_identity import validate_results_ledger_semantics
 from src.model import ModelConfig, run_match_model, score_matrix
 from src.model_policy import get_current_model_policy
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
@@ -89,6 +90,11 @@ RESULTS_LEDGER_COLUMNS = [
     "over_3_5_actual",
     "actual_advancing_team",
     "result_semantics",
+    "evaluation_eligible_1x2",
+    "had_extra_time",
+    "had_penalties",
+    "penalties_home",
+    "penalties_away",
     "result_source",
     "last_updated",
 ]
@@ -120,7 +126,8 @@ def load_prediction_ledger(path: str | Path = PREDICTION_LEDGER_PATH) -> pd.Data
 
 
 def load_results_ledger(path: str | Path = RESULTS_LEDGER_PATH) -> pd.DataFrame:
-    return read_csv_with_columns(Path(path), RESULTS_LEDGER_COLUMNS)[RESULTS_LEDGER_COLUMNS].copy()
+    raw = read_csv_with_columns(Path(path), RESULTS_LEDGER_COLUMNS)
+    return validate_results_ledger_semantics(raw)[RESULTS_LEDGER_COLUMNS].copy()
 
 
 def append_prediction_snapshots(
@@ -686,11 +693,16 @@ def import_completed_results(
                 "over_3_5_actual": int(total > 3.5),
                 "actual_advancing_team": match.get("actual_advancing_team", pd.NA),
                 "result_semantics": match.get("result_semantics", match.get("score_semantics", "90-minute regular time")),
+                "evaluation_eligible_1x2": True,
+                "had_extra_time": False,
+                "had_penalties": False,
+                "penalties_home": pd.NA,
+                "penalties_away": pd.NA,
                 "result_source": result_source,
                 "last_updated": now,
             }
         )
-    new_results = pd.DataFrame(rows, columns=RESULTS_LEDGER_COLUMNS)
+    new_results = validate_results_ledger_semantics(pd.DataFrame(rows, columns=RESULTS_LEDGER_COLUMNS))
     existing = load_results_ledger(path)
     combined = pd.concat([existing, new_results], ignore_index=True)
     if not combined.empty:
@@ -698,7 +710,7 @@ def import_completed_results(
         combined = combined.sort_values(["date_utc", "match_id"]).reset_index(drop=True)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_csv(path, index=False)
+    combined[RESULTS_LEDGER_COLUMNS].to_csv(path, index=False)
     return combined[RESULTS_LEDGER_COLUMNS].copy()
 
 
@@ -1129,6 +1141,11 @@ def _ledger_result_row_from_candidate(fixture: pd.Series, candidate: pd.Series, 
         "over_3_5_actual": int(total > 3.5),
         "actual_advancing_team": candidate.get("actual_advancing_team", pd.NA),
         "result_semantics": candidate.get("result_semantics", candidate.get("score_semantics", "90-minute regular time")),
+        "evaluation_eligible_1x2": True,
+        "had_extra_time": False,
+        "had_penalties": False,
+        "penalties_home": pd.NA,
+        "penalties_away": pd.NA,
         "result_source": result_source,
         "last_updated": utc_now_iso(),
     }

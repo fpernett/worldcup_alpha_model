@@ -23,6 +23,13 @@ from src.confidence import (
     model_market_benchmark_status,
     score_forecast_confidence,
 )
+from src.match_identity import (
+    align_result_to_prediction,
+    build_match_key,
+    normalize_match_date,
+    resolve_prediction_to_result,
+    validate_results_ledger_semantics,
+)
 from src.utils import coerce_float, today_iso
 
 
@@ -79,6 +86,30 @@ EVALUATION_DATASET_COLUMNS = [
     "calibrated_model_was_correct",
     "market_was_closer_than_model",
     "notes",
+]
+
+RESULT_PREDICTION_JOIN_AUDIT_COLUMNS = [
+    "prediction_id",
+    "prediction_source",
+    "generated_at_utc",
+    "match_id",
+    "kickoff_utc",
+    "home_team",
+    "away_team",
+    "competition",
+    "round",
+    "prediction_before_kickoff",
+    "valid_probabilities",
+    "resolved_result_match_id",
+    "result_join_method",
+    "result_join_confidence",
+    "result_join_reason",
+    "home_away_order",
+    "result_semantics",
+    "evaluation_eligible_1x2",
+    "join_status",
+    "usable_for_evaluation",
+    "exclusion_reason",
 ]
 
 MODEL_COMPARISON_METHODS = [
@@ -191,9 +222,11 @@ def build_formal_evaluation_dataset(
     results_ledger_df: pd.DataFrame | None,
     *,
     completed_results_df: pd.DataFrame | None = None,
+    fixtures_df: pd.DataFrame | None = None,
     prediction_log_df: pd.DataFrame | None = None,
     market_odds_df: pd.DataFrame | None = None,
     min_calibration_sample: int = HIGH_CONFIDENCE_MIN_SAMPLE,
+    latest_snapshot_only: bool = True,
 ) -> pd.DataFrame:
     predictions = _prediction_rows(prediction_ledger_df, prediction_log_df, market_odds_df)
     results = _result_rows(results_ledger_df, completed_results_df)
@@ -201,11 +234,16 @@ def build_formal_evaluation_dataset(
         return pd.DataFrame(columns=EVALUATION_DATASET_COLUMNS)
 
     rows: list[dict[str, Any]] = []
-    result_lookup = _build_result_lookup(results)
     calibration_status = calibration_status_label(0)
     for _, prediction in predictions.iterrows():
-        result = _find_result_for_prediction(prediction, result_lookup)
+        if not _valid_prediction_probabilities(prediction):
+            continue
+        resolution = resolve_prediction_to_result(prediction, results, fixtures_df)
+        result = resolution.get("result")
         if result is None:
+            continue
+        result = align_result_to_prediction(result, str(resolution.get("home_away_order", "same")))
+        if not bool(result.get("evaluation_eligible_1x2", True)):
             continue
         scope = market_type_semantics("1X2", str(result.get("result_semantics", "")))
         if scope != "90-minute":
@@ -214,11 +252,29 @@ def build_formal_evaluation_dataset(
         if actual not in OUTCOMES:
             continue
         row = _scored_dataset_row(prediction, result, calibration_status, min_calibration_sample)
+        row["_resolved_result_match_id"] = str(resolution.get("resolved_result_match_id", "") or "")
+        row["notes"] = (
+            f"{row.get('notes', '')}; result_join_method={resolution.get('result_join_method', '')}; "
+            f"result_join_confidence={resolution.get('result_join_confidence', '')}"
+        )
         rows.append(row)
 
     if not rows:
         return pd.DataFrame(columns=EVALUATION_DATASET_COLUMNS)
-    return pd.DataFrame(rows, columns=EVALUATION_DATASET_COLUMNS)
+    out = pd.DataFrame(rows)
+    if latest_snapshot_only and not out.empty:
+        out["_generated_ts"] = pd.to_datetime(out["generated_at_utc"], errors="coerce", utc=True)
+        group_key = out["_resolved_result_match_id"].where(
+            out["_resolved_result_match_id"].astype(str).str.strip().ne(""),
+            out.apply(lambda row: "|".join(str(row.get(col, "")) for col in ["match_id", "home_team", "away_team", "kickoff_utc"]), axis=1),
+        )
+        out["_latest_group_key"] = group_key
+        out = (
+            out.sort_values(["_latest_group_key", "_generated_ts", "prediction_id"])
+            .drop_duplicates(subset=["_latest_group_key"], keep="last")
+            .reset_index(drop=True)
+        )
+    return out[EVALUATION_DATASET_COLUMNS].copy()
 
 
 def build_prediction_source_dataset(
@@ -228,6 +284,165 @@ def build_prediction_source_dataset(
 ) -> pd.DataFrame:
     """Return normalized pre-kickoff prediction rows before result joining."""
     return _prediction_rows(prediction_ledger_df, prediction_log_df, market_odds_df)
+
+
+def build_result_prediction_join_audit(
+    prediction_ledger_df: pd.DataFrame | None,
+    results_ledger_df: pd.DataFrame | None,
+    *,
+    completed_results_df: pd.DataFrame | None = None,
+    fixtures_df: pd.DataFrame | None = None,
+    prediction_log_df: pd.DataFrame | None = None,
+    market_odds_df: pd.DataFrame | None = None,
+    now_utc: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    predictions = _prediction_rows(
+        prediction_ledger_df,
+        prediction_log_df,
+        market_odds_df,
+        filter_pre_kickoff=False,
+    )
+    results = _result_rows(results_ledger_df, completed_results_df)
+    if predictions.empty:
+        return pd.DataFrame(columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
+
+    now = pd.Timestamp.now(tz="UTC") if now_utc is None else pd.Timestamp(now_utc)
+    now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+    rows: list[dict[str, Any]] = []
+    for _, prediction in predictions.iterrows():
+        generated_ts = pd.to_datetime(prediction.get("generated_at_utc"), errors="coerce", utc=True)
+        kickoff_ts = pd.to_datetime(prediction.get("kickoff_utc"), errors="coerce", utc=True)
+        resolution = resolve_prediction_to_result(prediction, results, fixtures_df)
+        result = resolution.get("result")
+        result_found = result is not None
+        aligned = align_result_to_prediction(result, str(resolution.get("home_away_order", "same"))) if result_found else pd.Series(dtype="object")
+        valid_probs = _valid_prediction_probabilities(prediction)
+        status, usable, reason = _join_audit_status(
+            prediction,
+            aligned,
+            resolution,
+            generated_ts,
+            kickoff_ts,
+            now,
+            valid_probs,
+        )
+        rows.append(
+            {
+                "prediction_id": prediction.get("prediction_id", ""),
+                "prediction_source": prediction.get("prediction_source", ""),
+                "generated_at_utc": prediction.get("generated_at_utc", ""),
+                "match_id": prediction.get("match_id", ""),
+                "kickoff_utc": prediction.get("kickoff_utc", ""),
+                "home_team": prediction.get("home_team", ""),
+                "away_team": prediction.get("away_team", ""),
+                "competition": prediction.get("competition", ""),
+                "round": prediction.get("round", ""),
+                "prediction_before_kickoff": bool(pd.notna(generated_ts) and pd.notna(kickoff_ts) and generated_ts < kickoff_ts),
+                "valid_probabilities": valid_probs,
+                "resolved_result_match_id": resolution.get("resolved_result_match_id", ""),
+                "result_join_method": resolution.get("result_join_method", ""),
+                "result_join_confidence": resolution.get("result_join_confidence", 0.0),
+                "result_join_reason": resolution.get("result_join_reason", ""),
+                "home_away_order": resolution.get("home_away_order", "same"),
+                "result_semantics": aligned.get("result_semantics", ""),
+                "evaluation_eligible_1x2": aligned.get("evaluation_eligible_1x2", False) if result_found else False,
+                "join_status": status,
+                "usable_for_evaluation": usable,
+                "exclusion_reason": reason,
+            }
+        )
+    audit = pd.DataFrame(rows, columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
+    return _mark_duplicate_unselected_snapshots(audit)
+
+
+def evaluation_coverage_summary(audit_df: pd.DataFrame | None, previous_usable_rows: int | None = None) -> pd.DataFrame:
+    audit = audit_df.copy() if audit_df is not None else pd.DataFrame(columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
+    rows = [
+        {"metric": "prediction_snapshots", "value": int(len(audit))},
+        {"metric": "unique_prediction_match_ids", "value": int(audit["match_id"].astype(str).nunique()) if not audit.empty else 0},
+        {"metric": "exact_match_id_joins_possible", "value": int((audit["result_join_method"] == "exact_match_id").sum()) if not audit.empty else 0},
+        {"metric": "fixture_bridge_joins_possible", "value": int((audit["result_join_method"] == "fixture_bridge").sum()) if not audit.empty else 0},
+        {"metric": "normalized_team_date_joins_possible", "value": int(audit["result_join_method"].isin(["normalized_team_date", "fuzzy_team_date", "symmetric_team_date"]).sum()) if not audit.empty else 0},
+        {"metric": "home_away_order_mismatch_matches", "value": int((audit["home_away_order"] == "reversed").sum()) if not audit.empty else 0},
+        {"metric": "usable_evaluated_predictions_after_latest_selection", "value": int(audit["usable_for_evaluation"].astype(bool).sum()) if not audit.empty else 0},
+        {"metric": "excluded_predictions", "value": int((~audit["usable_for_evaluation"].astype(bool)).sum()) if not audit.empty else 0},
+    ]
+    if previous_usable_rows is not None:
+        rows.insert(0, {"metric": "usable_evaluated_predictions_before_fix", "value": int(previous_usable_rows)})
+    if audit.empty:
+        return pd.DataFrame(rows)
+    status_counts = audit["join_status"].value_counts(dropna=False).rename_axis("join_status").reset_index(name="value")
+    status_counts["metric"] = "join_status:" + status_counts["join_status"].astype(str)
+    rows.extend(status_counts[["metric", "value"]].to_dict("records"))
+    return pd.DataFrame(rows)
+
+
+def render_result_prediction_join_audit(
+    audit_df: pd.DataFrame,
+    *,
+    prediction_rows: int,
+    unique_prediction_match_ids: int,
+    result_rows: int,
+    unique_result_match_ids: int,
+    completed_result_rows: int,
+    previous_usable_rows: int | None = None,
+) -> str:
+    audit = audit_df.copy() if audit_df is not None else pd.DataFrame(columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
+    usable = int(audit["usable_for_evaluation"].astype(bool).sum()) if not audit.empty else 0
+    exact = int((audit["result_join_method"] == "exact_match_id").sum()) if not audit.empty else 0
+    fixture_bridge = int((audit["result_join_method"] == "fixture_bridge").sum()) if not audit.empty else 0
+    normalized = int(audit["result_join_method"].isin(["normalized_team_date", "fuzzy_team_date", "symmetric_team_date"]).sum()) if not audit.empty else 0
+    top_exclusions = _top_exclusion_markdown(audit)
+    before = "Unavailable" if previous_usable_rows is None else str(int(previous_usable_rows))
+    lines = [
+        f"# Result/Prediction Join Audit - {today_iso()}",
+        "",
+        "This audit reconciles saved pre-match prediction snapshots with the existing completed-results ledger. It does not scrape PDFs or build a separate result-ingestion path.",
+        "",
+        "## Coverage",
+        "",
+        f"- Prediction snapshots: `{prediction_rows}`",
+        f"- Unique prediction match_ids: `{unique_prediction_match_ids}`",
+        f"- Result ledger rows: `{result_rows}`",
+        f"- Unique result match_ids: `{unique_result_match_ids}`",
+        f"- Completed-results source rows: `{completed_result_rows}`",
+        f"- Exact match_id joins possible: `{exact}`",
+        f"- Fixture-bridge joins possible: `{fixture_bridge}`",
+        f"- Normalized team/date joins possible: `{normalized}`",
+        f"- Usable evaluated predictions before this fix: `{before}`",
+        f"- Usable evaluated predictions after latest-snapshot selection: `{usable}`",
+        "",
+        "## Exclusions",
+        "",
+        top_exclusions,
+        "",
+        "## Do we still need PDF backfill?",
+        "",
+        _pdf_backfill_sentence(usable),
+        "",
+        "PDF import remains secondary. Structured CSV joins must be correct first, and PDF timestamps need separate provenance review before they can support calibration claims.",
+    ]
+    return "\n".join(lines)
+
+
+def render_evaluation_coverage_audit(audit_df: pd.DataFrame, previous_usable_rows: int | None = None) -> str:
+    audit = audit_df.copy() if audit_df is not None else pd.DataFrame(columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
+    summary = evaluation_coverage_summary(audit, previous_usable_rows)
+    usable = int(audit["usable_for_evaluation"].astype(bool).sum()) if not audit.empty else 0
+    lines = [
+        f"# Evaluation Coverage Audit - {today_iso()}",
+        "",
+        "Evaluation uses the latest valid pre-kickoff prediction snapshot per resolved completed match and scores only 90-minute 1X2 outcomes.",
+        "",
+        _to_markdown(_printable(summary)),
+        "",
+        f"The previous Milestone 2 dataset had `{previous_usable_rows if previous_usable_rows is not None else 'Unavailable'}` usable row(s). The regenerated dataset has `{usable}` usable row(s) after duplicate-snapshot selection.",
+        "",
+        "Top exclusion reasons:",
+        "",
+        _top_exclusion_markdown(audit),
+    ]
+    return "\n".join(lines)
 
 
 def calibration_summary(evaluation_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -719,6 +934,8 @@ def _prediction_rows(
     prediction_ledger_df: pd.DataFrame | None,
     prediction_log_df: pd.DataFrame | None,
     market_odds_df: pd.DataFrame | None,
+    *,
+    filter_pre_kickoff: bool = True,
 ) -> pd.DataFrame:
     frames = [_prediction_rows_from_ledger(prediction_ledger_df, market_odds_df), _prediction_rows_from_prediction_log(prediction_log_df)]
     out = pd.concat([frame for frame in frames if frame is not None and not frame.empty], ignore_index=True) if any(not frame.empty for frame in frames) else pd.DataFrame()
@@ -726,7 +943,8 @@ def _prediction_rows(
         return out
     out["_generated_ts"] = _parse_utc_series(out["generated_at_utc"])
     out["_kickoff_ts"] = _parse_utc_series(out["kickoff_utc"])
-    out = out.loc[out["_generated_ts"].notna() & out["_kickoff_ts"].notna() & (out["_generated_ts"] < out["_kickoff_ts"])].copy()
+    if filter_pre_kickoff:
+        out = out.loc[out["_generated_ts"].notna() & out["_kickoff_ts"].notna() & (out["_generated_ts"] < out["_kickoff_ts"])].copy()
     return out.reset_index(drop=True)
 
 
@@ -817,7 +1035,7 @@ def _prediction_rows_from_prediction_log(prediction_log_df: pd.DataFrame | None)
 
 def _result_rows(results_ledger_df: pd.DataFrame | None, completed_results_df: pd.DataFrame | None) -> pd.DataFrame:
     rows = []
-    ledger = results_ledger_df.copy() if results_ledger_df is not None else pd.DataFrame()
+    ledger = validate_results_ledger_semantics(results_ledger_df)
     for _, row in ledger.iterrows():
         home_goals = coerce_float(row.get("home_goals"), float("nan"))
         away_goals = coerce_float(row.get("away_goals"), float("nan"))
@@ -832,6 +1050,11 @@ def _result_rows(results_ledger_df: pd.DataFrame | None, completed_results_df: p
                 "actual_result_1x2": str(row.get("actual_result", "") or _result_from_goals(home_goals, away_goals)),
                 "advancing_team": row.get("actual_advancing_team", ""),
                 "result_semantics": _text_or_default(row.get("result_semantics", pd.NA), "90-minute regular time"),
+                "evaluation_eligible_1x2": bool(row.get("evaluation_eligible_1x2", True)),
+                "had_extra_time": bool(row.get("had_extra_time", False)),
+                "had_penalties": bool(row.get("had_penalties", False)),
+                "penalties_home": row.get("penalties_home", pd.NA),
+                "penalties_away": row.get("penalties_away", pd.NA),
                 "result_source": row.get("result_source", ""),
             }
         )
@@ -852,10 +1075,15 @@ def _result_rows(results_ledger_df: pd.DataFrame | None, completed_results_df: p
                 "actual_result_1x2": _result_from_goals(home_goals, away_goals),
                 "advancing_team": "",
                 "result_semantics": _text_or_default(row.get("score_semantics", pd.NA), "90-minute regular time"),
+                "evaluation_eligible_1x2": True,
+                "had_extra_time": False,
+                "had_penalties": False,
+                "penalties_home": pd.NA,
+                "penalties_away": pd.NA,
                 "result_source": row.get("source", row.get("provider", "")),
             }
         )
-    return pd.DataFrame(rows)
+    return validate_results_ledger_semantics(pd.DataFrame(rows))
 
 
 def _build_result_lookup(results: pd.DataFrame) -> dict[str, Any]:
@@ -1351,6 +1579,125 @@ def _row_probabilities(row: pd.Series, prefix: str, allow_missing: bool = False)
     return _normalise_or_missing(values)
 
 
+def _valid_prediction_probabilities(row: pd.Series) -> bool:
+    return all(pd.notna(value) for value in _row_probabilities(row, "raw", allow_missing=True))
+
+
+def _join_audit_status(
+    prediction: pd.Series,
+    result: pd.Series,
+    resolution: dict[str, Any],
+    generated_ts: pd.Timestamp | pd.NaT,
+    kickoff_ts: pd.Timestamp | pd.NaT,
+    now: pd.Timestamp,
+    valid_probs: bool,
+) -> tuple[str, bool, str]:
+    result_found = result is not None and not result.empty
+    if pd.isna(generated_ts):
+        return "prediction_missing_generated_at", False, "Prediction snapshot has no parseable generated_at timestamp."
+    if pd.isna(kickoff_ts):
+        return "prediction_missing_generated_at", False, "Prediction snapshot has no parseable kickoff timestamp."
+    if generated_ts >= kickoff_ts:
+        if result_found:
+            return "result_found_but_after_kickoff_issue", False, "Prediction was generated at or after kickoff."
+        return "prediction_generated_after_kickoff", False, "Prediction was generated at or after kickoff."
+    if not valid_probs:
+        return "prediction_missing_probabilities", False, "Prediction is missing a valid home/draw/away probability triplet."
+    if not result_found:
+        if kickoff_ts > now:
+            return "result_not_completed", False, "Fixture has not reached kickoff/result availability yet."
+        return "no_result_found", False, "No completed result row matched this prediction."
+
+    scope = market_type_semantics("1X2", str(result.get("result_semantics", "")))
+    actual = str(result.get("actual_result_1x2", result.get("actual_result", "")) or "")
+    eligible = bool(result.get("evaluation_eligible_1x2", False))
+    if not eligible or scope != "90-minute" or actual not in OUTCOMES:
+        return "result_found_but_ambiguous_semantics", False, "A result was found but it is not explicitly eligible for 90-minute 1X2 evaluation."
+
+    order = str(resolution.get("home_away_order", "same"))
+    if order == "reversed":
+        return "result_found_but_team_order_mismatch", True, "Result matched with reversed home-away order and was aligned for scoring."
+    method = str(resolution.get("result_join_method", ""))
+    if method == "exact_match_id":
+        return "exact_match_id_join", True, "Prediction match_id matched result match_id."
+    if method == "fixture_bridge":
+        return "fixture_bridge_join", True, "Prediction matched via fixtures.csv bridge."
+    if method in {"normalized_team_date", "fuzzy_team_date"}:
+        return "normalized_team_date_join", True, "Prediction matched by normalized teams and kickoff/result date."
+    return "no_result_found", False, str(resolution.get("result_join_reason", "No completed result matched."))
+
+
+def _mark_duplicate_unselected_snapshots(audit: pd.DataFrame) -> pd.DataFrame:
+    if audit.empty:
+        return audit
+    out = audit.copy()
+    usable_statuses = {
+        "exact_match_id_join",
+        "fixture_bridge_join",
+        "normalized_team_date_join",
+        "result_found_but_team_order_mismatch",
+    }
+    candidates = out.loc[out["join_status"].isin(usable_statuses)].copy()
+    if candidates.empty:
+        return out
+    candidates["_generated_ts"] = pd.to_datetime(candidates["generated_at_utc"], errors="coerce", utc=True)
+    candidates["_group"] = candidates["resolved_result_match_id"].where(
+        candidates["resolved_result_match_id"].astype(str).str.strip().ne(""),
+        candidates.apply(
+            lambda row: "|".join(
+                [
+                    str(row.get("match_id", "")),
+                    str(row.get("home_team", "")),
+                    str(row.get("away_team", "")),
+                    normalize_match_date(row.get("kickoff_utc", "")),
+                ]
+            ),
+            axis=1,
+        ),
+    )
+    keep_idx = set(
+        candidates.sort_values(["_group", "_generated_ts", "prediction_id"])
+        .drop_duplicates(subset=["_group"], keep="last")
+        .index
+        .tolist()
+    )
+    duplicate_idx = [idx for idx in candidates.index.tolist() if idx not in keep_idx]
+    if duplicate_idx:
+        out.loc[duplicate_idx, "join_status"] = "duplicate_snapshot_not_selected"
+        out.loc[duplicate_idx, "usable_for_evaluation"] = False
+        out.loc[duplicate_idx, "exclusion_reason"] = "A later valid pre-kickoff snapshot was selected for this resolved match."
+    return out[RESULT_PREDICTION_JOIN_AUDIT_COLUMNS].copy()
+
+
+def _top_exclusion_markdown(audit: pd.DataFrame) -> str:
+    if audit.empty:
+        return "No prediction rows were available to audit."
+    excluded = audit.loc[~audit["usable_for_evaluation"].astype(bool)].copy()
+    if excluded.empty:
+        return "No exclusions after latest-snapshot selection."
+    counts = (
+        excluded["join_status"]
+        .value_counts(dropna=False)
+        .rename_axis("join_status")
+        .reset_index(name="count")
+        .head(10)
+    )
+    return _to_markdown(counts)
+
+
+def _pdf_backfill_sentence(structured_usable_rows: int) -> str:
+    if structured_usable_rows >= HIGH_CONFIDENCE_MIN_SAMPLE:
+        return (
+            f"Structured CSVs currently provide `{structured_usable_rows}` usable evaluated row(s), "
+            "so PDF backfill is not the first calibration blocker."
+        )
+    return (
+        f"Structured CSVs currently provide `{structured_usable_rows}` usable evaluated row(s), below the "
+        f"`{HIGH_CONFIDENCE_MIN_SAMPLE}`-row high-confidence calibration threshold. PDFs may materially increase "
+        "the sample only if their generated-before-kickoff timestamps can be verified."
+    )
+
+
 def _normalise_or_missing(values: list[Any]) -> list[Any]:
     nums = [coerce_float(value, float("nan")) for value in values]
     if not all(pd.notna(value) and 0.0 <= value <= 1.0 for value in nums):
@@ -1553,9 +1900,7 @@ def _logit(prob: float) -> float:
 
 
 def _excluded_prediction_summary(evaluation_df: pd.DataFrame) -> str:
-    # The fixed dataset only contains joined, scored rows. Full exclusion
-    # accounting lives in the source ledgers and report-generation script.
-    return "Not written to evaluation_dataset.csv; rows without completed 90-minute results or with ambiguous semantics are excluded by construction."
+    return "See reports/evaluation_coverage_audit.md and reports/result_prediction_join_audit.csv for per-snapshot exclusion reasons."
 
 
 def _summary_row(summary: pd.DataFrame, model: str) -> dict[str, Any] | None:

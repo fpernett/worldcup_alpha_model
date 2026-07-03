@@ -7,6 +7,7 @@ import pandas as pd
 from src.evaluation import (
     build_formal_evaluation_dataset,
     build_prediction_source_dataset,
+    build_result_prediction_join_audit,
     calibration_by_bin,
     calibration_summary,
     model_vs_market_benchmark,
@@ -126,10 +127,27 @@ def test_multiple_prediction_snapshots_for_same_match_are_preserved() -> None:
             _prediction(snapshot="2026-06-10T12:00:00+00:00", home_prob=0.65, draw_prob=0.20, away_prob=0.15),
         ]
     )
-    evaluation = build_formal_evaluation_dataset(predictions, pd.DataFrame([_result(actual="home_win", home_goals=2, away_goals=0)]))
+    evaluation = build_formal_evaluation_dataset(
+        predictions,
+        pd.DataFrame([_result(actual="home_win", home_goals=2, away_goals=0)]),
+        latest_snapshot_only=False,
+    )
 
     assert len(evaluation) == 2
     assert set(evaluation["home_win_prob_raw"]) == {0.55, 0.65}
+
+
+def test_formal_evaluation_defaults_to_latest_valid_pre_kickoff_snapshot() -> None:
+    predictions = pd.DataFrame(
+        [
+            _prediction(snapshot="2026-06-10T10:00:00+00:00", home_prob=0.55, draw_prob=0.25, away_prob=0.20),
+            _prediction(snapshot="2026-06-10T12:00:00+00:00", home_prob=0.65, draw_prob=0.20, away_prob=0.15),
+        ]
+    )
+    evaluation = build_formal_evaluation_dataset(predictions, pd.DataFrame([_result(actual="home_win", home_goals=2, away_goals=0)]))
+
+    assert len(evaluation) == 1
+    assert evaluation.iloc[0]["home_win_prob_raw"] == 0.65
 
 
 def test_calibration_summary_log_loss_ece_and_bins() -> None:
@@ -209,6 +227,73 @@ def test_prediction_log_1x2_market_rows_are_devigged_without_advancement_markets
     assert len(sources) == 1
     assert row["market_join_status"] == "joined_price"
     assert round(row["home_win_prob_market"] + row["draw_prob_market"] + row["away_win_prob_market"], 8) == 1.0
+
+
+def test_evaluation_uses_fixture_bridge_when_match_id_formats_differ() -> None:
+    prediction = _prediction(match_id="wc2026_1", home="Alpha", away="Beta")
+    result = _result(match_id="provider_99", home="Alpha", away="Beta")
+    fixtures = pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_1",
+                "date_utc": "2026-06-11",
+                "time_utc": "18:00",
+                "competition": "FIFA World Cup",
+                "home": "Alpha",
+                "away": "Beta",
+            }
+        ]
+    )
+
+    evaluation = build_formal_evaluation_dataset(pd.DataFrame([prediction]), pd.DataFrame([result]), fixtures_df=fixtures)
+    audit = build_result_prediction_join_audit(pd.DataFrame([prediction]), pd.DataFrame([result]), fixtures_df=fixtures)
+
+    assert len(evaluation) == 1
+    assert audit.iloc[0]["join_status"] == "fixture_bridge_join"
+
+
+def test_evaluation_uses_normalized_team_date_join_when_ids_are_mixed() -> None:
+    prediction = _prediction(match_id="wc2026_alpha_beta", home="Alpha", away="Beta")
+    result = _result(match_id="csv_2026_06_11_alpha_beta_1_1", home="Alpha", away="Beta")
+
+    evaluation = build_formal_evaluation_dataset(pd.DataFrame([prediction]), pd.DataFrame([result]))
+    audit = build_result_prediction_join_audit(pd.DataFrame([prediction]), pd.DataFrame([result]))
+
+    assert len(evaluation) == 1
+    assert audit.iloc[0]["join_status"] == "normalized_team_date_join"
+
+
+def test_reversed_home_away_result_is_detected_and_aligned() -> None:
+    prediction = _prediction(match_id="wc2026_rev", home="Alpha", away="Beta", home_prob=0.20, draw_prob=0.20, away_prob=0.60)
+    result = _result(match_id="provider_rev", home="Beta", away="Alpha", home_goals=2, away_goals=0, actual="home_win", advancing="Beta")
+
+    evaluation = build_formal_evaluation_dataset(pd.DataFrame([prediction]), pd.DataFrame([result]))
+    audit = build_result_prediction_join_audit(pd.DataFrame([prediction]), pd.DataFrame([result]))
+
+    row = evaluation.iloc[0]
+    assert row["actual_result_1x2"] == "away_win"
+    assert row["actual_home_goals_90"] == 0
+    assert row["actual_away_goals_90"] == 2
+    assert audit.iloc[0]["join_status"] == "result_found_but_team_order_mismatch"
+
+
+def test_join_audit_classifies_invalid_probabilities_and_after_kickoff() -> None:
+    invalid = _prediction(match_id="m1", home_prob=1.2, draw_prob=0.2, away_prob=-0.4)
+    late = _prediction(match_id="m2", snapshot="2026-06-11T19:00:00+00:00", kickoff="2026-06-11T18:00:00+00:00")
+    results = pd.DataFrame([_result("m1"), _result("m2")])
+
+    audit = build_result_prediction_join_audit(pd.DataFrame([invalid, late]), results)
+
+    assert set(audit["join_status"]) == {"prediction_missing_probabilities", "result_found_but_after_kickoff_issue"}
+
+
+def test_ambiguous_result_semantics_are_excluded_from_evaluation() -> None:
+    result = _result(semantics="needs_review")
+    evaluation = build_formal_evaluation_dataset(pd.DataFrame([_prediction()]), pd.DataFrame([result]))
+    audit = build_result_prediction_join_audit(pd.DataFrame([_prediction()]), pd.DataFrame([result]))
+
+    assert evaluation.empty
+    assert audit.iloc[0]["join_status"] == "result_found_but_ambiguous_semantics"
 
 
 def test_recent_postmortem_includes_mexico_diagnostic_warning() -> None:
