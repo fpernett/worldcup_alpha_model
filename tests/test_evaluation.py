@@ -249,7 +249,11 @@ def test_evaluation_uses_fixture_bridge_when_match_id_formats_differ() -> None:
     audit = build_result_prediction_join_audit(pd.DataFrame([prediction]), pd.DataFrame([result]), fixtures_df=fixtures)
 
     assert len(evaluation) == 1
-    assert audit.iloc[0]["join_status"] == "fixture_bridge_join"
+    assert evaluation.iloc[0]["result_match_id_original"] == "provider_99"
+    assert evaluation.iloc[0]["fixture_match_id"] == "wc2026_1"
+    assert evaluation.iloc[0]["result_join_method"] == "result_fixture_crosswalk"
+    assert evaluation.iloc[0]["actual_result_from_prediction_perspective"] == "draw"
+    assert audit.iloc[0]["join_status"] == "schedule_bridge_join"
 
 
 def test_evaluation_uses_normalized_team_date_join_when_ids_are_mixed() -> None:

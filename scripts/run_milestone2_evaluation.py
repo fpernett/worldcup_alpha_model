@@ -19,7 +19,12 @@ from src.evaluation import (  # noqa: E402
     render_result_prediction_join_audit,
     write_milestone2_reports,
 )
-from src.match_identity import validate_results_ledger_semantics  # noqa: E402
+from src.match_identity import (  # noqa: E402
+    build_result_fixture_crosswalk,
+    render_schedule_result_bridge_audit,
+    result_fixture_crosswalk_summary,
+    validate_results_ledger_semantics,
+)
 from src.odds import load_market_odds  # noqa: E402
 from src.prediction_ledger import PREDICTION_LEDGER_COLUMNS, RESULTS_LEDGER_COLUMNS  # noqa: E402
 from src.storage import data_path  # noqa: E402
@@ -34,16 +39,32 @@ def main() -> None:
     prediction_ledger = _read_csv_with_columns(Path(args.predictions), PREDICTION_LEDGER_COLUMNS)
     raw_results_ledger = _read_csv_with_columns(Path(args.results_ledger), RESULTS_LEDGER_COLUMNS)
     results_ledger = validate_results_ledger_semantics(raw_results_ledger)
-    _persist_results_ledger_semantics(Path(args.results_ledger), results_ledger)
     prediction_log = _read_csv_path(Path(args.prediction_log))
     completed_results = _read_csv_path(Path(args.completed_results))
     fixtures = _read_csv_path(Path(args.fixtures))
+    result_fixture_crosswalk = build_result_fixture_crosswalk(results_ledger, fixtures)
+    crosswalk_path = Path(args.result_fixture_crosswalk)
+    crosswalk_path.parent.mkdir(parents=True, exist_ok=True)
+    result_fixture_crosswalk.to_csv(crosswalk_path, index=False)
+    schedule_audit_path = reports_dir / "schedule_result_bridge_audit.csv"
+    schedule_audit_report_path = reports_dir / "schedule_result_bridge_audit.md"
+    result_fixture_crosswalk.to_csv(schedule_audit_path, index=False)
+    schedule_audit_report_path.write_text(
+        render_schedule_result_bridge_audit(
+            result_fixture_crosswalk,
+            result_rows=len(results_ledger),
+            fixture_rows=len(fixtures),
+            prediction_rows=len(prediction_ledger) + len(prediction_log),
+        ),
+        encoding="utf-8",
+    )
     market_odds = load_market_odds()
     join_audit = build_result_prediction_join_audit(
         prediction_ledger,
         results_ledger,
         completed_results_df=completed_results,
         fixtures_df=fixtures,
+        result_fixture_crosswalk_df=result_fixture_crosswalk,
         prediction_log_df=prediction_log,
         market_odds_df=market_odds,
     )
@@ -52,6 +73,7 @@ def main() -> None:
         results_ledger,
         completed_results_df=completed_results,
         fixtures_df=fixtures,
+        result_fixture_crosswalk_df=result_fixture_crosswalk,
         prediction_log_df=prediction_log,
         market_odds_df=market_odds,
     )
@@ -90,7 +112,16 @@ def main() -> None:
     print(f"prediction log rows: {len(prediction_log):,}")
     print(f"results ledger rows: {len(results_ledger):,}")
     print(f"completed-result rows: {len(completed_results):,}")
+    crosswalk_summary = result_fixture_crosswalk_summary(
+        result_fixture_crosswalk,
+        result_rows=len(results_ledger),
+        fixture_rows=len(fixtures),
+        prediction_rows=len(prediction_ledger) + len(prediction_log),
+    )
+    for _, row in crosswalk_summary.iterrows():
+        print(f"{row['metric']}: {int(row['value']):,}")
     print(f"exact joins possible: {(join_audit['result_join_method'] == 'exact_match_id').sum() if not join_audit.empty else 0:,}")
+    print(f"schedule bridge joins possible: {(join_audit['result_join_method'] == 'result_fixture_crosswalk').sum() if not join_audit.empty else 0:,}")
     print(f"bridge joins possible: {(join_audit['result_join_method'] == 'fixture_bridge').sum() if not join_audit.empty else 0:,}")
     print(f"team/date joins possible: {join_audit['result_join_method'].isin(['normalized_team_date', 'fuzzy_team_date', 'symmetric_team_date']).sum() if not join_audit.empty else 0:,}")
     print(f"previous evaluation rows: {previous_usable:,}")
@@ -99,8 +130,11 @@ def main() -> None:
         print(f"{key}: {path.relative_to(PROJECT_ROOT)}")
     print(f"result_prediction_join_audit: {join_audit_path.relative_to(PROJECT_ROOT)}")
     print(f"evaluation_coverage_audit: {coverage_path.relative_to(PROJECT_ROOT)}")
+    print(f"result_fixture_crosswalk: {crosswalk_path.relative_to(PROJECT_ROOT)}")
+    print(f"schedule_result_bridge_audit: {schedule_audit_path.relative_to(PROJECT_ROOT)}")
     print(f"result_prediction_join_audit_report: {join_audit_report_path.relative_to(PROJECT_ROOT)}")
     print(f"evaluation_coverage_audit_report: {coverage_report_path.relative_to(PROJECT_ROOT)}")
+    print(f"schedule_result_bridge_audit_report: {schedule_audit_report_path.relative_to(PROJECT_ROOT)}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -109,6 +143,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--results-ledger", default=str(data_path("results_ledger.csv")))
     parser.add_argument("--completed-results", default=str(data_path("completed_results.csv")))
     parser.add_argument("--fixtures", default=str(data_path("fixtures.csv")))
+    parser.add_argument("--result-fixture-crosswalk", default=str(data_path("result_fixture_crosswalk.csv")))
     parser.add_argument("--prediction-log", default=str(data_path("prediction_log.csv")))
     parser.add_argument("--reports-dir", default=str(PROJECT_ROOT / "reports"))
     parser.add_argument("--previous-usable-rows", type=int, default=None)
@@ -129,11 +164,6 @@ def _read_csv_with_columns(path: Path, columns: list[str]) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = pd.NA
     return df[columns].copy()
-
-
-def _persist_results_ledger_semantics(path: Path, results_ledger: pd.DataFrame) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    results_ledger[RESULTS_LEDGER_COLUMNS].to_csv(path, index=False)
 
 
 def _previous_evaluation_rows(path: Path) -> int:

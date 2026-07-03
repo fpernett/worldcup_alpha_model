@@ -1,8 +1,9 @@
 metric,value
-usable_evaluated_predictions_before_fix,2
+usable_evaluated_predictions_before_fix,1
 prediction_snapshots,62
 unique_prediction_match_ids,35
 exact_match_id_joins_possible,2
+schedule_bridge_joins_possible,0
 fixture_bridge_joins_possible,0
 normalized_team_date_joins_possible,0
 home_away_order_mismatch_matches,0

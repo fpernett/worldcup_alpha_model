@@ -54,6 +54,7 @@ from src.fifa_ranking_import import fifa_ranking_import_dashboard_status
 from src.fifa_snapshot_validation import fifa_snapshot_validation_dashboard_status
 from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
+from src.match_identity import build_result_fixture_crosswalk, result_fixture_crosswalk_summary
 from src.model import ModelConfig, fair_odds, run_match_model
 from src.model_policy import (
     annotate_decimal_alpha_with_policy,
@@ -3350,6 +3351,7 @@ for label in selected_labels:
         else:
             ledger = load_prediction_ledger()
             results_ledger = load_results_ledger()
+            result_fixture_crosswalk = build_result_fixture_crosswalk(results_ledger, bulk_fixture_table)
             joined_pm = join_predictions_to_results(ledger, results_ledger)
             errors_pm = calculate_prediction_errors(joined_pm)
             report_pm = build_postmortem_report(errors_pm, joined_pm)
@@ -3363,12 +3365,14 @@ for label in selected_labels:
                 ledger,
                 results_ledger,
                 fixtures_df=bulk_fixture_table,
+                result_fixture_crosswalk_df=result_fixture_crosswalk,
                 market_odds_df=market_odds,
             )
             join_audit = build_result_prediction_join_audit(
                 ledger,
                 results_ledger,
                 fixtures_df=bulk_fixture_table,
+                result_fixture_crosswalk_df=result_fixture_crosswalk,
                 market_odds_df=market_odds,
             )
             formal_market_benchmark = model_vs_market_benchmark(formal_calibration_eval)
@@ -3404,6 +3408,46 @@ for label in selected_labels:
                 "Result ledger: populated by import/sync code in data/results_ledger.csv with regulation-time goals and 1X2 result. "
                 "Evaluation: joins snapshots to results, selects the latest valid pre-kickoff snapshot per resolved match, scores 90-minute 1X2 only, and tracks advancement separately."
             )
+            st.write("Result matching status")
+            st.caption(
+                "Some result sources use provider IDs and some prediction snapshots use fixture IDs. "
+                "The app now builds a schedule bridge using date and team names so completed results can be matched to saved predictions."
+            )
+            bridge_summary = result_fixture_crosswalk_summary(
+                result_fixture_crosswalk,
+                result_rows=len(results_ledger),
+                fixture_rows=len(bulk_fixture_table),
+                prediction_rows=len(ledger),
+            )
+            usable_predictions = (
+                int(join_audit["usable_for_evaluation"].astype(bool).sum())
+                if isinstance(join_audit, pd.DataFrame) and not join_audit.empty and "usable_for_evaluation" in join_audit.columns
+                else 0
+            )
+            exact_id_joins = (
+                int((join_audit["result_join_method"].astype(str) == "exact_match_id").sum())
+                if isinstance(join_audit, pd.DataFrame) and not join_audit.empty and "result_join_method" in join_audit.columns
+                else 0
+            )
+            schedule_bridge_joins = (
+                int((join_audit["result_join_method"].astype(str) == "result_fixture_crosswalk").sum())
+                if isinstance(join_audit, pd.DataFrame) and not join_audit.empty and "result_join_method" in join_audit.columns
+                else 0
+            )
+            bridge_status = pd.concat(
+                [
+                    pd.DataFrame(
+                        [
+                            {"metric": "exact_id_joins", "value": exact_id_joins},
+                            {"metric": "schedule_bridge_joins", "value": schedule_bridge_joins},
+                            {"metric": "usable_evaluated_predictions", "value": usable_predictions},
+                        ]
+                    ),
+                    bridge_summary,
+                ],
+                ignore_index=True,
+            )
+            display_dataframe(bridge_status, hide_index=True, width="stretch")
             coverage_summary = evaluation_coverage_summary(join_audit)
             display_dataframe(coverage_summary, hide_index=True, width="stretch")
             if not join_audit.empty:

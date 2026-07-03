@@ -10,9 +10,10 @@ This audit reconciles saved pre-match prediction snapshots with the existing com
 - Unique result match_ids: `47`
 - Completed-results source rows: `6`
 - Exact match_id joins possible: `2`
+- Schedule bridge joins possible: `0`
 - Fixture-bridge joins possible: `0`
 - Normalized team/date joins possible: `0`
-- Usable evaluated predictions before this fix: `2`
+- Usable evaluated predictions before this fix: `1`
 - Usable evaluated predictions after latest-snapshot selection: `1`
 
 ## Exclusions

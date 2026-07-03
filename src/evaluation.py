@@ -25,6 +25,7 @@ from src.confidence import (
 )
 from src.match_identity import (
     align_result_to_prediction,
+    build_result_fixture_crosswalk,
     build_match_key,
     normalize_match_date,
     resolve_prediction_to_result,
@@ -71,6 +72,13 @@ EVALUATION_DATASET_COLUMNS = [
     "actual_result_1x2",
     "advancing_team",
     "result_semantics",
+    "result_match_id_original",
+    "fixture_match_id",
+    "result_join_method",
+    "result_join_confidence",
+    "result_join_reason",
+    "team_order_status",
+    "actual_result_from_prediction_perspective",
     "top_pick_raw",
     "top_pick_calibrated",
     "probability_assigned_to_actual_raw",
@@ -101,10 +109,12 @@ RESULT_PREDICTION_JOIN_AUDIT_COLUMNS = [
     "prediction_before_kickoff",
     "valid_probabilities",
     "resolved_result_match_id",
+    "fixture_match_id",
     "result_join_method",
     "result_join_confidence",
     "result_join_reason",
     "home_away_order",
+    "team_order_status",
     "result_semantics",
     "evaluation_eligible_1x2",
     "join_status",
@@ -223,6 +233,7 @@ def build_formal_evaluation_dataset(
     *,
     completed_results_df: pd.DataFrame | None = None,
     fixtures_df: pd.DataFrame | None = None,
+    result_fixture_crosswalk_df: pd.DataFrame | None = None,
     prediction_log_df: pd.DataFrame | None = None,
     market_odds_df: pd.DataFrame | None = None,
     min_calibration_sample: int = HIGH_CONFIDENCE_MIN_SAMPLE,
@@ -230,6 +241,7 @@ def build_formal_evaluation_dataset(
 ) -> pd.DataFrame:
     predictions = _prediction_rows(prediction_ledger_df, prediction_log_df, market_odds_df)
     results = _result_rows(results_ledger_df, completed_results_df)
+    crosswalk = _evaluation_crosswalk(result_fixture_crosswalk_df, results_ledger_df, fixtures_df)
     if predictions.empty or results.empty:
         return pd.DataFrame(columns=EVALUATION_DATASET_COLUMNS)
 
@@ -238,7 +250,7 @@ def build_formal_evaluation_dataset(
     for _, prediction in predictions.iterrows():
         if not _valid_prediction_probabilities(prediction):
             continue
-        resolution = resolve_prediction_to_result(prediction, results, fixtures_df)
+        resolution = resolve_prediction_to_result(prediction, results, fixtures_df, crosswalk)
         result = resolution.get("result")
         if result is None:
             continue
@@ -253,6 +265,13 @@ def build_formal_evaluation_dataset(
             continue
         row = _scored_dataset_row(prediction, result, calibration_status, min_calibration_sample)
         row["_resolved_result_match_id"] = str(resolution.get("resolved_result_match_id", "") or "")
+        row["result_match_id_original"] = row["_resolved_result_match_id"]
+        row["fixture_match_id"] = str(resolution.get("fixture_match_id", "") or "")
+        row["result_join_method"] = str(resolution.get("result_join_method", "") or "")
+        row["result_join_confidence"] = resolution.get("result_join_confidence", pd.NA)
+        row["result_join_reason"] = str(resolution.get("result_join_reason", "") or "")
+        row["team_order_status"] = str(resolution.get("team_order_status", resolution.get("home_away_order", "same")) or "same")
+        row["actual_result_from_prediction_perspective"] = actual
         row["notes"] = (
             f"{row.get('notes', '')}; result_join_method={resolution.get('result_join_method', '')}; "
             f"result_join_confidence={resolution.get('result_join_confidence', '')}"
@@ -292,6 +311,7 @@ def build_result_prediction_join_audit(
     *,
     completed_results_df: pd.DataFrame | None = None,
     fixtures_df: pd.DataFrame | None = None,
+    result_fixture_crosswalk_df: pd.DataFrame | None = None,
     prediction_log_df: pd.DataFrame | None = None,
     market_odds_df: pd.DataFrame | None = None,
     now_utc: str | pd.Timestamp | None = None,
@@ -303,6 +323,7 @@ def build_result_prediction_join_audit(
         filter_pre_kickoff=False,
     )
     results = _result_rows(results_ledger_df, completed_results_df)
+    crosswalk = _evaluation_crosswalk(result_fixture_crosswalk_df, results_ledger_df, fixtures_df)
     if predictions.empty:
         return pd.DataFrame(columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
 
@@ -312,7 +333,7 @@ def build_result_prediction_join_audit(
     for _, prediction in predictions.iterrows():
         generated_ts = pd.to_datetime(prediction.get("generated_at_utc"), errors="coerce", utc=True)
         kickoff_ts = pd.to_datetime(prediction.get("kickoff_utc"), errors="coerce", utc=True)
-        resolution = resolve_prediction_to_result(prediction, results, fixtures_df)
+        resolution = resolve_prediction_to_result(prediction, results, fixtures_df, crosswalk)
         result = resolution.get("result")
         result_found = result is not None
         aligned = align_result_to_prediction(result, str(resolution.get("home_away_order", "same"))) if result_found else pd.Series(dtype="object")
@@ -340,10 +361,12 @@ def build_result_prediction_join_audit(
                 "prediction_before_kickoff": bool(pd.notna(generated_ts) and pd.notna(kickoff_ts) and generated_ts < kickoff_ts),
                 "valid_probabilities": valid_probs,
                 "resolved_result_match_id": resolution.get("resolved_result_match_id", ""),
+                "fixture_match_id": resolution.get("fixture_match_id", ""),
                 "result_join_method": resolution.get("result_join_method", ""),
                 "result_join_confidence": resolution.get("result_join_confidence", 0.0),
                 "result_join_reason": resolution.get("result_join_reason", ""),
                 "home_away_order": resolution.get("home_away_order", "same"),
+                "team_order_status": resolution.get("team_order_status", resolution.get("home_away_order", "same")),
                 "result_semantics": aligned.get("result_semantics", ""),
                 "evaluation_eligible_1x2": aligned.get("evaluation_eligible_1x2", False) if result_found else False,
                 "join_status": status,
@@ -361,6 +384,7 @@ def evaluation_coverage_summary(audit_df: pd.DataFrame | None, previous_usable_r
         {"metric": "prediction_snapshots", "value": int(len(audit))},
         {"metric": "unique_prediction_match_ids", "value": int(audit["match_id"].astype(str).nunique()) if not audit.empty else 0},
         {"metric": "exact_match_id_joins_possible", "value": int((audit["result_join_method"] == "exact_match_id").sum()) if not audit.empty else 0},
+        {"metric": "schedule_bridge_joins_possible", "value": int((audit["result_join_method"] == "result_fixture_crosswalk").sum()) if not audit.empty else 0},
         {"metric": "fixture_bridge_joins_possible", "value": int((audit["result_join_method"] == "fixture_bridge").sum()) if not audit.empty else 0},
         {"metric": "normalized_team_date_joins_possible", "value": int(audit["result_join_method"].isin(["normalized_team_date", "fuzzy_team_date", "symmetric_team_date"]).sum()) if not audit.empty else 0},
         {"metric": "home_away_order_mismatch_matches", "value": int((audit["home_away_order"] == "reversed").sum()) if not audit.empty else 0},
@@ -390,6 +414,7 @@ def render_result_prediction_join_audit(
     audit = audit_df.copy() if audit_df is not None else pd.DataFrame(columns=RESULT_PREDICTION_JOIN_AUDIT_COLUMNS)
     usable = int(audit["usable_for_evaluation"].astype(bool).sum()) if not audit.empty else 0
     exact = int((audit["result_join_method"] == "exact_match_id").sum()) if not audit.empty else 0
+    schedule_bridge = int((audit["result_join_method"] == "result_fixture_crosswalk").sum()) if not audit.empty else 0
     fixture_bridge = int((audit["result_join_method"] == "fixture_bridge").sum()) if not audit.empty else 0
     normalized = int(audit["result_join_method"].isin(["normalized_team_date", "fuzzy_team_date", "symmetric_team_date"]).sum()) if not audit.empty else 0
     top_exclusions = _top_exclusion_markdown(audit)
@@ -407,6 +432,7 @@ def render_result_prediction_join_audit(
         f"- Unique result match_ids: `{unique_result_match_ids}`",
         f"- Completed-results source rows: `{completed_result_rows}`",
         f"- Exact match_id joins possible: `{exact}`",
+        f"- Schedule bridge joins possible: `{schedule_bridge}`",
         f"- Fixture-bridge joins possible: `{fixture_bridge}`",
         f"- Normalized team/date joins possible: `{normalized}`",
         f"- Usable evaluated predictions before this fix: `{before}`",
@@ -1086,6 +1112,18 @@ def _result_rows(results_ledger_df: pd.DataFrame | None, completed_results_df: p
     return validate_results_ledger_semantics(pd.DataFrame(rows))
 
 
+def _evaluation_crosswalk(
+    result_fixture_crosswalk_df: pd.DataFrame | None,
+    results_ledger_df: pd.DataFrame | None,
+    fixtures_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if result_fixture_crosswalk_df is not None and not result_fixture_crosswalk_df.empty:
+        return result_fixture_crosswalk_df.copy()
+    if results_ledger_df is None or fixtures_df is None:
+        return pd.DataFrame()
+    return build_result_fixture_crosswalk(results_ledger_df, fixtures_df)
+
+
 def _build_result_lookup(results: pd.DataFrame) -> dict[str, Any]:
     by_id = {}
     by_pair_date = {}
@@ -1620,6 +1658,8 @@ def _join_audit_status(
     method = str(resolution.get("result_join_method", ""))
     if method == "exact_match_id":
         return "exact_match_id_join", True, "Prediction match_id matched result match_id."
+    if method == "result_fixture_crosswalk":
+        return "schedule_bridge_join", True, "Prediction fixture_id matched a completed result through the schedule result bridge."
     if method == "fixture_bridge":
         return "fixture_bridge_join", True, "Prediction matched via fixtures.csv bridge."
     if method in {"normalized_team_date", "fuzzy_team_date"}:
@@ -1633,6 +1673,7 @@ def _mark_duplicate_unselected_snapshots(audit: pd.DataFrame) -> pd.DataFrame:
     out = audit.copy()
     usable_statuses = {
         "exact_match_id_join",
+        "schedule_bridge_join",
         "fixture_bridge_join",
         "normalized_team_date_join",
         "result_found_but_team_order_mismatch",
