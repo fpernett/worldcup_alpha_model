@@ -216,7 +216,7 @@ def test_future_fixture_filter_excludes_unresolved_bracket_slots() -> None:
 
     assert filtered["match_id"].tolist() == ["REAL"]
     assert filtered.attrs.get("unresolved_fixture_count") == 1
-    assert "unresolved bracket slot" in filtered.attrs.get("warning", "")
+    assert "future fixtures pending prior match results" in filtered.attrs.get("warning", "")
 
 
 def test_fixture_filter_can_include_unresolved_slots_for_audit_use() -> None:

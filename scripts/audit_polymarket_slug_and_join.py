@@ -211,11 +211,11 @@ def _joined_count(joined: pd.DataFrame, market: str) -> int:
 
 def _reason_no_rows(resolution: dict, event_markets: pd.DataFrame, joined: pd.DataFrame) -> str:
     if resolution.get("resolution_status") != "resolved":
-        return "No Polymarket event resolved for this fixture."
+        return "No Polymarket event resolved."
     if event_markets is None or event_markets.empty:
-        return "Polymarket event resolved, but no nested market prices were loaded."
+        return "Event resolved; no relevant market found."
     if joined is None or joined.empty or not joined["market_price_cents"].notna().any():
-        return "Polymarket event resolved, but no matching market prices were found."
+        return "Event resolved; no relevant market found."
     return ""
 
 

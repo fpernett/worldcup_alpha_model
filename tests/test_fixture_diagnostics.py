@@ -135,7 +135,7 @@ def test_unresolved_bracket_slots_are_hidden_with_specific_reason():
     assert placeholder["excluded_reason"] == "unresolved_team_slot"
     assert summary["fixtures_visible"] == 1
     assert summary["fixtures_hidden_as_unresolved"] == 1
-    assert "unresolved bracket slot" in summary["warning"]
+    assert "future fixtures pending prior match results" in summary["warning"]
 
 
 def test_local_round_of_32_fixture_rows_are_resolved():

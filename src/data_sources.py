@@ -122,8 +122,8 @@ def filter_future_fixtures(
     """Add UTC kickoff timestamps and optionally keep only future fixtures.
 
     `date_utc` and `time_utc` are treated as UTC. Rows with missing or
-    unparseable kickoff timestamps are hidden because match modelling needs a
-    concrete kickoff time. Unresolved bracket slots are hidden by default
+    unparseable kickoff timestamps are excluded because match modelling needs a
+    concrete kickoff time. Pending bracket slots are excluded by default
     because the model requires actual team rows.
     """
     if fixtures is None:
@@ -161,12 +161,18 @@ def filter_future_fixtures(
     filtered = out.loc[mask].sort_values(["kickoff_utc", "match_id"]).reset_index(drop=True)
     if unresolved_hidden_count and not include_unresolved:
         attrs["unresolved_fixture_count"] = unresolved_hidden_count
+        pending_count = int(attrs.get("fixtures_pending_prior_result", 0) or 0)
+        manual_count = int(attrs.get("fixtures_requiring_manual_mapping", 0) or 0)
+        if manual_count:
+            warning = (
+                f"{pending_count + manual_count} bracket fixture(s) are excluded from the model selector; "
+                f"{pending_count} pending prior match result(s), {manual_count} require manual mapping."
+            )
+        else:
+            warning = f"{pending_count or unresolved_hidden_count} future fixtures pending prior match results."
         attrs["warning"] = _combine_warnings(
             attrs.get("warning", ""),
-            (
-                f"{unresolved_hidden_count} fixture(s) were hidden because a home or away side "
-                "is still an unresolved bracket slot."
-            ),
+            warning,
         )
     filtered.attrs = attrs
     return filtered

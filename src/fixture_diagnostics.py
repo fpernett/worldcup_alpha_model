@@ -68,6 +68,7 @@ def audit_fixture_availability(
 
     audit["kickoff_utc"] = audit["kickoff_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     audit = audit[FIXTURE_AUDIT_COLUMNS].reset_index(drop=True)
+    audit.attrs = fixtures.attrs.copy()
     return audit, _summary(audit, selected_start, selected_end, now, _fixture_warning(audit, selected_start, selected_end, now))
 
 
@@ -78,7 +79,9 @@ def _normalise_fixture_input(fixtures_df: pd.DataFrame | None) -> pd.DataFrame:
     for col in FIXTURE_COLUMNS:
         if col not in out.columns:
             out[col] = pd.NA
-    return out[FIXTURE_COLUMNS].copy()
+    out = out[FIXTURE_COLUMNS].copy()
+    out.attrs = fixtures_df.attrs.copy()
+    return out
 
 
 def _kickoff_series(df: pd.DataFrame) -> pd.Series:
@@ -148,18 +151,24 @@ def _fixture_warning(
     inside = int(audit["inside_selected_window"].sum())
     hidden = int(audit["hidden_by_past_filter"].sum())
     unresolved = int(audit.get("hidden_by_unresolved_slot", pd.Series(dtype=bool)).sum())
+    pending_count = int(audit.attrs.get("fixtures_pending_prior_result", 0) or 0)
+    manual_count = int(audit.attrs.get("fixtures_requiring_manual_mapping", 0) or 0)
+    if unresolved > 0:
+        if manual_count:
+            unresolved_warning = (
+                f"{pending_count + manual_count} bracket fixture(s) in the selected window are excluded from the model selector: "
+                f"{pending_count} pending prior match result(s), {manual_count} require manual mapping."
+            )
+        else:
+            unresolved_warning = f"{pending_count or unresolved} future fixtures pending prior match results."
+    else:
+        unresolved_warning = ""
     if visible == 0 and inside > 0 and hidden == inside:
         return "Fixtures exist in the selected window, but all are hidden by the past-kickoff filter."
     if visible == 0 and inside > 0 and unresolved > 0:
-        return (
-            "Fixtures exist in the selected window, but all visible candidates are unresolved bracket slots. "
-            "Update data/fixtures.csv with actual teams before modelling them."
-        )
+        return unresolved_warning
     if unresolved > 0:
-        return (
-            f"{unresolved} fixture(s) in the selected window are hidden because the home or away side "
-            "is still an unresolved bracket slot."
-        )
+        return unresolved_warning
     if pd.notna(latest) and selected_end is not None and latest < selected_end:
         return (
             f"The loaded fixture source ends at {latest.strftime('%Y-%m-%dT%H:%M:%SZ')}; "

@@ -41,6 +41,7 @@ from src.external_priors import (
 )
 from src.feature_engineering import load_recent_matches
 from src.fixture_diagnostics import audit_fixture_availability
+from src.fixture_resolution import resolve_fixture_placeholders
 from src.historical_binding import audit_historical_binding_for_match, audit_historical_file_status
 from src.fifa_ranking_import import fifa_ranking_import_dashboard_status
 from src.fifa_snapshot_validation import fifa_snapshot_validation_dashboard_status
@@ -68,8 +69,10 @@ from src.polymarket_slug_join import (
     build_polymarket_sports_slug_candidates,
     build_markets_tab_joined_dataframe,
     load_polymarket_event_markets_by_slug,
+    local_edge_headline_metric,
     market_value_groups,
     markets_tab_export_dataframe,
+    polymarket_gap_headline_metric,
     polymarket_alpha_rows,
     top_alpha_empty_state_message,
 )
@@ -145,7 +148,7 @@ def pct(value: float) -> str:
 
 def odds_fmt(value: float) -> str:
     if pd.isna(value):
-        return ""
+        return "Unavailable"
     if value == float("inf"):
         return "inf"
     return f"{value:.2f}"
@@ -171,8 +174,9 @@ def _is_missing_display_value(value: Any) -> bool:
 
 def _display_value(value: Any) -> str:
     if _is_missing_display_value(value):
-        return ""
-    return str(value)
+        return "Unavailable"
+    text = str(value)
+    return "Unavailable" if text.strip() in {"", "<NA>"} else text
 
 
 def _object_column_needs_text(series: pd.Series) -> bool:
@@ -198,7 +202,9 @@ def display_dataframe(data, *args, **kwargs):
         data = data.copy()
         data.attrs = {}
         for col in data.columns:
-            if pd.api.types.is_object_dtype(data[col]) and _object_column_needs_text(data[col]):
+            if pd.api.types.is_object_dtype(data[col]) or pd.api.types.is_string_dtype(data[col]):
+                data[col] = data[col].map(_display_value)
+            elif _object_column_needs_text(data[col]):
                 data[col] = data[col].map(_display_value)
     return st.dataframe(data, *args, **kwargs)
 
@@ -401,14 +407,14 @@ def alpha_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in ["model_prob", "primary_model_probability", "behavior_diagnostic_probability"]:
         if col in out.columns:
-            out[col] = out[col].map(lambda x: "" if pd.isna(x) else pct(float(x)))
+            out[col] = out[col].map(lambda x: "Unavailable" if pd.isna(x) else pct(float(x)))
     if "behavior_probability_delta" in out.columns:
         out["behavior_probability_delta"] = out["behavior_probability_delta"].map(
-            lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp"
+            lambda x: "Unavailable" if pd.isna(x) else f"{100*float(x):+.1f} pp"
         )
     out["fair_odds"] = out["fair_odds"].map(odds_fmt)
-    out["market_odds"] = out["market_odds"].map(odds_fmt)
-    out["alpha_ev"] = out["alpha_ev"].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
+    out["market_odds"] = out["market_odds"].map(lambda x: "No local odds" if pd.isna(x) else odds_fmt(x))
+    out["alpha_ev"] = out["alpha_ev"].map(lambda x: "Model-only" if pd.isna(x) else f"{100*x:.1f}%")
     return out
 
 
@@ -416,16 +422,22 @@ def polymarket_alpha_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in ["model_probability", "primary_model_probability", "behavior_diagnostic_probability"]:
         if col in out.columns:
-            out[col] = out[col].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
+            out[col] = out[col].map(lambda x: "Unavailable" if pd.isna(x) else f"{100*x:.1f}%")
     if "behavior_probability_delta" in out.columns:
         out["behavior_probability_delta"] = out["behavior_probability_delta"].map(
-            lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp"
+            lambda x: "Unavailable" if pd.isna(x) else f"{100*float(x):+.1f} pp"
         )
+    if "fair_price_cents" in out.columns:
+        out["fair_price_cents"] = out["fair_price_cents"].map(lambda x: "Unavailable" if pd.isna(x) else f"{x:.1f}")
+    if "polymarket_price_cents" in out.columns:
+        out["polymarket_price_cents"] = out["polymarket_price_cents"].map(lambda x: "No market price" if pd.isna(x) else f"{x:.1f}")
+    if "alpha_gap_cents" in out.columns:
+        out["alpha_gap_cents"] = out["alpha_gap_cents"].map(lambda x: "No joined price" if pd.isna(x) else f"{x:.1f}")
     for col in ["fair_price_cents", "polymarket_price_cents", "alpha_gap_cents"]:
         if col in out.columns:
-            out[col] = out[col].map(lambda x: "" if pd.isna(x) else f"{x:.1f}")
+            out[col] = out[col].fillna("Unavailable")
     if "alpha_ev" in out.columns:
-        out["alpha_ev"] = out["alpha_ev"].map(lambda x: "" if pd.isna(x) else f"{100*x:.1f}%")
+        out["alpha_ev"] = out["alpha_ev"].map(lambda x: "No joined price" if pd.isna(x) else f"{100*x:.1f}%")
     return out
 
 
@@ -1220,7 +1232,8 @@ def load_inputs(
     horizon_hours: float | None,
     include_past: bool,
 ):
-    raw_fixtures = get_upcoming_fixtures(start_date, end_date)
+    source_fixtures = get_upcoming_fixtures(start_date, end_date)
+    raw_fixtures = resolve_fixture_placeholders(source_fixtures)
     fixture_audit, fixture_audit_summary = audit_fixture_availability(
         raw_fixtures,
         start_date=start_date,
@@ -1228,6 +1241,13 @@ def load_inputs(
         hide_past=not include_past,
         now_utc=now_utc_iso,
     )
+    for key in [
+        "fixtures_resolved_automatically",
+        "fixtures_pending_prior_result",
+        "fixtures_requiring_manual_mapping",
+        "fixtures_source_unresolved",
+    ]:
+        fixture_audit_summary[key] = int(raw_fixtures.attrs.get(key, 0) or 0)
     fixtures = filter_future_fixtures(
         raw_fixtures,
         now_utc=now_utc_iso,
@@ -1552,15 +1572,21 @@ with st.sidebar:
         f"Loaded: {fa.get('total_fixtures_loaded', 0)} | "
         f"Visible: {fa.get('fixtures_visible', 0)} | "
         f"Hidden as past: {fa.get('fixtures_hidden_as_past', 0)} | "
-        f"Hidden unresolved: {fa.get('fixtures_hidden_as_unresolved', 0)}"
+        f"Pending bracket: {fa.get('fixtures_hidden_as_unresolved', 0)}"
+    )
+    st.caption(
+        f"Resolved automatically: {fa.get('fixtures_resolved_automatically', 0)} | "
+        f"Pending prior result: {fa.get('fixtures_pending_prior_result', 0)} | "
+        f"Requires manual mapping: {fa.get('fixtures_requiring_manual_mapping', 0)} | "
+        f"Source fixture unresolved: {fa.get('fixtures_source_unresolved', 0)}"
     )
     st.caption(
         f"Current UTC: {fa.get('current_utc', '')} | "
         f"Selected UTC: {fa.get('selected_start_utc', '')} to {fa.get('selected_end_utc', '')}"
     )
     st.caption(
-        f"Earliest fixture: {fa.get('earliest_kickoff_utc', '') or 'n/a'} | "
-        f"Latest fixture: {fa.get('latest_kickoff_utc', '') or 'n/a'}"
+        f"Earliest fixture: {fa.get('earliest_kickoff_utc', '') or 'Unavailable'} | "
+        f"Latest fixture: {fa.get('latest_kickoff_utc', '') or 'Unavailable'}"
     )
     if fa.get("warning"):
         st.warning(fa["warning"])
@@ -1570,8 +1596,8 @@ with st.sidebar:
     st.caption(
         f"Rows: {historical_status.get('rows_loaded', 0):,} | "
         f"Teams: {historical_status.get('unique_teams', 0)} | "
-        f"Range: {historical_status.get('earliest_date', '') or 'n/a'} to "
-        f"{historical_status.get('latest_date', '') or 'n/a'}"
+        f"Range: {historical_status.get('earliest_date', '') or 'Unavailable'} to "
+        f"{historical_status.get('latest_date', '') or 'Unavailable'}"
     )
     if historical_status.get("warning"):
         st.warning(historical_status["warning"])
@@ -1584,11 +1610,15 @@ with st.sidebar:
 st.subheader("Available Matches")
 hidden_unresolved_fixtures = int(fixture_audit_summary.get("fixtures_hidden_as_unresolved", 0) or 0)
 if hidden_unresolved_fixtures:
-    st.warning(
-        f"{hidden_unresolved_fixtures} fixture(s) in this UTC window are hidden because a team is still "
-        "an unresolved bracket slot such as `Winner Group K` or `Winner Match 73`. Update `data/fixtures.csv` "
-        "with actual teams before modelling those games."
-    )
+    pending_count = int(fixture_audit_summary.get("fixtures_pending_prior_result", 0) or 0)
+    manual_count = int(fixture_audit_summary.get("fixtures_requiring_manual_mapping", 0) or 0)
+    if manual_count:
+        st.info(
+            f"{pending_count + manual_count} bracket fixture(s) in this UTC window are excluded from the model selector: "
+            f"{pending_count} pending prior match result(s), {manual_count} require manual mapping."
+        )
+    else:
+        st.info(f"{pending_count or hidden_unresolved_fixtures} future fixtures pending prior match results.")
 if fixtures.empty:
     st.warning("No fixtures found for the selected UTC window. Add rows to `data/fixtures.csv`, widen the date range, or configure a fixture API.")
     st.stop()
@@ -1846,8 +1876,8 @@ for label in selected_labels:
         dh_cols[3].metric("Away historical rows", selected_binding["away_historical_rows_before_asof"])
         dh_cols2 = st.columns(4)
         dh_cols2[0].metric("H2H rows", selected_binding["h2h_rows_before_asof"])
-        dh_cols2[1].metric("Latest home match", selected_binding["home_latest_match"] or "n/a")
-        dh_cols2[2].metric("Latest away match", selected_binding["away_latest_match"] or "n/a")
+        dh_cols2[1].metric("Latest home match", selected_binding["home_latest_match"] or "Unavailable")
+        dh_cols2[2].metric("Latest away match", selected_binding["away_latest_match"] or "Unavailable")
         dh_cols2[3].metric("Binding status", selected_binding["data_binding_status"])
 
         rating_rows = teams.copy()
@@ -2031,27 +2061,16 @@ for label in selected_labels:
 
     with tabs[1]:
         st.subheader("Alpha Read")
-        top_alpha_rows = alpha.loc[alpha["alpha_ev"].notna()].sort_values("alpha_ev", ascending=False)
-        if not joined_polymarket_alpha_rows.empty:
-            top_pm_rows = joined_polymarket_alpha_rows.loc[
-                joined_polymarket_alpha_rows["alpha_gap_cents"].notna()
-            ].sort_values("alpha_gap_cents", ascending=False)
-        else:
-            top_pm_source = filtered_polymarket_alpha if not filtered_polymarket_alpha.empty else polymarket_alpha
-            top_pm_rows = top_pm_source.loc[top_pm_source["alpha_gap_cents"].notna()].sort_values(
-                "alpha_gap_cents", ascending=False
-            ) if not top_pm_source.empty else pd.DataFrame()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Model confidence", confidence["label"])
         c2.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
-        c3.metric(
-            "Best local EV",
-            "n/a" if top_alpha_rows.empty or pd.isna(top_alpha_rows.iloc[0]["alpha_ev"]) else f"{100 * top_alpha_rows.iloc[0]['alpha_ev']:.1f}%",
+        local_headline = local_edge_headline_metric(alpha)
+        polymarket_headline = polymarket_gap_headline_metric(
+            joined_polymarket_markets,
+            filtered_polymarket_alpha if not filtered_polymarket_alpha.empty else polymarket_alpha,
         )
-        c4.metric(
-            "Best Polymarket gap",
-            "n/a" if top_pm_rows.empty else f"{float(top_pm_rows.iloc[0]['alpha_gap_cents']):.1f}c",
-        )
+        c3.metric(local_headline["label"], local_headline["value"])
+        c4.metric(polymarket_headline["label"], polymarket_headline["value"])
         st.caption(
             "Alpha Read is a statistical screen from the model and loaded market data. "
             "It is not staking advice, trade execution, or an investment recommendation."
@@ -2068,7 +2087,7 @@ for label in selected_labels:
         d4.metric("Training matches", f"{data_support['training_match_count']:,}")
         st.caption(
             f"{data_support['h2h_note']}. Training data range: "
-            f"{data_support['training_data_start'] or 'n/a'} to {data_support['training_data_end'] or 'n/a'}."
+            f"{data_support['training_data_start'] or 'Unavailable'} to {data_support['training_data_end'] or 'Unavailable'}."
         )
 
         st.subheader("Goal Distribution And Outcome")
@@ -2135,23 +2154,17 @@ for label in selected_labels:
                     {"Item": "Training data match count", "Value": f"{data_support['training_match_count']:,}"},
                     {
                         "Item": "Training data date range",
-                        "Value": f"{data_support['training_data_start'] or 'n/a'} to {data_support['training_data_end'] or 'n/a'}",
+                        "Value": f"{data_support['training_data_start'] or 'Unavailable'} to {data_support['training_data_end'] or 'Unavailable'}",
                     },
-                    {"Item": "RPS", "Value": "RPS placeholder / not yet backtested"},
+                    {"Item": "RPS", "Value": "Unavailable until ranked-probability scoring is implemented and backtested"},
                     {"Item": "Data source status", "Value": source_summary},
                 ]
             )
             display_dataframe(model_info, hide_index=True, width="stretch")
 
         st.subheader("Market Value Tables")
-        markets_loaded_count = len(resolved_event_markets)
-        markets_joined_count = int(joined_polymarket_markets["market_price_cents"].notna().sum()) if not joined_polymarket_markets.empty else 0
-        if slug_resolution.get("resolution_status") != "resolved":
-            st.info("No Polymarket event resolved; showing model fair values without Polymarket prices.")
-        elif markets_loaded_count == 0:
-            st.info("Polymarket event resolved, but no nested market prices were loaded. Showing model fair values without prices.")
-        elif markets_joined_count == 0:
-            st.info("Polymarket event resolved, but no matching market prices were found. Showing model fair values without prices.")
+        if markets_tab_diagnostics.get("market_join_status") != "joined_price":
+            st.info(markets_tab_diagnostics.get("market_join_message", "Model-only fair value."))
         if markets_tab_diagnostics.get("market_value_warning"):
             st.warning(markets_tab_diagnostics["market_value_warning"])
         for group_name, group_df in market_groups.items():
@@ -2160,8 +2173,8 @@ for label in selected_labels:
                 st.caption("No model market rows for this group.")
             else:
                 display_dataframe(group_df, hide_index=True, width="stretch")
-                if "Odds / Price" in group_df.columns and not group_df["Odds / Price"].astype(str).str.strip().any():
-                    st.caption("No Polymarket price joined for this group; fair values are model-only.")
+                if "Odds / Price" in group_df.columns and group_df["Odds / Price"].astype(str).str.contains("No market price|No local odds", regex=True).all():
+                    st.caption("No joined market price for this group; rows are displayed as model-only fair values.")
 
     with tabs[2]:
         mat = result["score_matrix"].copy()
@@ -2181,15 +2194,16 @@ for label in selected_labels:
 
     with tabs[3]:
         st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
-        diag_cols = st.columns(5)
+        diag_cols = st.columns(6)
         diag_cols[0].metric("Resolved slug", markets_tab_diagnostics.get("resolved_slug", "") or "unresolved")
         diag_cols[1].metric("Event markets loaded", markets_tab_diagnostics.get("event_markets_loaded", 0))
         diag_cols[2].metric("Joined markets", markets_tab_diagnostics.get("joined_markets", 0))
         diag_cols[3].metric("Rows with market_odds", markets_tab_diagnostics.get("rows_with_market_odds", 0))
         diag_cols[4].metric("Rows with alpha_ev", markets_tab_diagnostics.get("rows_with_alpha_ev", 0))
+        diag_cols[5].metric("Join status", markets_tab_diagnostics.get("market_join_status", "model_only"))
         st.caption(f"Mapped Polymarket alpha rows available to this table: {markets_tab_diagnostics.get('mapped_alpha_rows', 0)}.")
         if markets_tab_diagnostics.get("reason_if_zero"):
-            st.warning(markets_tab_diagnostics["reason_if_zero"])
+            st.info(markets_tab_diagnostics["reason_if_zero"])
         display_dataframe(
             markets_tab_df,
             hide_index=True,
@@ -3265,7 +3279,7 @@ for label in selected_labels:
             pm3.metric("Scored pre-kickoff predictions", f"{len(calibration_eval):,}")
 
             st.divider()
-            st.write("Calibration summary")
+            st.write("Raw model calibration summary")
             cal_summary = calibration_report.get("summary", pd.DataFrame())
             if isinstance(cal_summary, pd.DataFrame) and not cal_summary.empty:
                 display_dataframe(cal_summary, hide_index=True, width="stretch")
@@ -3273,13 +3287,30 @@ for label in selected_labels:
                 st.info("No valid 90-minute 1X2 rows are available for calibration metrics.")
 
             cal_diagnostics = calibration_report.get("diagnostics", {})
+            probability_policy = calibration_report.get("probability_policy", {})
+            if isinstance(probability_policy, dict):
+                st.write("Probability status")
+                display_dataframe(
+                    pd.DataFrame(
+                        [
+                            {"item": "Primary probability source", "status": probability_policy.get("primary_probability_source", "Unavailable")},
+                            {"item": "Calibrated probability status", "status": probability_policy.get("calibrated_probability_status", "Unavailable")},
+                            {"item": "Production gate", "status": probability_policy.get("production_gate", "Unavailable")},
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
             if isinstance(cal_diagnostics, dict) and cal_diagnostics.get("warning"):
-                st.warning(cal_diagnostics["warning"])
+                st.info(cal_diagnostics["warning"])
             variant_metrics = calibration_report.get("variant_metrics", pd.DataFrame())
             if isinstance(variant_metrics, pd.DataFrame) and not variant_metrics.empty:
                 st.write("Walk-forward calibration variants")
                 display_dataframe(variant_metrics, hide_index=True, width="stretch")
-                st.caption("Negative deltas versus baseline indicate lower Brier score or log loss.")
+                st.caption(
+                    "These are candidate calibrated probabilities for review only. Negative deltas versus the raw baseline "
+                    "indicate lower Brier score or log loss; the primary match tabs stay on raw baseline probabilities unless a variant clears both gates."
+                )
 
             reliability = calibration_report.get("reliability", pd.DataFrame())
             if isinstance(reliability, pd.DataFrame) and not reliability.empty:
@@ -3319,7 +3350,7 @@ for label in selected_labels:
             l1, l2, l3, l4 = st.columns(4)
             l1.metric("Completed WC matches available", f"{learning_diag.get('completed_world_cup_matches_available', 0):,}")
             l2.metric("Eligible before selected kickoff", f"{learning_diag.get('completed_world_cup_matches_used', 0):,}")
-            l3.metric("Latest match used", str(learning_diag.get("latest_completed_match_used", "") or "n/a"))
+            l3.metric("Latest match used", str(learning_diag.get("latest_completed_match_used", "") or "Unavailable"))
             l4.metric("Lookahead safe", "yes" if learning_diag.get("lookahead_safe", True) else "no")
             st.caption(
                 "After each match finishes, the model can learn from that result for future games. "

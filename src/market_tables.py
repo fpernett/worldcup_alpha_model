@@ -76,7 +76,7 @@ def _decimal_market_row(row: pd.Series) -> dict[str, Any]:
         "Market": f"{market}: {selection}".strip(": "),
         "Odds / Price": _fmt_decimal(row.get("market_odds")),
         "Fair Odds / Fair Price": _fmt_decimal(row.get("fair_odds")),
-        "EV / Alpha Gap": "" if pd.isna(ev) else f"{100 * ev:.1f}%",
+        "EV / Alpha Gap": "Model-only" if pd.isna(ev) else f"{100 * ev:.1f}%",
         "Score": score,
         "Signal": signal,
     }
@@ -93,7 +93,7 @@ def _polymarket_row(row: pd.Series) -> dict[str, Any]:
         "Market": f"{side}: {question}".strip(": "),
         "Odds / Price": _fmt_cents(row.get("polymarket_price_cents")),
         "Fair Odds / Fair Price": _fmt_cents(row.get("fair_price_cents")),
-        "EV / Alpha Gap": "" if pd.isna(gap) else f"{gap:.1f} cents",
+        "EV / Alpha Gap": "No joined price" if pd.isna(gap) else f"{gap:.1f} cents",
         "Score": score,
         "Signal": str(row.get("signal_strength") or _signal_from_gap(gap)),
     }
@@ -158,12 +158,12 @@ def _signal_from_gap(gap: float) -> str:
 def _fmt_decimal(value: Any) -> str:
     number = coerce_float(value, float("nan"))
     if pd.isna(number):
-        return ""
+        return "No local odds"
     return f"{number:.2f}"
 
 
 def _fmt_cents(value: Any) -> str:
     number = coerce_float(value, float("nan"))
     if pd.isna(number):
-        return ""
+        return "No market price"
     return f"{number:.1f}c"

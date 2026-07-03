@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.market_tables import group_market_alpha
-from src.report_metrics import calculate_goal_distribution, calculate_league_context
+from src.report_metrics import build_expected_goals_df, calculate_goal_distribution, calculate_league_context
 from src.timeline import calculate_score_timeline
 
 
@@ -47,6 +47,26 @@ def test_league_context_uses_fallback_when_history_missing() -> None:
     assert abs(out.loc[out["Metric"] == "Goals per match", "This match"].iloc[0] - 2.4) < 1e-9
 
 
+def test_expected_goals_report_uses_base_and_adjusted_components_without_todo() -> None:
+    result = {
+        "home": "Alpha",
+        "away": "Beta",
+        "hxg": 1.6,
+        "axg": 0.8,
+        "components": {
+            "home_raw_xg_before_adjustments": 1.4,
+            "away_raw_xg_before_adjustments": 0.9,
+        },
+    }
+
+    out = build_expected_goals_df(result)
+
+    assert out.loc[out["team"] == "Alpha", "base_xg"].iloc[0] == 1.4
+    assert out.loc[out["team"] == "Alpha", "adjusted_xg"].iloc[0] == 1.6
+    assert {"rating_adjusted_xg", "form_adjusted_xg", "venue_adjusted_xg", "final_xg"}.issubset(out.columns)
+    assert "TODO" not in out.attrs.get("note", "")
+
+
 def test_group_market_alpha_builds_polymarket_group() -> None:
     alpha = pd.DataFrame(
         [
@@ -79,3 +99,24 @@ def test_group_market_alpha_builds_polymarket_group() -> None:
     assert len(groups["High Scoring"]) == 1
     assert len(groups["Polymarket Alpha"]) == 1
     assert groups["Polymarket Alpha"].iloc[0]["Signal"] == "Moderate"
+
+
+def test_group_market_alpha_uses_explicit_missing_value_statuses() -> None:
+    alpha = pd.DataFrame(
+        [
+            {
+                "market": "Total",
+                "selection": "Under 2.5",
+                "market_odds": pd.NA,
+                "fair_odds": 1.8,
+                "alpha_ev": pd.NA,
+            }
+        ]
+    )
+
+    groups = group_market_alpha(alpha, pd.DataFrame())
+    row = groups["Low Scoring"].iloc[0]
+
+    assert row["Odds / Price"] == "No local odds"
+    assert row["EV / Alpha Gap"] == "Model-only"
+    assert "" not in row.astype(str).tolist()

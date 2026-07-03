@@ -144,13 +144,42 @@ def build_expected_goals_df(model_result: dict[str, Any]) -> pd.DataFrame:
     away = str(model_result.get("away", "Away"))
     hxg = coerce_float(model_result.get("hxg"), 0.0)
     axg = coerce_float(model_result.get("axg"), 0.0)
+    components = model_result.get("components", {}) if isinstance(model_result, dict) else {}
+    home_base = coerce_float(components.get("base_home_xg"), coerce_float(components.get("home_raw_xg_before_adjustments"), hxg))
+    away_base = coerce_float(components.get("base_away_xg"), coerce_float(components.get("away_raw_xg_before_adjustments"), axg))
+    home_rating = coerce_float(components.get("rating_adjusted_home_xg"), home_base)
+    away_rating = coerce_float(components.get("rating_adjusted_away_xg"), away_base)
+    home_form = coerce_float(components.get("form_adjusted_home_xg"), coerce_float(components.get("home_raw_xg_before_adjustments"), home_rating))
+    away_form = coerce_float(components.get("form_adjusted_away_xg"), coerce_float(components.get("away_raw_xg_before_adjustments"), away_rating))
+    home_venue = coerce_float(components.get("venue_adjusted_home_xg"), coerce_float(components.get("home_unclamped_xg"), hxg))
+    away_venue = coerce_float(components.get("venue_adjusted_away_xg"), coerce_float(components.get("away_unclamped_xg"), axg))
     df = pd.DataFrame(
         [
-            {"team": home, "base_xg": hxg, "adjusted_xg": hxg, "lower": hxg * 0.65, "upper": hxg * 1.45},
-            {"team": away, "base_xg": axg, "adjusted_xg": axg, "lower": axg * 0.65, "upper": axg * 1.45},
+            {
+                "team": home,
+                "base_xg": home_base,
+                "rating_adjusted_xg": home_rating,
+                "form_adjusted_xg": home_form,
+                "venue_adjusted_xg": home_venue,
+                "adjusted_xg": hxg,
+                "final_xg": hxg,
+                "lower": hxg * 0.65,
+                "upper": hxg * 1.45,
+            },
+            {
+                "team": away,
+                "base_xg": away_base,
+                "rating_adjusted_xg": away_rating,
+                "form_adjusted_xg": away_form,
+                "venue_adjusted_xg": away_venue,
+                "adjusted_xg": axg,
+                "final_xg": axg,
+                "lower": axg * 0.65,
+                "upper": axg * 1.45,
+            },
         ]
     )
-    df.attrs["note"] = "TODO: base xG is not separately stored yet; adjusted xG is used as base for this v1 report."
+    df.attrs["note"] = "xG decomposition shows baseline, rating, form, venue/weather, and final adjusted model output used for probabilities."
     return df
 
 

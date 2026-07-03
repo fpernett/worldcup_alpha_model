@@ -5,6 +5,7 @@ import pandas as pd
 from src.calibration import (
     build_calibration_backtest_report,
     build_calibration_evaluation_dataset,
+    calibration_probability_policy,
     calibration_metrics,
     market_type_semantics,
 )
@@ -136,3 +137,28 @@ def test_calibration_metrics_and_walk_forward_variants() -> None:
 
     assert int(summary.iloc[0]["n"]) == 4
     assert set(report["variant_metrics"]["model"]) >= {"baseline_model", "model_plus_shrinkage", "model_plus_market_prior", "full_calibrated_model"}
+
+
+def test_insufficient_calibration_history_reports_truthful_policy() -> None:
+    predictions = pd.DataFrame([_prediction("m1", "2026-06-11T18:00:00+00:00", 0.60)])
+    results = pd.DataFrame([_result("m1", "draw")])
+    evaluation = build_calibration_evaluation_dataset(predictions, results)
+    report = build_calibration_backtest_report(evaluation, min_train=30)
+
+    diagnostics = report["diagnostics"]
+    policy = report["probability_policy"]
+
+    assert diagnostics["status"] == "insufficient_history"
+    assert diagnostics["warning"] == "Calibration sample too small; using conservative shrinkage."
+    assert policy["primary_probability_source"] == "Raw baseline external-calibrated model probabilities"
+    assert "sample too small" in policy["calibrated_probability_status"]
+
+
+def test_calibration_probability_policy_keeps_variants_review_only() -> None:
+    policy = calibration_probability_policy(
+        {"status": "ok"},
+        pd.DataFrame([{"model": "full_calibrated_model", "brier_delta_vs_baseline": -0.01, "log_loss_delta_vs_baseline": -0.02}]),
+    )
+
+    assert policy["calibrated_probability_status"] == "Candidate walk-forward variants are scored for review only."
+    assert "before promotion" in policy["production_gate"]

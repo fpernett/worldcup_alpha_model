@@ -57,7 +57,7 @@ def main() -> None:
     print(_printable(report.get("worst_misses", pd.DataFrame()).head(5)).to_string(index=False))
     print("\nBest calls")
     print(_printable(report.get("best_calls", pd.DataFrame()).head(5)).to_string(index=False))
-    print("\nCalibration summary")
+    print("\nRaw model calibration summary")
     print(_printable(calibration_report.get("summary", pd.DataFrame())).to_string(index=False))
     print("\nWalk-forward calibration variants")
     print(_printable(calibration_report.get("variant_metrics", pd.DataFrame())).to_string(index=False))

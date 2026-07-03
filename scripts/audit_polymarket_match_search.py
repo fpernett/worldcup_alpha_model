@@ -63,7 +63,7 @@ def main() -> None:
         print(f"reason: {best.iloc[0].get('score_breakdown', '')}")
     else:
         print("best candidate: None")
-        print("confidence: n/a")
+        print("confidence: Unavailable")
         print("reason: no accepted candidates")
     if not rejected.empty:
         print("top rejected candidates:")

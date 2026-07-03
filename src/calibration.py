@@ -345,6 +345,7 @@ def build_calibration_backtest_report(evaluation_df: pd.DataFrame | None, min_tr
     baseline = calibration_metrics(evaluation)
     reliability = reliability_curve(evaluation)
     variants, variant_predictions, diagnostics = walk_forward_calibration(evaluation, min_train=min_train)
+    probability_policy = calibration_probability_policy(diagnostics, variants)
     return {
         "evaluation": evaluation,
         "summary": baseline,
@@ -358,6 +359,7 @@ def build_calibration_backtest_report(evaluation_df: pd.DataFrame | None, min_tr
         "variant_metrics": variants,
         "variant_predictions": variant_predictions,
         "diagnostics": diagnostics,
+        "probability_policy": probability_policy,
         "diagnostic_matches": diagnostic_match_report(evaluation),
     }
 
@@ -377,7 +379,7 @@ def walk_forward_calibration(evaluation_df: pd.DataFrame | None, min_train: int 
                 "status": "insufficient_history",
                 "rows": int(len(df)),
                 "minimum_training_rows": int(min_train),
-                "warning": "Not enough completed pre-kickoff predictions for walk-forward calibration.",
+                "warning": "Calibration sample too small; using conservative shrinkage.",
             },
         )
 
@@ -417,6 +419,24 @@ def walk_forward_calibration(evaluation_df: pd.DataFrame | None, min_train: int 
         "warning": "",
     }
     return metrics, predictions, diagnostics
+
+
+def calibration_probability_policy(diagnostics: dict[str, Any] | None, variants: pd.DataFrame | None) -> dict[str, str]:
+    status = str((diagnostics or {}).get("status", "unknown") or "unknown")
+    policy = {
+        "primary_probability_source": "Raw baseline external-calibrated model probabilities",
+        "calibrated_probability_status": "Not active in production tables",
+        "production_gate": "Calibrated variants must beat the raw baseline on both Brier score and log loss before promotion.",
+    }
+    if status == "insufficient_history":
+        policy["calibrated_probability_status"] = "Unavailable: calibration sample too small; using conservative shrinkage."
+    elif status == "empty":
+        policy["calibrated_probability_status"] = "Unavailable: no valid completed pre-kickoff 90-minute 1X2 rows."
+    elif status == "ok" and variants is not None and not variants.empty:
+        policy["calibrated_probability_status"] = "Candidate walk-forward variants are scored for review only."
+    elif status == "no_scored_variants":
+        policy["calibrated_probability_status"] = "Unavailable: no walk-forward variant rows were scored."
+    return policy
 
 
 def diagnostic_match_report(evaluation_df: pd.DataFrame | None, matchups: list[tuple[str, str]] | None = None) -> pd.DataFrame:
@@ -503,8 +523,16 @@ def render_calibration_markdown(evaluation_df: pd.DataFrame, report: dict[str, A
     summary = _printable(report.get("summary", pd.DataFrame()))
     variants = _printable(report.get("variant_metrics", pd.DataFrame()))
     diagnostics = report.get("diagnostics", {}) if isinstance(report.get("diagnostics"), dict) else {}
+    probability_policy = report.get("probability_policy", {}) if isinstance(report.get("probability_policy"), dict) else {}
     diagnostic_matches = _printable(report.get("diagnostic_matches", pd.DataFrame()))
     market_statement = _market_prior_statement(variants)
+    probability_policy_df = pd.DataFrame(
+        [
+            {"item": "Primary probability source", "status": probability_policy.get("primary_probability_source", "Unavailable")},
+            {"item": "Calibrated probability status", "status": probability_policy.get("calibrated_probability_status", "Unavailable")},
+            {"item": "Production gate", "status": probability_policy.get("production_gate", "Unavailable")},
+        ]
+    )
     lines = [
         f"# Calibration / Post-Mortem Report - {report_date}",
         "",
@@ -518,11 +546,17 @@ def render_calibration_markdown(evaluation_df: pd.DataFrame, report: dict[str, A
     lines.extend(
         [
             "",
-            "## Baseline Metrics",
+            "## Raw Model Calibration Metrics",
             "",
             _to_markdown(summary),
             "",
+            "## Probability Status",
+            "",
+            _to_markdown(probability_policy_df),
+            "",
             "## Walk-Forward Calibration Variants",
+            "",
+            "These are candidate calibrated probabilities for review only. The primary match tabs stay on raw baseline probabilities unless a variant beats the raw baseline on both Brier score and log loss.",
             "",
             market_statement,
             "",

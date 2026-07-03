@@ -40,6 +40,7 @@ def main() -> None:
         competition=args.competition,
     )
     recommended, candidates = recommend_match_specific_parameter_set(calibration)
+    recommended_parameter_set = recommended.get("parameter_set_id", "Unavailable") if not recommended.empty else "Unavailable"
 
     print(f"match: {args.home} vs {args.away}")
     print(f"target kickoff: {target_kickoff}")
@@ -47,7 +48,7 @@ def main() -> None:
     print(f"calibration matches: {diagnostics.get('calibration_matches', 0):,}")
     print(f"completed World Cup matches used: {diagnostics.get('completed_world_cup_matches_used', 0):,}")
     print(f"lookahead safe: {diagnostics.get('lookahead_safe')}")
-    print(f"recommended parameter set (diagnostic only): {recommended.get('parameter_set_id', 'n/a') if not recommended.empty else 'n/a'}")
+    print(f"recommended parameter set (diagnostic only): {recommended_parameter_set}")
 
     if args.save_report:
         reports = PROJECT_ROOT / "reports"
@@ -63,7 +64,7 @@ def main() -> None:
                     "",
                     f"Match: `{args.home} vs {args.away}`",
                     f"Target kickoff: `{target_kickoff}`",
-                    f"Recommended parameter set: `{recommended.get('parameter_set_id', 'n/a') if not recommended.empty else 'n/a'}`",
+                    f"Recommended parameter set: `{recommended_parameter_set}`",
                     "",
                     "The recommendation is diagnostic-only and does not change the global primary model.",
                     "",

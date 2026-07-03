@@ -144,30 +144,37 @@ def expected_goals(
     env_adj = environmental_adjustments(home, away, env, cfg)
     venue_adj = venue_log_adjustments(home.get("team", ""), away.get("team", ""), env)
 
-    h_base_log = (
-        cfg.neutral_home_bias
+    h_neutral_log = cfg.neutral_home_bias
+    a_neutral_log = -cfg.neutral_home_bias
+    h_rating_log = (
+        h_neutral_log
         + cfg.elo_xg_weight * cfg.rating_gap_to_xg_scale * elo_diff
         + cfg.attack_weight * home_attack
         - cfg.defense_weight * away_def
-        + cfg.form_weight * home_form
     )
-
-    a_base_log = (
-        -cfg.neutral_home_bias
+    a_rating_log = (
+        a_neutral_log
         - cfg.elo_xg_weight * cfg.rating_gap_to_xg_scale * elo_diff
         + cfg.attack_weight * away_attack
         - cfg.defense_weight * home_def
-        + cfg.form_weight * away_form
     )
+    h_base_log = h_rating_log + cfg.form_weight * home_form
+    a_base_log = a_rating_log + cfg.form_weight * away_form
 
     h_log = h_base_log + float(env_adj["home_environment_log_adj"]) + float(venue_adj["home_venue_log_adj"])
     a_log = a_base_log + float(env_adj["away_environment_log_adj"]) + float(venue_adj["away_venue_log_adj"])
 
+    base_home_xg = math.exp(h_neutral_log)
+    base_away_xg = math.exp(a_neutral_log)
+    rating_adjusted_home_xg = math.exp(h_rating_log)
+    rating_adjusted_away_xg = math.exp(a_rating_log)
     base_raw_h = math.exp(h_base_log)
     base_raw_a = math.exp(a_base_log)
     raw_h = math.exp(h_log)
     raw_a = math.exp(a_log)
     weather_xg_multiplier = math.exp(float(env_adj["total_environment_log_adj"]))
+    venue_adjusted_home_xg = raw_h * weather_xg_multiplier
+    venue_adjusted_away_xg = raw_a * weather_xg_multiplier
     global_xg_multiplier = max(coerce_float(cfg.global_xg_calibration_multiplier, 1.0), 0.0)
     unclamped_hxg = raw_h * weather_xg_multiplier * global_xg_multiplier
     unclamped_axg = raw_a * weather_xg_multiplier * global_xg_multiplier
@@ -194,6 +201,16 @@ def expected_goals(
         "away_base_log_strength": a_base_log,
         "home_final_log_strength": h_log,
         "away_final_log_strength": a_log,
+        "base_home_xg": base_home_xg,
+        "base_away_xg": base_away_xg,
+        "rating_adjusted_home_xg": rating_adjusted_home_xg,
+        "rating_adjusted_away_xg": rating_adjusted_away_xg,
+        "form_adjusted_home_xg": base_raw_h,
+        "form_adjusted_away_xg": base_raw_a,
+        "venue_adjusted_home_xg": venue_adjusted_home_xg,
+        "venue_adjusted_away_xg": venue_adjusted_away_xg,
+        "final_home_xg": hxg,
+        "final_away_xg": axg,
         "home_raw_xg_before_adjustments": base_raw_h,
         "away_raw_xg_before_adjustments": base_raw_a,
         "home_raw_xg": raw_h,

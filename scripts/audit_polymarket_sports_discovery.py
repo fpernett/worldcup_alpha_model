@@ -69,7 +69,7 @@ def main() -> None:
         print(f"reason: {best.iloc[0].get('score_breakdown', '')}")
     else:
         print("best candidate: None")
-        print("confidence: n/a")
+        print("confidence: Unavailable")
         print(f"reason no match: {candidates.attrs.get('no_match_reason', _no_match_reason())}")
         print("Next steps:")
         for step in _next_steps(args, candidates):

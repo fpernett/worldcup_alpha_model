@@ -87,6 +87,8 @@ MARKETS_TAB_COLUMNS = [
     "odds_source",
     "odds_last_updated",
     "signal",
+    "market_join_status",
+    "market_join_reason",
     "score",
     "mapping_confidence",
     "polymarket_market_id",
@@ -113,6 +115,14 @@ MARKET_VALUE_DISPLAY_COLUMNS = [
     "Signal",
     "Mapping confidence",
 ]
+
+MARKET_JOIN_STATUS_LABELS = {
+    "no_event_resolved": "No Polymarket event resolved.",
+    "event_found_no_relevant_market": "Event resolved; no relevant market found.",
+    "event_found_no_usable_price": "Event resolved; relevant market found but no usable price.",
+    "joined_price": "Joined market price.",
+    "model_only": "Model-only fair value.",
+}
 
 
 def get_polymarket_team_code_variants(team: str) -> list[str]:
@@ -239,7 +249,7 @@ def resolve_polymarket_slug_for_fixture(
             tried.append(text_match)
         return base_response(text_match, "local_cache_text_search", "Matched by cache text search after deterministic candidates.")
 
-    out = base_response("", "", "No Polymarket event resolved for this fixture.")
+    out = base_response("", "", "No Polymarket event resolved.")
     out["candidates_tried"] = tried
     return out
 
@@ -405,14 +415,11 @@ def build_polymarket_alpha_for_fixture(
         warnings.append(str(event_markets.attrs.get("warning")))
 
     joined = join_polymarket_prices_to_model_markets(model_market_families_df, event_markets, home, away)
-    priced_rows = joined.loc[joined["market_price_cents"].notna()].copy() if not joined.empty else pd.DataFrame()
+    market_join_status, market_join_message = _market_join_status(resolution, event_markets, joined)
     reason_no_rows = ""
-    if resolution.get("resolution_status") != "resolved":
-        reason_no_rows = "No Polymarket event resolved for this fixture."
-    elif event_markets.empty:
-        reason_no_rows = "Polymarket event resolved, but no nested market prices were loaded."
-    elif priced_rows.empty:
-        reason_no_rows = "Polymarket event resolved, but no matching market prices were found for local model markets."
+    if market_join_status != "joined_price":
+        reason_no_rows = market_join_message
+    priced_rows = joined.loc[joined["market_price_cents"].notna()].copy() if not joined.empty else pd.DataFrame()
 
     diagnostics = {
         "home": home,
@@ -439,6 +446,8 @@ def build_polymarket_alpha_for_fixture(
         "model_markets_count": int(len(model_market_families_df)) if model_market_families_df is not None else 0,
         "joined_markets_count": int(len(priced_rows)),
         "top_alpha_rows_count": int(len(priced_rows)),
+        "market_join_status": market_join_status,
+        "market_join_message": market_join_message,
         "reason_no_alpha_rows": reason_no_rows,
         "warnings": [warning for warning in warnings if warning],
     }
@@ -557,7 +566,9 @@ def build_markets_tab_joined_dataframe(
         out["alpha_gap_cents"] = pd.NA
         out["odds_source"] = pd.NA
         out["odds_last_updated"] = pd.NA
-        out["signal"] = "No price joined"
+        out["signal"] = "Model-only fair value"
+        out["market_join_status"] = _diagnostic_join_status(diagnostics)
+        out["market_join_reason"] = _diagnostic_join_message(diagnostics)
         out["score"] = 0.0
         out["mapping_confidence"] = pd.NA
         out["polymarket_market_id"] = pd.NA
@@ -600,8 +611,16 @@ def build_markets_tab_joined_dataframe(
                 out["odds_source"] = "polymarket"
                 out["odds_last_updated"] = _first_notna(match.get("polymarket_last_updated"), utc_now_iso())
                 out["signal"] = match.get("signal", "Near fair")
+                out["market_join_status"] = "joined_price"
+                out["market_join_reason"] = "Joined market price."
+            elif _has_joined_market_identity(match):
+                out["signal"] = "Model-only fair value"
+                out["market_join_status"] = "event_found_no_usable_price"
+                out["market_join_reason"] = match.get("mapping_reason", MARKET_JOIN_STATUS_LABELS["event_found_no_usable_price"])
             else:
-                out["signal"] = "No price joined"
+                out["signal"] = "Model-only fair value"
+                out["market_join_status"] = "event_found_no_relevant_market"
+                out["market_join_reason"] = match.get("mapping_reason", MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"])
         alpha_match = mapped_alpha_lookup.get((str(model_row.get("market", "")), str(model_row.get("selection", ""))))
         if alpha_match is not None and pd.isna(out.get("market_price_cents")):
             out.update(_markets_tab_values_from_mapped_alpha(alpha_match, out))
@@ -637,11 +656,11 @@ def markets_tab_join_diagnostics(
     status = str(diagnostics.get("slug_resolution_status", diagnostics.get("resolution_status", "")) or "")
     if rows_with_market_odds == 0:
         if status != "resolved":
-            reason = "No Polymarket prices joined because no event slug was resolved."
+            reason = "No Polymarket event resolved."
         elif event_markets_loaded == 0:
-            reason = "Event slug resolved, but no event markets were loaded."
+            reason = "Event resolved; no relevant market found."
         else:
-            reason = "Event markets loaded, but no model markets matched Polymarket outcomes."
+            reason = "Event resolved; no relevant market found."
     return {
         "resolved_slug": diagnostics.get("resolved_slug", ""),
         "event_markets_loaded": event_markets_loaded,
@@ -649,6 +668,8 @@ def markets_tab_join_diagnostics(
         "mapped_alpha_rows": rows_with_mapped_alpha,
         "rows_with_market_odds": rows_with_market_odds,
         "rows_with_alpha_ev": rows_with_alpha_ev,
+        "market_join_status": diagnostics.get("market_join_status", _status_from_reason(reason, rows_with_market_odds)),
+        "market_join_message": diagnostics.get("market_join_message", reason),
         "reason_if_zero": reason,
     }
 
@@ -739,6 +760,58 @@ def top_alpha_empty_state_message(
     if reason:
         return reason
     return "No fixture-specific Polymarket price rows are available for this selected match."
+
+
+def market_join_status_label(status: Any) -> str:
+    return MARKET_JOIN_STATUS_LABELS.get(str(status or ""), MARKET_JOIN_STATUS_LABELS["model_only"])
+
+
+def reliable_polymarket_gap_rows(
+    event_joined_rows: pd.DataFrame | None,
+    mapped_rows: pd.DataFrame | None = None,
+    now_utc: str | pd.Timestamp | None = None,
+    max_price_age_hours: float = 48.0,
+) -> pd.DataFrame:
+    """Rows eligible for subscriber-facing headline Polymarket gap metrics."""
+    joined = _headline_eligible_rows(event_joined_rows, now_utc=now_utc, max_price_age_hours=max_price_age_hours)
+    if not joined.empty:
+        return joined
+    return _headline_eligible_rows(mapped_rows, now_utc=now_utc, max_price_age_hours=max_price_age_hours)
+
+
+def polymarket_gap_headline_metric(
+    event_joined_rows: pd.DataFrame | None,
+    mapped_rows: pd.DataFrame | None = None,
+    now_utc: str | pd.Timestamp | None = None,
+) -> dict[str, str]:
+    rows = reliable_polymarket_gap_rows(event_joined_rows, mapped_rows, now_utc=now_utc)
+    if rows.empty:
+        return {"label": "Polymarket price status", "value": "No joined market price", "status": "model_only"}
+    row = rows.iloc[0]
+    return {
+        "label": "Polymarket gap",
+        "value": f"{float(row['alpha_gap_cents']):.1f}c",
+        "status": "joined_price",
+    }
+
+
+def local_edge_headline_metric(alpha_df: pd.DataFrame | None) -> dict[str, str]:
+    alpha = alpha_df.copy() if alpha_df is not None else pd.DataFrame()
+    if alpha.empty or "alpha_ev" not in alpha.columns:
+        return {"label": "Local odds status", "value": "No local odds", "status": "missing_local_odds"}
+    valid = alpha.loc[pd.to_numeric(alpha["alpha_ev"], errors="coerce").notna()].copy()
+    if valid.empty:
+        return {"label": "Local odds status", "value": "No local odds", "status": "missing_local_odds"}
+    source = valid.get("odds_source", pd.Series("", index=valid.index)).fillna("").astype(str).str.lower()
+    generated_aliases = {"local_model_benchmark", "local_fallback_seed"}
+    if bool(source.isin(generated_aliases).all()):
+        label = "Model-only edge"
+        status = "model_only"
+    else:
+        label = "Best local EV"
+        status = "local_odds"
+    best = valid.sort_values("alpha_ev", ascending=False).iloc[0]
+    return {"label": label, "value": f"{100 * float(best['alpha_ev']):.1f}%", "status": status}
 
 
 def _competition_prefix(competition: str) -> str:
@@ -1070,6 +1143,8 @@ def _markets_tab_values_from_mapped_alpha(alpha_row: pd.Series, existing_row: di
         "alpha_gap_cents": alpha_gap,
         "score": _score(alpha_gap, confidence),
         "signal": signal,
+        "market_join_status": "joined_price" if pd.notna(price_cents) else "event_found_no_usable_price",
+        "market_join_reason": "Joined market price." if pd.notna(price_cents) else MARKET_JOIN_STATUS_LABELS["event_found_no_usable_price"],
         "mapping_confidence": confidence,
         "polymarket_market_id": alpha_row.get("market_id", pd.NA),
         "polymarket_market_slug": pd.NA,
@@ -1223,10 +1298,10 @@ def _display_joined_row(row: pd.Series) -> dict[str, Any]:
     ev = coerce_float(row.get("ev"), float("nan"))
     return {
         "Market": f"{row.get('market', '')}: {row.get('selection', '')}".strip(": "),
-        "Model probability": "" if pd.isna(model_prob) else f"{100 * model_prob:.1f}%",
-        "Fair odds / fair price": "" if pd.isna(fair_odds_value) or pd.isna(fair_price) else f"{fair_odds_value:.2f} / {fair_price:.1f}c",
-        "Odds / Price": "" if pd.isna(market_odds) or pd.isna(market_price) else f"{market_odds:.2f} / {market_price:.1f}c",
-        "EV / Alpha Gap": "" if pd.isna(gap) or pd.isna(ev) else f"{100 * ev:.1f}% / {gap:+.1f}c",
+        "Model probability": "Unavailable" if pd.isna(model_prob) else f"{100 * model_prob:.1f}%",
+        "Fair odds / fair price": "Unavailable" if pd.isna(fair_odds_value) or pd.isna(fair_price) else f"{fair_odds_value:.2f} / {fair_price:.1f}c",
+        "Odds / Price": "No market price" if pd.isna(market_odds) or pd.isna(market_price) else f"{market_odds:.2f} / {market_price:.1f}c",
+        "EV / Alpha Gap": "No joined price" if pd.isna(gap) or pd.isna(ev) else f"{100 * ev:.1f}% / {gap:+.1f}c",
         "Score": row.get("score", 0.0),
         "Signal": row.get("signal", "No signal"),
         "Mapping confidence": row.get("mapping_confidence", "low"),
@@ -1241,7 +1316,7 @@ def _display_market_value_row(row: pd.Series) -> dict[str, Any]:
     market_price = coerce_float(row.get("market_price_cents"), float("nan"))
     gap = coerce_float(row.get("alpha_gap_cents"), float("nan"))
     ev = coerce_float(row.get("alpha_ev"), float("nan"))
-    signal = row.get("signal", "No price joined")
+    signal = row.get("signal", "Model-only fair value")
     mapping_confidence = row.get("mapping_confidence", "")
     return {
         "Market": f"{row.get('market', '')}: {row.get('selection', '')}".strip(": "),
@@ -1250,8 +1325,8 @@ def _display_market_value_row(row: pd.Series) -> dict[str, Any]:
         "Odds / Price": _odds_price_display(market_odds, market_price),
         "EV / Alpha Gap": _edge_display(ev, gap),
         "Score": coerce_float(row.get("score"), 0.0),
-        "Signal": _display_text(signal, "No price joined"),
-        "Mapping confidence": _display_text(mapping_confidence, ""),
+        "Signal": _display_text(signal, "Model-only fair value"),
+        "Mapping confidence": _display_text(mapping_confidence, "Not mapped"),
     }
 
 
@@ -1273,7 +1348,7 @@ def _fair_value_display(fair_odds_value: Any, fair_price: Any) -> str:
         return f"{float(fair_odds_value):.2f}"
     if has_price:
         return f"{float(fair_price):.1f}c"
-    return ""
+    return "Unavailable"
 
 
 def _odds_price_display(market_odds: Any, market_price: Any) -> str:
@@ -1285,7 +1360,7 @@ def _odds_price_display(market_odds: Any, market_price: Any) -> str:
         return f"{float(market_odds):.2f}"
     if has_price:
         return f"{float(market_price):.1f}c"
-    return ""
+    return "No market price"
 
 
 def _edge_display(ev: Any, gap: Any) -> str:
@@ -1297,7 +1372,7 @@ def _edge_display(ev: Any, gap: Any) -> str:
         return f"{100 * float(ev):.1f}%"
     if has_gap:
         return f"{float(gap):+.1f}c"
-    return ""
+    return "Model-only"
 
 
 def _display_text(value: Any, default: str = "") -> str:
@@ -1310,6 +1385,111 @@ def _display_text(value: Any, default: str = "") -> str:
         pass
     text = str(value)
     return default if text == "<NA>" else text
+
+
+def _headline_eligible_rows(
+    rows: pd.DataFrame | None,
+    now_utc: str | pd.Timestamp | None,
+    max_price_age_hours: float,
+) -> pd.DataFrame:
+    source = rows.copy() if rows is not None else pd.DataFrame()
+    if source.empty or "alpha_gap_cents" not in source.columns:
+        return pd.DataFrame()
+    price_col = "market_price_cents" if "market_price_cents" in source.columns else "polymarket_price_cents"
+    if price_col not in source.columns:
+        return pd.DataFrame()
+    if "market_join_status" in source.columns:
+        source = source.loc[source["market_join_status"].fillna("").astype(str) == "joined_price"].copy()
+    source = source.loc[source["alpha_gap_cents"].notna() & source[price_col].notna()].copy()
+    if source.empty:
+        return source
+    confidence = source.get("mapping_confidence", pd.Series("", index=source.index)).fillna("").astype(str).str.lower()
+    source = source.loc[confidence.isin({"high", "manual"})].copy()
+    if source.empty:
+        return source
+    warning = source.get("warning", pd.Series("", index=source.index)).fillna("").astype(str).str.lower()
+    reason = source.get("mapping_reason", pd.Series("", index=source.index)).fillna("").astype(str).str.lower()
+    blocked = warning.str.contains("price missing|market closed|mapping uncertain|manual confirmation required", regex=True, na=False)
+    blocked |= reason.str.contains("unsupported|no relevant|no usable|no matching|not matched", regex=True, na=False)
+    source = source.loc[~blocked].copy()
+    if source.empty:
+        return source
+    timestamp_col = "polymarket_last_updated" if "polymarket_last_updated" in source.columns else "last_updated"
+    if timestamp_col in source.columns:
+        source = source.loc[_fresh_price_mask(source[timestamp_col], now_utc, max_price_age_hours)].copy()
+    else:
+        return pd.DataFrame()
+    if source.empty:
+        return source
+    return source.sort_values("alpha_gap_cents", ascending=False)
+
+
+def _fresh_price_mask(values: pd.Series, now_utc: str | pd.Timestamp | None, max_price_age_hours: float) -> pd.Series:
+    timestamps = pd.to_datetime(values, errors="coerce", utc=True)
+    if now_utc is None:
+        now = pd.Timestamp.now(tz="UTC")
+    else:
+        now = pd.to_datetime(now_utc, errors="coerce", utc=True)
+        if pd.isna(now):
+            now = pd.Timestamp.now(tz="UTC")
+    age_hours = (now - timestamps).dt.total_seconds() / 3600.0
+    return timestamps.notna() & (age_hours >= 0) & (age_hours <= float(max_price_age_hours))
+
+
+def _has_joined_market_identity(row: pd.Series | dict[str, Any]) -> bool:
+    return any(str(row.get(col, "") or "").strip() for col in ["polymarket_market_id", "market_id", "polymarket_market_slug", "market_slug", "polymarket_question", "question"])
+
+
+def _market_join_status(
+    resolution: dict[str, Any],
+    event_markets: pd.DataFrame,
+    joined_rows: pd.DataFrame,
+) -> tuple[str, str]:
+    if resolution.get("resolution_status") != "resolved":
+        return "no_event_resolved", MARKET_JOIN_STATUS_LABELS["no_event_resolved"]
+    if event_markets.empty:
+        return "event_found_no_relevant_market", MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"]
+    joined = joined_rows.copy() if joined_rows is not None else pd.DataFrame()
+    if joined.empty or not joined.apply(_has_joined_market_identity, axis=1).any():
+        return "event_found_no_relevant_market", MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"]
+    if "market_price_cents" not in joined.columns or not joined["market_price_cents"].notna().any():
+        return "event_found_no_usable_price", MARKET_JOIN_STATUS_LABELS["event_found_no_usable_price"]
+    return "joined_price", MARKET_JOIN_STATUS_LABELS["joined_price"]
+
+
+def _diagnostic_join_status(diagnostics: dict[str, Any]) -> str:
+    status = str(diagnostics.get("market_join_status", "") or "")
+    if status:
+        return status
+    reason = _diagnostic_join_message(diagnostics)
+    return _status_from_reason(reason, 0)
+
+
+def _diagnostic_join_message(diagnostics: dict[str, Any]) -> str:
+    message = str(diagnostics.get("market_join_message", "") or diagnostics.get("reason_no_alpha_rows", "") or "")
+    if message:
+        return message
+    status = str(diagnostics.get("slug_resolution_status", diagnostics.get("resolution_status", "")) or "")
+    if status != "resolved":
+        return MARKET_JOIN_STATUS_LABELS["no_event_resolved"]
+    if int(diagnostics.get("event_markets_loaded_count", 0) or 0) == 0:
+        return MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"]
+    if int(diagnostics.get("joined_markets_count", 0) or 0) == 0:
+        return MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"]
+    return MARKET_JOIN_STATUS_LABELS["model_only"]
+
+
+def _status_from_reason(reason: str, rows_with_market_odds: int) -> str:
+    if rows_with_market_odds > 0:
+        return "joined_price"
+    text = str(reason or "").lower()
+    if "no polymarket event" in text or "no event slug" in text:
+        return "no_event_resolved"
+    if "no usable price" in text or "no market prices" in text or "event markets were loaded" in text:
+        return "event_found_no_usable_price"
+    if "no relevant market" in text or "no model markets matched" in text:
+        return "event_found_no_relevant_market"
+    return "model_only"
 
 
 def _market_types_found(df: pd.DataFrame) -> list[str]:

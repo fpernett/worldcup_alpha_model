@@ -131,7 +131,7 @@ def _beats_baseline(metrics: pd.DataFrame) -> bool:
 
 def _blend_label(row: pd.Series) -> str:
     if row is None or row.empty:
-        return "n/a"
+        return "Unavailable"
     return f"{float(row.get('blend_multiplier', 0.0)):.2f}"
 
 

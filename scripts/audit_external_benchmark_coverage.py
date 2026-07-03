@@ -42,7 +42,7 @@ def main() -> None:
     print(f"teams with external benchmark: {summary['teams_with_external_benchmark']}")
     print(f"teams missing external benchmark: {summary['teams_missing_external_benchmark']}")
     print(f"high-priority missing teams: {_team_list(high_missing)}")
-    print(f"last external benchmark update: {summary['last_external_benchmark_update'] or 'n/a'}")
+    print(f"last external benchmark update: {summary['last_external_benchmark_update'] or 'Unavailable'}")
 
     reports = PROJECT_ROOT / "reports"
     reports.mkdir(parents=True, exist_ok=True)

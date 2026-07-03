@@ -15,6 +15,7 @@ from src.polymarket_slug_join import (
     market_value_groups,
     markets_tab_export_dataframe,
     polymarket_alpha_rows,
+    polymarket_gap_headline_metric,
     resolve_polymarket_slug_for_fixture,
     top_alpha_empty_state_message,
 )
@@ -308,6 +309,18 @@ def test_available_price_populates_value_columns() -> None:
     assert row["signal"] == "Positive model gap"
 
 
+def test_polymarket_gap_headline_requires_fresh_joined_price() -> None:
+    joined = join_polymarket_prices_to_model_markets(_model_markets().head(1), _event_markets(), "Uruguay", "Spain")
+
+    headline = polymarket_gap_headline_metric(joined, now_utc="2026-06-26T01:00:00Z")
+    stale = polymarket_gap_headline_metric(joined, now_utc="2026-07-03T01:00:00Z")
+    no_join = polymarket_gap_headline_metric(pd.DataFrame(), pd.DataFrame())
+
+    assert headline == {"label": "Polymarket gap", "value": "7.0c", "status": "joined_price"}
+    assert stale == {"label": "Polymarket price status", "value": "No joined market price", "status": "model_only"}
+    assert no_join == {"label": "Polymarket price status", "value": "No joined market price", "status": "model_only"}
+
+
 def test_markets_tab_model_only_keeps_fair_odds_without_prices() -> None:
     table, diagnostics = build_markets_tab_joined_dataframe(
         _model_markets(),
@@ -317,8 +330,10 @@ def test_markets_tab_model_only_keeps_fair_odds_without_prices() -> None:
 
     assert table["fair_odds"].notna().all()
     assert table["market_odds"].isna().all()
-    assert table["signal"].eq("No price joined").all()
-    assert diagnostics["reason_if_zero"] == "No Polymarket prices joined because no event slug was resolved."
+    assert table["signal"].eq("Model-only fair value").all()
+    assert table["market_join_status"].eq("no_event_resolved").all()
+    assert diagnostics["market_join_status"] == "no_event_resolved"
+    assert diagnostics["reason_if_zero"] == "No Polymarket event resolved."
 
 
 def test_market_value_groups_populate_model_rows_without_polymarket_event() -> None:
@@ -335,8 +350,8 @@ def test_market_value_groups_populate_model_rows_without_polymarket_event() -> N
     assert groups["Result Home"]["Market"].str.contains("1X2: Home", regex=False).any()
     assert groups["Result Away"]["Market"].str.contains("1X2: Away", regex=False).any()
     assert groups["Other Markets"]["Market"].str.contains("1X2: Draw", regex=False).any()
-    assert groups["Result Home"]["Odds / Price"].eq("").all()
-    assert groups["Result Home"]["Signal"].eq("No price joined").all()
+    assert groups["Result Home"]["Odds / Price"].eq("No market price").all()
+    assert groups["Result Home"]["Signal"].eq("Model-only fair value").all()
 
 
 def test_market_value_groups_render_safe_missing_values_without_polymarket_event() -> None:
@@ -353,10 +368,11 @@ def test_market_value_groups_render_safe_missing_values_without_polymarket_event
     groups = market_value_groups(table, "Uruguay", "Spain")
     row = groups["Result Home"].iloc[0]
 
-    assert row["Signal"] == "No price joined"
-    assert row["Mapping confidence"] == ""
+    assert row["Signal"] == "Model-only fair value"
+    assert row["Mapping confidence"] == "Not mapped"
     assert row["Score"] == 0.0
     assert "<NA>" not in row.astype(str).to_string()
+    assert "" not in row.astype(str).tolist()
 
 
 def test_market_value_groups_bucket_actual_team_names_by_fixture_side() -> None:
@@ -454,7 +470,7 @@ def test_top_alpha_empty_state_reports_filters_when_mapped_rows_are_filtered_out
         pd.DataFrame(),
         pd.DataFrame(),
         mapped_alpha,
-        {"reason_no_alpha_rows": "No Polymarket event resolved for this fixture."},
+        {"reason_no_alpha_rows": "No Polymarket event resolved."},
         min_liquidity=100.0,
         min_alpha_gap=5.0,
     )
@@ -467,10 +483,10 @@ def test_top_alpha_empty_state_uses_polymarket_diagnostic_when_no_prices_exist()
         pd.DataFrame(),
         pd.DataFrame(),
         pd.DataFrame(),
-        {"reason_no_alpha_rows": "Polymarket event resolved, but no nested market prices were loaded."},
+        {"reason_no_alpha_rows": "Event resolved; relevant market found but no usable price."},
     )
 
-    assert message == "Polymarket event resolved, but no nested market prices were loaded."
+    assert message == "Event resolved; relevant market found but no usable price."
 
 
 def test_top_alpha_empty_state_has_generic_selected_match_price_message() -> None:
@@ -498,7 +514,8 @@ def test_markets_tab_diagnostics_explain_no_slug() -> None:
     )
 
     assert table["market_odds"].isna().all()
-    assert diagnostics["reason_if_zero"] == "No Polymarket prices joined because no event slug was resolved."
+    assert diagnostics["market_join_status"] == "no_event_resolved"
+    assert diagnostics["reason_if_zero"] == "No Polymarket event resolved."
 
 
 def test_markets_tab_diagnostics_explain_mapping_failure() -> None:
@@ -512,7 +529,8 @@ def test_markets_tab_diagnostics_explain_mapping_failure() -> None:
     )
 
     assert table["market_odds"].isna().all()
-    assert diagnostics["reason_if_zero"] == "Event markets loaded, but no model markets matched Polymarket outcomes."
+    assert diagnostics["market_join_status"] == "event_found_no_relevant_market"
+    assert diagnostics["reason_if_zero"] == "Event resolved; no relevant market found."
 
 
 def test_polymarket_alpha_table_not_empty_when_markets_match() -> None:
@@ -610,7 +628,8 @@ def test_empty_alpha_returns_diagnostics_instead_of_silent_no_rows(monkeypatch) 
     assert diagnostics["slug_resolution_status"] == "resolved"
     assert diagnostics["event_markets_loaded_count"] == 0
     assert diagnostics["joined_markets_count"] == 0
-    assert diagnostics["reason_no_alpha_rows"] == "Polymarket event resolved, but no nested market prices were loaded."
+    assert diagnostics["market_join_status"] == "event_found_no_relevant_market"
+    assert diagnostics["reason_no_alpha_rows"] == "Event resolved; no relevant market found."
 
 
 def test_html_fallback_extracts_colombia_draw_portugal_moneyline() -> None:

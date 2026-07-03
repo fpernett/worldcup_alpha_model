@@ -719,7 +719,7 @@ The **Full report** tab is built from local model outputs and local/API data alr
 
 Report sections:
 
-- **Alpha Read**: model confidence, expected goals, best local EV, and best Polymarket alpha gap when market data is available.
+- **Alpha Read**: model confidence, expected goals, best model-only edge when local odds exist, and best Polymarket alpha gap only when a market price is joined.
 - **Data support**: historical match counts for each team, H2H count, training data range, and fallback warnings.
 - **Goal distribution**: marginal home and away goal probabilities from the score matrix.
 - **Match outcome donut**: home win, draw, and away win probabilities.
@@ -730,7 +730,7 @@ Report sections:
 - **Team ratings**: attack and defense inputs with percentile labels.
 - **Climate factors**: altitude, temperature, humidity, precipitation, and wind categories with conservative multipliers.
 - **Historical behavior**: recency-weighted team behavior summary, schedule strength, expected-performance residuals, behavior driver matches, opponent/competition breakdowns, recent long-format match history, environment response, and manual-vs-behavior model input impact.
-- **Model information**: model version, training data count/range, source status, and backtest placeholder.
+- **Model information**: model version, training data count/range, source status, and scoring availability.
 - **Market value tables**: grouped decimal-odds alpha and Polymarket alpha screens.
 - **Tournament context**: experimental/off by default; retained for offline audits, not active dashboard alpha.
 
@@ -740,10 +740,10 @@ Real metrics in v1:
 - historical support counts when `data/recent_matches.csv` or cached football results exist;
 - climate factors derived from the same venue/environment inputs used by the model.
 
-Placeholders or approximations in v1:
+Availability notes in v1:
 
-- RPS is explicitly shown as `RPS placeholder / not yet backtested`;
-- base xG is not separately stored yet, so adjusted xG is used as the base value in the expected-goals report chart;
+- RPS is shown as unavailable until ranked-probability scoring is implemented and backtested;
+- the expected-goals chart separates pre-adjustment base xG from final venue/weather-adjusted xG;
 - league context uses fallback baselines when historical match data is unavailable.
 - tournament context is a diagnostic layer; it is not the primary model unless strict as-of validation later supports that change.
 
