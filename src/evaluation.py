@@ -36,6 +36,7 @@ from src.utils import coerce_float, today_iso
 
 EVALUATION_DATASET_COLUMNS = [
     "prediction_id",
+    "prediction_source",
     "generated_at_utc",
     "match_id",
     "kickoff_utc",
@@ -981,18 +982,24 @@ def _prediction_rows_from_ledger(prediction_ledger_df: pd.DataFrame | None, mark
     rows = []
     for _, row in df.iterrows():
         market_probs = _market_probs_from_prediction(row, market_odds_df)
-        raw = _normalise_or_missing([row.get("home_win_prob"), row.get("draw_prob"), row.get("away_win_prob")])
+        raw = _normalise_or_missing(
+            [
+                row.get("home_win_prob", row.get("home_win_prob_raw")),
+                row.get("draw_prob", row.get("draw_prob_raw")),
+                row.get("away_win_prob", row.get("away_win_prob_raw")),
+            ]
+        )
         behavior = _optional_probability_triplet([row.get("behavior_home_prob"), row.get("behavior_draw_prob"), row.get("behavior_away_prob")])
         rows.append(
             {
                 "prediction_id": row.get("prediction_id", ""),
-                "generated_at_utc": row.get("snapshot_utc", ""),
+                "generated_at_utc": row.get("snapshot_utc", row.get("generated_at_utc", "")),
                 "match_id": row.get("match_id", ""),
                 "kickoff_utc": row.get("kickoff_utc", ""),
-                "home_team": row.get("home", ""),
-                "away_team": row.get("away", ""),
+                "home_team": row.get("home", row.get("home_team", "")),
+                "away_team": row.get("away", row.get("away_team", "")),
                 "competition": row.get("competition", ""),
-                "round": row.get("group", ""),
+                "round": row.get("group", row.get("round", "")),
                 "venue": row.get("venue", ""),
                 "model_version": row.get("model_version", ""),
                 "home_win_prob_raw": raw[0],
@@ -1007,7 +1014,7 @@ def _prediction_rows_from_ledger(prediction_ledger_df: pd.DataFrame | None, mark
                 "model_confidence": row.get("model_confidence", ""),
                 "market_join_status": _market_join_status(market_probs, row.get("market_snapshot_available", False)),
                 "mapping_confidence": "",
-                "prediction_source": "prediction_ledger",
+                "prediction_source": row.get("source_type", "prediction_ledger") or "prediction_ledger",
             }
         )
     return pd.DataFrame(rows)
@@ -1177,6 +1184,7 @@ def _scored_dataset_row(prediction: pd.Series, result: pd.Series, calibration_st
     )
     return {
         "prediction_id": prediction.get("prediction_id", ""),
+        "prediction_source": prediction.get("prediction_source", ""),
         "generated_at_utc": prediction.get("generated_at_utc", ""),
         "match_id": prediction.get("match_id", ""),
         "kickoff_utc": prediction.get("kickoff_utc", ""),

@@ -4,11 +4,11 @@ This audit reconciles saved pre-match prediction snapshots with the existing com
 
 ## Coverage
 
-- Prediction snapshots: `62`
+- Prediction snapshots: `78`
 - Unique prediction match_ids: `35`
 - Result ledger rows: `47`
 - Unique result match_ids: `47`
-- Completed-results source rows: `6`
+- Completed-results source rows: `0`
 - Exact match_id joins possible: `2`
 - Schedule bridge joins possible: `0`
 - Fixture-bridge joins possible: `0`
@@ -20,9 +20,9 @@ This audit reconciles saved pre-match prediction snapshots with the existing com
 
 | join_status | count |
 | --- | --- |
-| no_result_found | 55 |
+| no_result_found | 70 |
 | prediction_generated_after_kickoff | 3 |
-| result_not_completed | 2 |
+| result_not_completed | 3 |
 | duplicate_snapshot_not_selected | 1 |
 
 ## Do we still need PDF backfill?

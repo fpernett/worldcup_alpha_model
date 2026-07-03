@@ -1752,7 +1752,101 @@ The audit does not require internet access, API keys, a cloud scheduler, or Poly
 
 `data/cache/` and `.env` remain ignored. Small Markdown reports under `reports/semantic_audits/` are allowed through `.gitignore` so they can be tracked if useful.
 
-## 14. Validate The Model
+## 14. Backfilling Historical Model PDFs
+
+Historical PDF reports can be used as archived prediction snapshots only when
+their report timestamp proves the forecast was generated before kickoff. This
+workflow is evaluation-only. It does not add staking, sizing, wallet, order
+execution, or investment-advice functionality.
+
+Place PDFs in:
+
+```text
+data/backfill/model_pdfs/
+```
+
+Run the importer:
+
+```bash
+.venv/bin/python scripts/import_prediction_pdfs.py \
+  --pdf-dir data/backfill/model_pdfs \
+  --output data/backfilled_prediction_ledger.csv \
+  --audit-output reports/pdf_prediction_import_audit.csv
+```
+
+The importer extracts text with PyMuPDF first, then pdfplumber, then pypdf. OCR
+is not used. If all text extractors fail, the PDF is marked unsupported and is
+not imported into calibration data.
+
+Timestamp validation:
+
+- Report footer/header timestamps are preferred.
+- PDF metadata timestamps are accepted when they include an explicit timezone.
+- Footer timestamps without a timezone are interpreted as Europe/Stockholm and
+  marked medium confidence.
+- Post-kickoff or ambiguous timestamps are excluded from accuracy claims.
+- File modified time is audit context only; it is not enough for clean import.
+
+If a timestamp needs manual review, create an override file from the template:
+
+```bash
+.venv/bin/python scripts/import_prediction_pdfs.py
+```
+
+Then fill:
+
+```text
+data/backfill/pdf_timestamp_overrides.csv
+```
+
+with:
+
+```text
+source_file,generated_at_utc,reason,reviewer,reviewed_at_utc
+```
+
+and rerun:
+
+```bash
+.venv/bin/python scripts/import_prediction_pdfs.py \
+  --timestamp-overrides data/backfill/pdf_timestamp_overrides.csv
+```
+
+Manual overrides are stored as high-confidence timestamps in the audit, but the
+override file is never overwritten automatically.
+
+Merge backfilled rows without touching the production ledger:
+
+```bash
+.venv/bin/python scripts/merge_backfilled_predictions.py \
+  --prediction-ledger data/prediction_ledger.csv \
+  --backfill data/backfilled_prediction_ledger.csv \
+  --output data/prediction_ledger_enriched.csv \
+  --audit-output reports/backfilled_prediction_merge_audit.csv
+```
+
+Run enriched evaluation:
+
+```bash
+.venv/bin/python scripts/run_enriched_evaluation.py \
+  --predictions data/prediction_ledger_enriched.csv \
+  --results-ledger data/results_ledger.csv \
+  --fixtures data/fixtures.csv \
+  --result-fixture-crosswalk data/result_fixture_crosswalk.csv \
+  --latest-prekickoff-only true
+```
+
+Interpretation rules:
+
+- Fewer than 30 evaluated matches means `sample_too_small`.
+- 30 to 100 evaluated matches means `preliminary`.
+- More than 100 evaluated matches can become `production_candidate` only if
+  walk-forward calibration improves both Brier score and log loss.
+
+PDF backfill can improve sample size only when the PDFs have reliable
+pre-kickoff timestamps and matching completed results.
+
+## 15. Validate The Model
 
 Run:
 
@@ -1772,7 +1866,7 @@ python -m pytest -q
 
 The tests check probability sums, fair odds, score matrix normalization, missing odds, missing weather, roof-closed weather dampening, Polymarket price normalization, YES/NO mapping, alpha gaps, sensitivity output shape, prediction-log append, missing-API fallback, historical CSV import, rolling Elo, Elo calibration, expected-performance residuals, opponent-quality adjustment, behavior driver reports, final model input audits, schedule-strength diagnostics, behavior calibration, rating blend caps, audit-script output, and Full report helper outputs.
 
-## 15. Known Limitations
+## 16. Known Limitations
 
 - Ratings are transparent priors unless connected to a real ratings API or recent match-history file.
 - Historical behavior is descriptive, not causal proof.

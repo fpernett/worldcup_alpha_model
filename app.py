@@ -56,6 +56,7 @@ from src.historical_data import load_historical_matches
 from src.market_mapping import explain_unmapped_polymarket_markets, map_match_to_polymarket_markets, mapping_status
 from src.match_identity import build_result_fixture_crosswalk, result_fixture_crosswalk_summary
 from src.model import ModelConfig, fair_odds, run_match_model
+from src.pdf_prediction_import import calibration_status_from_sample_size, render_prediction_source_coverage
 from src.model_policy import (
     annotate_decimal_alpha_with_policy,
     annotate_polymarket_alpha_with_policy,
@@ -3448,6 +3449,32 @@ for label in selected_labels:
                 ignore_index=True,
             )
             display_dataframe(bridge_status, hide_index=True, width="stretch")
+            st.write("Prediction source coverage")
+            reports_dir = Path(__file__).resolve().parent / "reports"
+            pdf_audit_path = reports_dir / "pdf_prediction_import_audit.csv"
+            enriched_ledger_path = DATA_DIR / "prediction_ledger_enriched.csv"
+            pdf_audit_df = pd.read_csv(pdf_audit_path) if pdf_audit_path.exists() else pd.DataFrame()
+            enriched_ledger_df = pd.read_csv(enriched_ledger_path) if enriched_ledger_path.exists() else ledger.assign(source_type="app_snapshot")
+            source_eval = (
+                build_formal_evaluation_dataset(
+                    enriched_ledger_df,
+                    results_ledger,
+                    fixtures_df=bulk_fixture_table,
+                    result_fixture_crosswalk_df=result_fixture_crosswalk,
+                    market_odds_df=market_odds,
+                )
+                if not enriched_ledger_df.empty
+                else formal_calibration_eval
+            )
+            source_calibration_status = calibration_status_from_sample_size(len(source_eval))
+            st.markdown(
+                render_prediction_source_coverage(
+                    predictions_df=enriched_ledger_df,
+                    pdf_audit_df=pdf_audit_df,
+                    evaluation_df=source_eval,
+                    calibration_status=source_calibration_status,
+                )
+            )
             coverage_summary = evaluation_coverage_summary(join_audit)
             display_dataframe(coverage_summary, hide_index=True, width="stretch")
             if not join_audit.empty:

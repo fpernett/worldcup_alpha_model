@@ -1,6 +1,6 @@
 metric,value
 usable_evaluated_predictions_before_fix,1
-prediction_snapshots,62
+prediction_snapshots,78
 unique_prediction_match_ids,35
 exact_match_id_joins_possible,2
 schedule_bridge_joins_possible,0
@@ -8,9 +8,9 @@ fixture_bridge_joins_possible,0
 normalized_team_date_joins_possible,0
 home_away_order_mismatch_matches,0
 usable_evaluated_predictions_after_latest_selection,1
-excluded_predictions,61
-join_status:no_result_found,55
+excluded_predictions,77
+join_status:no_result_found,70
 join_status:prediction_generated_after_kickoff,3
-join_status:result_not_completed,2
+join_status:result_not_completed,3
 join_status:duplicate_snapshot_not_selected,1
 join_status:exact_match_id_join,1
