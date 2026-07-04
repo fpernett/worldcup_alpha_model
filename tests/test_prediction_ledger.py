@@ -285,7 +285,7 @@ def test_auto_result_import_waits_until_post_game_delay(tmp_path) -> None:
         _fixtures("2026-06-22", "18:00").iloc[0],
         completed_matches_df=pd.DataFrame(),
         path=tmp_path / "results_ledger.csv",
-        now_utc="2026-06-22T21:59:00+00:00",
+        now_utc="2026-06-22T18:14:00+00:00",
     )
 
     assert results.empty
@@ -680,6 +680,142 @@ def test_bulk_sync_reports_completed_source_empty(monkeypatch, tmp_path) -> None
     assert diagnostics["provider_checked"] == "football-data.org /matches?status=FINISHED"
 
 
+def test_auto_launch_sync_imports_fixture_after_delay(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def fake_load_completed_results(start_date, end_date, **_kwargs):
+        captured["window"] = (start_date, end_date)
+        return (
+            _provider_completed_rows([("p1", "2000-06-22", "Alpha", "Beta", 1, 1)]),
+            {"status": "success", "provider_checked": "football-data.org /matches?status=FINISHED", "completed_rows_loaded": 1},
+        )
+
+    monkeypatch.setattr(prediction_ledger, "load_completed_results", fake_load_completed_results)
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.auto_sync_completed_results_on_launch(
+        _fixtures("2000-06-22", "18:00").assign(competition="FIFA World Cup"),
+        path=tmp_path / "results_ledger.csv",
+    )
+
+    assert captured["window"] == ("2000-06-22", "2000-06-22")
+    assert diagnostics["auto_sync_ran"] is True
+    assert diagnostics["imported_rows"] == 1
+    assert len(results) == 1
+    assert results.iloc[0]["result_semantics"] == "90-minute regular time"
+
+
+def test_auto_launch_sync_skips_fixture_before_delay(monkeypatch, tmp_path) -> None:
+    called = {"provider": False}
+
+    def fake_load_completed_results(*_args, **_kwargs):
+        called["provider"] = True
+        return pd.DataFrame(), {}
+
+    monkeypatch.setattr(prediction_ledger, "load_completed_results", fake_load_completed_results)
+
+    results, diagnostics = prediction_ledger.auto_sync_completed_results_on_launch(
+        _fixtures("2999-06-22", "18:00").assign(competition="FIFA World Cup"),
+        path=tmp_path / "results_ledger.csv",
+    )
+
+    assert called["provider"] is False
+    assert results.empty
+    assert diagnostics["skipped_not_ready_rows"] == 1
+    assert diagnostics["skipped_rows"] == 1
+
+
+def test_auto_launch_sync_same_existing_score_is_not_duplicated(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "results_ledger.csv"
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            _provider_completed_rows([("p1", "2000-06-22", "Alpha", "Beta", 2, 1)]),
+            {"status": "success", "completed_rows_loaded": 1},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    prediction_ledger.auto_sync_completed_results_on_launch(
+        _fixtures("2000-06-22", "18:00").assign(competition="FIFA World Cup"),
+        path=path,
+    )
+    results, diagnostics = prediction_ledger.auto_sync_completed_results_on_launch(
+        _fixtures("2000-06-22", "18:00").assign(competition="FIFA World Cup"),
+        path=path,
+    )
+
+    assert len(results) == 1
+    assert diagnostics["already_present_rows"] == 1
+    assert diagnostics["imported_rows"] == 0
+
+
+def test_auto_launch_sync_conflict_does_not_overwrite_existing_score(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "results_ledger.csv"
+    existing = {col: "" for col in prediction_ledger.RESULTS_LEDGER_COLUMNS}
+    existing.update(
+        {
+            "match_id": "m1",
+            "date_utc": "2000-06-22",
+            "competition": "FIFA World Cup",
+            "home": "Alpha",
+            "away": "Beta",
+            "home_goals": 0,
+            "away_goals": 0,
+            "actual_result": "draw",
+            "result_semantics": "90-minute regular time",
+            "evaluation_eligible_1x2": True,
+        }
+    )
+    pd.DataFrame([existing]).to_csv(path, index=False)
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            _provider_completed_rows([("p1", "2000-06-22", "Alpha", "Beta", 2, 1)]),
+            {"status": "success", "completed_rows_loaded": 1},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.auto_sync_completed_results_on_launch(
+        _fixtures("2000-06-22", "18:00").assign(competition="FIFA World Cup"),
+        path=path,
+    )
+
+    assert diagnostics["conflict_rows"] == 1
+    assert int(results.iloc[0]["home_goals"]) == 0
+    assert int(results.iloc[0]["away_goals"]) == 0
+
+
+def test_auto_launch_sync_handles_missing_provider_rows(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            pd.DataFrame(),
+            {
+                "status": "completed_source_empty",
+                "provider_checked": "football-data.org /matches?status=FINISHED",
+                "completed_rows_loaded": 0,
+            },
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+
+    results, diagnostics = prediction_ledger.auto_sync_completed_results_on_launch(
+        _fixtures("2000-06-22", "18:00").assign(competition="FIFA World Cup"),
+        path=tmp_path / "results_ledger.csv",
+    )
+
+    assert results.empty
+    assert diagnostics["status"] == "completed_source_empty"
+    assert diagnostics["provider_rows_loaded"] == 0
+    for key in ["imported_rows", "already_present_rows", "unmatched_rows_count", "conflict_rows", "skipped_rows"]:
+        assert key in diagnostics
+
+
 def test_required_prediction_ledger_columns_exist() -> None:
     required = {
         "prediction_id",
@@ -768,6 +904,56 @@ def test_import_completed_results_script_runs(monkeypatch, tmp_path, capsys) -> 
     script.main()
 
     assert "results ledger rows: 1" in capsys.readouterr().out
+
+
+def test_result_coverage_audit_script_writes_reports(monkeypatch, tmp_path, capsys) -> None:
+    import scripts.audit_result_coverage as script
+
+    predictions_path = tmp_path / "data" / "prediction_ledger.csv"
+    results_path = tmp_path / "data" / "results_ledger.csv"
+    fixtures_path = tmp_path / "data" / "fixtures.csv"
+    reports_dir = tmp_path / "reports"
+    predictions_path.parent.mkdir(parents=True, exist_ok=True)
+
+    prediction = {col: "" for col in prediction_ledger.PREDICTION_LEDGER_COLUMNS}
+    prediction.update(
+        {
+            "prediction_id": "p1",
+            "snapshot_utc": "2000-06-22T12:00:00+00:00",
+            "match_id": "m1",
+            "kickoff_utc": "2000-06-22T18:00:00+00:00",
+            "competition": "FIFA World Cup",
+            "home": "Alpha",
+            "away": "Beta",
+            "prediction_before_kickoff": True,
+        }
+    )
+    pd.DataFrame([prediction]).to_csv(predictions_path, index=False)
+    _fixtures("2000-06-22", "18:00").assign(competition="FIFA World Cup").to_csv(fixtures_path, index=False)
+    pd.DataFrame(columns=prediction_ledger.RESULTS_LEDGER_COLUMNS).to_csv(results_path, index=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_result_coverage.py",
+            "--predictions",
+            str(predictions_path),
+            "--results-ledger",
+            str(results_path),
+            "--fixtures",
+            str(fixtures_path),
+            "--reports-dir",
+            str(reports_dir),
+            "--now-utc",
+            "2000-06-22T19:00:00+00:00",
+        ],
+    )
+
+    script.main()
+
+    assert "matches missing local result: 1" in capsys.readouterr().out
+    assert (reports_dir / "result_coverage_audit.csv").exists()
+    assert (reports_dir / "result_coverage_audit.md").exists()
 
 
 def _fixtures(date_utc: str, time_utc: str) -> pd.DataFrame:

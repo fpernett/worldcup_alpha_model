@@ -100,7 +100,7 @@ RESULTS_LEDGER_COLUMNS = [
 ]
 
 DEFAULT_AUTO_SNAPSHOT_MIN_INTERVAL_MINUTES = 60
-DEFAULT_RESULT_READY_DELAY_HOURS = 4.0
+DEFAULT_RESULT_READY_DELAY_HOURS = 15.0 / 60.0
 RESULT_IMPORT_DATE_TOLERANCE_DAYS = 1
 
 HOME_REGULAR_TIME_GOAL_COLUMNS = [
@@ -647,6 +647,47 @@ def sync_all_completed_results(
         date_window=f"{start} to {end}",
     )
     return working[RESULTS_LEDGER_COLUMNS].copy(), diagnostics
+
+
+def auto_sync_completed_results_on_launch(
+    fixtures_df: pd.DataFrame | None,
+    competition: str = "FIFA World Cup",
+    result_ready_delay_minutes: float = 15,
+    force_refresh: bool = True,
+    path: str | Path = RESULTS_LEDGER_PATH,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Best-effort app-launch import of completed 90-minute fixture results."""
+    path = Path(path)
+    try:
+        results, diagnostics = sync_all_completed_results(
+            fixtures_df,
+            competition=competition,
+            force_refresh=force_refresh,
+            path=path,
+            result_ready_delay_hours=float(result_ready_delay_minutes) / 60.0,
+            result_source="auto_app_launch_completed_results_sync",
+        )
+    except Exception as exc:
+        try:
+            results = load_results_ledger(path)
+        except Exception:
+            results = pd.DataFrame(columns=RESULTS_LEDGER_COLUMNS)
+        diagnostics = {
+            "status": "auto_sync_failed",
+            "message": f"Completed-result auto-sync failed without stopping the app: {exc}",
+            "fixture_diagnostics": [],
+            "unmatched_rows": [],
+            "conflict_rows_detail": [],
+            "final_ledger_rows": len(results),
+        }
+    diagnostics = _app_launch_sync_diagnostics(
+        diagnostics,
+        results,
+        result_ready_delay_minutes=result_ready_delay_minutes,
+        force_refresh=force_refresh,
+        path=path,
+    )
+    return results[RESULTS_LEDGER_COLUMNS].copy(), diagnostics
 
 
 def import_completed_results(
@@ -1236,6 +1277,42 @@ def _bulk_sync_diagnostics(
     summary["unmatched_rows"] = [row for row in fixture_rows if row.get("import_status") == "unmatched"]
     summary["conflict_rows_detail"] = [row for row in fixture_rows if row.get("import_status") == "conflict_needs_review"]
     return summary
+
+
+def _app_launch_sync_diagnostics(
+    diagnostics: dict[str, Any],
+    results: pd.DataFrame,
+    result_ready_delay_minutes: float,
+    force_refresh: bool,
+    path: Path,
+) -> dict[str, Any]:
+    out = dict(diagnostics or {})
+    fixture_rows = out.get("fixture_diagnostics", []) or []
+    skipped_not_ready = sum(1 for row in fixture_rows if row.get("import_status") == "not_ready")
+    imported = int(out.get("imported_or_updated_rows", out.get("rows_imported", 0)) or 0)
+    already_present = int(out.get("already_present_rows", 0) or 0)
+    unmatched = int(out.get("unmatched_fixtures", 0) or 0)
+    conflicts = int(out.get("conflict_rows", 0) or 0)
+    skipped = int(out.get("skipped_fixtures", 0) or 0)
+    provider_rows = int(out.get("completed_rows_loaded", out.get("provider_completed_rows_fetched", 0)) or 0)
+    out.update(
+        {
+            "auto_sync_ran": True,
+            "force_refresh": bool(force_refresh),
+            "result_ready_delay_minutes": float(result_ready_delay_minutes),
+            "provider_rows_loaded": provider_rows,
+            "imported_rows": imported,
+            "already_present_rows": already_present,
+            "unmatched_rows_count": unmatched,
+            "conflict_rows": conflicts,
+            "skipped_rows": skipped,
+            "skipped_not_ready_rows": int(skipped_not_ready),
+            "results_ledger_final_row_count": int(len(results)),
+            "final_ledger_rows": int(len(results)),
+            "output_path": _display_path(path),
+        }
+    )
+    return out
 
 
 def _normalise_fixtures(fixtures_df: pd.DataFrame | None) -> pd.DataFrame:

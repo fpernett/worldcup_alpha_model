@@ -94,6 +94,7 @@ from src.postmortem import (
 from src import prediction_ledger as prediction_ledger_module
 
 _PREDICTION_LEDGER_AUTOMATION_EXPORTS = (
+    "auto_sync_completed_results_on_launch",
     "dashboard_parameter_set_id",
     "import_completed_result_for_fixture_if_ready",
     "snapshot_selected_match_if_needed",
@@ -106,6 +107,7 @@ if not all(hasattr(prediction_ledger_module, name) for name in _PREDICTION_LEDGE
 from src.prediction_ledger import (
     PREDICTION_LEDGER_PATH,
     RESULTS_LEDGER_PATH,
+    auto_sync_completed_results_on_launch,
     dashboard_parameter_set_id,
     import_completed_result_for_fixture_if_ready,
     load_prediction_ledger,
@@ -345,6 +347,25 @@ def bulk_result_summary_display(diagnostics: dict) -> pd.DataFrame:
         ("date_window_checked", "Date window checked"),
         ("cache_path_checked", "Cache path"),
         ("last_refresh_timestamp", "Last refresh"),
+    ]
+    return pd.DataFrame([{"metric": label, "value": diagnostics.get(key, "")} for key, label in fields])
+
+
+def app_launch_result_sync_display(diagnostics: dict) -> pd.DataFrame:
+    fields = [
+        ("auto_sync_ran", "Auto-sync ran"),
+        ("provider_checked", "Provider checked"),
+        ("date_window_checked", "Date window checked"),
+        ("provider_rows_loaded", "Provider rows loaded"),
+        ("imported_rows", "Imported rows"),
+        ("already_present_rows", "Already-present rows"),
+        ("unmatched_rows_count", "Unmatched rows"),
+        ("conflict_rows", "Conflict rows needing review"),
+        ("skipped_not_ready_rows", "Skipped rows because not ready"),
+        ("skipped_rows", "Skipped rows total"),
+        ("results_ledger_final_row_count", "Results ledger final row count"),
+        ("result_ready_delay_minutes", "Result-ready delay minutes"),
+        ("status", "Status"),
     ]
     return pd.DataFrame([{"metric": label, "value": diagnostics.get(key, "")} for key, label in fields])
 
@@ -1575,6 +1596,14 @@ with st.sidebar:
     horizon_hours,
     include_past=not hide_past_kickoffs,
 )
+app_launch_fixture_table = read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS)
+app_launch_results_ledger, app_launch_result_sync_diagnostics = auto_sync_completed_results_on_launch(
+    app_launch_fixture_table,
+    competition="FIFA World Cup",
+    result_ready_delay_minutes=15,
+    force_refresh=True,
+    path=RESULTS_LEDGER_PATH,
+)
 polymarket_markets = load_polymarket_inputs(
     polymarket_query,
     use_cached_polymarket,
@@ -1632,6 +1661,31 @@ with st.sidebar:
     )
     if fa.get("warning"):
         st.warning(fa["warning"])
+
+    st.write("Completed result auto-sync")
+    with st.expander("App-launch result sync diagnostics", expanded=False):
+        display_dataframe(
+            app_launch_result_sync_display(app_launch_result_sync_diagnostics),
+            hide_index=True,
+            width="stretch",
+        )
+        if app_launch_result_sync_diagnostics.get("message"):
+            st.warning(str(app_launch_result_sync_diagnostics["message"]))
+        if st.button("Refresh completed results now", width="stretch"):
+            with st.spinner("Refreshing completed 90-minute results..."):
+                app_launch_results_ledger, app_launch_result_sync_diagnostics = auto_sync_completed_results_on_launch(
+                    app_launch_fixture_table,
+                    competition="FIFA World Cup",
+                    result_ready_delay_minutes=15,
+                    force_refresh=True,
+                    path=RESULTS_LEDGER_PATH,
+                )
+            st.cache_data.clear()
+            display_dataframe(
+                app_launch_result_sync_display(app_launch_result_sync_diagnostics),
+                hide_index=True,
+                width="stretch",
+            )
 
     historical_status = audit_historical_file_status(historical_long_matches)
     st.write("Historical data file")
@@ -1704,7 +1758,7 @@ cfg = ModelConfig(
     defense_weight=defense_weight,
     form_weight=form_weight,
 )
-bulk_fixture_table = read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS)
+bulk_fixture_table = app_launch_fixture_table
 
 for label in selected_labels:
     match = fixture_view.loc[fixture_view["match_label"] == label].iloc[0]
@@ -1737,12 +1791,8 @@ for label in selected_labels:
         notes="Auto-saved by dashboard selected-match analysis",
         path=PREDICTION_LEDGER_PATH,
     )
-    auto_results_ledger, auto_result_diagnostics = sync_all_completed_results(
-        bulk_fixture_table,
-        competition="FIFA World Cup",
-        path=RESULTS_LEDGER_PATH,
-        force_refresh=False,
-    )
+    auto_results_ledger = app_launch_results_ledger
+    auto_result_diagnostics = app_launch_result_sync_diagnostics
 
     probs = result["probs"]
     behavior_alpha = behavior_diagnostic_result.get("alpha", pd.DataFrame()) if behavior_diagnostic_result else pd.DataFrame()
@@ -2710,7 +2760,7 @@ for label in selected_labels:
         )
         st.caption(
             "Selected upcoming matches are auto-saved to data/prediction_ledger.csv with a 60-minute duplicate guard. "
-            "Completed results are checked automatically after kickoff + 4 hours; Polymarket match outcomes use regular time plus stoppage, not extra time or penalties."
+            "Completed results are checked automatically after kickoff + 15 minutes; Polymarket match outcomes use regular time plus stoppage, not extra time or penalties."
         )
         st.write("Bulk completed-results sync summary")
         display_dataframe(
@@ -2724,10 +2774,11 @@ for label in selected_labels:
                 hide_index=True,
                 width="stretch",
             )
-        if st.button("Refresh and import all finished World Cup results", key=f"refresh_all_completed_results_{match['match_id']}"):
-            auto_results_ledger, auto_result_diagnostics = sync_all_completed_results(
+        if st.button("Refresh completed results now", key=f"refresh_all_completed_results_{match['match_id']}"):
+            auto_results_ledger, auto_result_diagnostics = auto_sync_completed_results_on_launch(
                 bulk_fixture_table,
                 competition="FIFA World Cup",
+                result_ready_delay_minutes=15,
                 path=RESULTS_LEDGER_PATH,
                 force_refresh=True,
             )
