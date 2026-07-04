@@ -383,7 +383,6 @@ def extract_markets_from_polymarket_event_html(html: str, slug: str) -> pd.DataF
         return out
     return out.drop_duplicates(subset=["market_id", "outcome_name"]).reset_index(drop=True)
 
-
 def build_polymarket_alpha_for_fixture(
     home: str,
     away: str,
@@ -392,14 +391,24 @@ def build_polymarket_alpha_for_fixture(
     model_market_families_df: pd.DataFrame,
     user_supplied_slug_or_url: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Resolve a Polymarket sports event, load outcome rows, and join baseline model prices."""
+    """Resolve a Polymarket sports event, load outcome rows, and join baseline model prices.
+
+    Important contract:
+    - If a user explicitly supplies a bare Polymarket slug and the direct event fetch
+      fails, return diagnostics only.
+    - If a user supplies a full URL, allow HTML fallback because the URL itself may
+      be the source of recoverable market prices.
+    - Do not silently fall back to cached/model-only alpha rows for a failed forced
+      bare slug.
+    """
     slug_candidates = build_polymarket_sports_slug_candidates(home, away, fixture_date, competition)
-    parsed_user_slug = (
-        str(parse_polymarket_url_or_slug(user_supplied_slug_or_url).get("slug", "") or "")
-        if user_supplied_slug_or_url
-        else ""
-    )
+    parsed_user = parse_polymarket_url_or_slug(user_supplied_slug_or_url) if user_supplied_slug_or_url else {}
+    parsed_user_slug = str(parsed_user.get("slug", "") or "") if user_supplied_slug_or_url else ""
+    parsed_user_url = str(parsed_user.get("url", "") or "") if user_supplied_slug_or_url else ""
+    user_supplied_bare_slug = bool(user_supplied_slug_or_url and parsed_user_slug and not parsed_user_url)
+
     warnings: list[str] = []
+
     resolution = resolve_polymarket_slug_for_fixture(
         home,
         away,
@@ -408,7 +417,62 @@ def build_polymarket_alpha_for_fixture(
         user_supplied_slug_or_url=user_supplied_slug_or_url,
     )
     resolved_slug = str(resolution.get("resolved_slug", "") or "")
-    event_markets = load_polymarket_event_markets_by_slug(resolved_slug) if resolved_slug else pd.DataFrame(columns=POLYMARKET_EVENT_MARKET_COLUMNS)
+
+    # Bare forced-slug safety gate:
+    # Validate a user-supplied bare slug directly before allowing cache/model-only
+    # fallback paths. Full URLs are allowed to proceed to HTML fallback.
+    if user_supplied_bare_slug and resolved_slug:
+        event, forced_slug_diagnostics = fetch_polymarket_event_by_slug_with_diagnostics(resolved_slug)
+        if event is None:
+            warning_parts: list[str] = []
+            if resolution.get("warning"):
+                warning_parts.append(str(resolution.get("warning")))
+            if isinstance(forced_slug_diagnostics, dict):
+                warning_parts.extend(str(w) for w in forced_slug_diagnostics.get("warnings", []) if w)
+
+            event_markets = pd.DataFrame(columns=POLYMARKET_EVENT_MARKET_COLUMNS)
+            joined = pd.DataFrame(columns=JOINED_MARKET_COLUMNS)
+            diagnostics = {
+                "home": home,
+                "away": away,
+                "fixture_date": fixture_date,
+                "slug_candidates": slug_candidates,
+                "user_supplied_slug": parsed_user_slug,
+                "resolved_slug": resolved_slug,
+                "resolved_url": resolution.get("resolved_url", ""),
+                "resolution_status": resolution.get("resolution_status", ""),
+                "slug_resolution_status": resolution.get("resolution_status", ""),
+                "slug_resolution_confidence": resolution.get("confidence", ""),
+                "matched_home": resolution.get("matched_home", False),
+                "matched_away": resolution.get("matched_away", False),
+                "matched_date": resolution.get("matched_date", False),
+                "team_order": resolution.get("team_order", ""),
+                "source": resolution.get("source", ""),
+                "slug_source": resolution.get("source", ""),
+                "resolver_steps_tried": resolution.get("resolver_steps_tried", []),
+                "registry_match_found": bool(resolution.get("registry_match_found", False)),
+                "candidates_tried": resolution.get("candidates_tried", []),
+                "event_markets_loaded_count": 0,
+                "event_market_types_found": [],
+                "model_markets_count": int(len(model_market_families_df)) if model_market_families_df is not None else 0,
+                "joined_markets_count": 0,
+                "top_alpha_rows_count": 0,
+                "market_join_status": "event_found_no_relevant_market",
+                "market_join_message": MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"],
+                "reason_no_alpha_rows": MARKET_JOIN_STATUS_LABELS["event_found_no_relevant_market"],
+                "warnings": warning_parts or ["No event found for slug."],
+            }
+            joined.attrs["polymarket_alpha_diagnostics"] = diagnostics
+            joined.attrs["polymarket_event_markets"] = event_markets
+            joined.attrs["slug_resolution"] = resolution
+            return joined, diagnostics
+
+    event_markets = (
+        load_polymarket_event_markets_by_slug(resolved_slug)
+        if resolved_slug
+        else pd.DataFrame(columns=POLYMARKET_EVENT_MARKET_COLUMNS)
+    )
+
     if resolution.get("warning"):
         warnings.append(str(resolution.get("warning")))
     if event_markets.attrs.get("warning"):
@@ -419,6 +483,7 @@ def build_polymarket_alpha_for_fixture(
     reason_no_rows = ""
     if market_join_status != "joined_price":
         reason_no_rows = market_join_message
+
     priced_rows = joined.loc[joined["market_price_cents"].notna()].copy() if not joined.empty else pd.DataFrame()
 
     diagnostics = {
@@ -455,7 +520,6 @@ def build_polymarket_alpha_for_fixture(
     joined.attrs["polymarket_event_markets"] = event_markets
     joined.attrs["slug_resolution"] = resolution
     return joined, diagnostics
-
 
 def join_polymarket_prices_to_model_markets(
     model_market_families_df: pd.DataFrame,
