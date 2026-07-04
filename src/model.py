@@ -17,6 +17,14 @@ from src.venue_features import altitude_log_penalty, venue_log_adjustments
 
 
 MAX_GOALS = 7
+XG_TOTAL_ANCHOR_UNANCHORED_CURRENT = "unanchored_current"
+XG_TOTAL_ANCHOR_ANCHORED_BASE_TOTAL = "anchored_base_total"
+XG_TOTAL_ANCHOR_MODES = frozenset(
+    {
+        XG_TOTAL_ANCHOR_UNANCHORED_CURRENT,
+        XG_TOTAL_ANCHOR_ANCHORED_BASE_TOTAL,
+    }
+)
 
 
 def fair_odds(prob: float) -> float:
@@ -41,7 +49,16 @@ class ModelConfig:
     external_prior_weight: float = 0.00
     rating_gap_to_xg_scale: float = 1.00
     goal_correlation_adjustment: float = 0.00
+    xg_total_anchor_mode: str = XG_TOTAL_ANCHOR_UNANCHORED_CURRENT
     max_goals: int = MAX_GOALS
+
+
+def _validated_xg_total_anchor_mode(mode: Any) -> str:
+    mode_text = str(mode or XG_TOTAL_ANCHOR_UNANCHORED_CURRENT).strip()
+    if mode_text not in XG_TOTAL_ANCHOR_MODES:
+        allowed = ", ".join(sorted(XG_TOTAL_ANCHOR_MODES))
+        raise ValueError(f"Unsupported xg_total_anchor_mode: {mode_text!r}. Allowed values: {allowed}.")
+    return mode_text
 
 
 def _team_row(teams: pd.DataFrame, team_name: str) -> pd.Series:
@@ -176,15 +193,24 @@ def expected_goals(
     venue_adjusted_home_xg = raw_h * weather_xg_multiplier
     venue_adjusted_away_xg = raw_a * weather_xg_multiplier
     global_xg_multiplier = max(coerce_float(cfg.global_xg_calibration_multiplier, 1.0), 0.0)
-    unclamped_hxg = raw_h * weather_xg_multiplier * global_xg_multiplier
-    unclamped_axg = raw_a * weather_xg_multiplier * global_xg_multiplier
-    hxg = clamp(unclamped_hxg, 0.15, 3.80)
-    axg = clamp(unclamped_axg, 0.15, 3.80)
+    unanchored_raw_hxg = raw_h * weather_xg_multiplier * global_xg_multiplier
+    unanchored_raw_axg = raw_a * weather_xg_multiplier * global_xg_multiplier
+    unanchored_hxg = clamp(unanchored_raw_hxg, 0.15, 3.80)
+    unanchored_axg = clamp(unanchored_raw_axg, 0.15, 3.80)
 
-    old_adjusted_total = cfg.base_total_goals * weather_xg_multiplier
-    old_total_scale = old_adjusted_total / (raw_h + raw_a)
-    old_anchored_hxg = clamp(raw_h * old_total_scale, 0.15, 3.80)
-    old_anchored_axg = clamp(raw_a * old_total_scale, 0.15, 3.80)
+    anchored_adjusted_total = cfg.base_total_goals * weather_xg_multiplier
+    anchored_total_denominator = raw_h + raw_a
+    anchored_total_scale = anchored_adjusted_total / anchored_total_denominator if anchored_total_denominator > 0 else 0.0
+    anchored_hxg = raw_h * anchored_total_scale
+    anchored_axg = raw_a * anchored_total_scale
+
+    xg_total_anchor_mode = _validated_xg_total_anchor_mode(cfg.xg_total_anchor_mode)
+    if xg_total_anchor_mode == XG_TOTAL_ANCHOR_ANCHORED_BASE_TOTAL:
+        hxg = anchored_hxg
+        axg = anchored_axg
+    else:
+        hxg = unanchored_hxg
+        axg = unanchored_axg
 
     components: Dict[str, Any] = {
         "elo_diff": elo_diff,
@@ -192,6 +218,7 @@ def expected_goals(
         "rating_gap_to_xg_scale": cfg.rating_gap_to_xg_scale,
         "base_total_goals": cfg.base_total_goals,
         "global_xg_calibration_multiplier": global_xg_multiplier,
+        "xg_total_anchor_mode": xg_total_anchor_mode,
         "draw_inflation_factor": cfg.draw_inflation_factor,
         "favorite_strength_scale": cfg.favorite_strength_scale,
         "underdog_resistance_scale": cfg.underdog_resistance_scale,
@@ -216,16 +243,24 @@ def expected_goals(
         "home_raw_xg": raw_h,
         "away_raw_xg": raw_a,
         "weather_xg_multiplier": weather_xg_multiplier,
-        "home_unclamped_xg": unclamped_hxg,
-        "away_unclamped_xg": unclamped_axg,
+        "home_unclamped_xg": unanchored_raw_hxg,
+        "away_unclamped_xg": unanchored_raw_axg,
+        "unanchored_raw_home_xg": unanchored_raw_hxg,
+        "unanchored_raw_away_xg": unanchored_raw_axg,
+        "unanchored_home_xg": unanchored_hxg,
+        "unanchored_away_xg": unanchored_axg,
+        "unanchored_total_xg": unanchored_hxg + unanchored_axg,
+        "anchored_home_xg": anchored_hxg,
+        "anchored_away_xg": anchored_axg,
+        "anchored_total_xg": anchored_hxg + anchored_axg,
         "home_final_xg": hxg,
         "away_final_xg": axg,
         "adjusted_total_goals": hxg + axg,
-        "old_base_total_goals_adjusted_total": old_adjusted_total,
-        "old_base_total_goals_total_scale": old_total_scale,
-        "old_base_total_goals_anchored_home_xg": old_anchored_hxg,
-        "old_base_total_goals_anchored_away_xg": old_anchored_axg,
-        "old_base_total_goals_anchored_total_xg": old_anchored_hxg + old_anchored_axg,
+        "old_base_total_goals_adjusted_total": anchored_adjusted_total,
+        "old_base_total_goals_total_scale": anchored_total_scale,
+        "old_base_total_goals_anchored_home_xg": anchored_hxg,
+        "old_base_total_goals_anchored_away_xg": anchored_axg,
+        "old_base_total_goals_anchored_total_xg": anchored_hxg + anchored_axg,
         "home_attack_input": coerce_float(home.get("attack"), 0.55),
         "away_attack_input": coerce_float(away.get("attack"), 0.55),
         "home_defense_input": coerce_float(home.get("defense"), 0.55),

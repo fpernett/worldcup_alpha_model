@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from src.climate import environment_from_venue_row
 from src.data_sources import filter_future_fixtures
@@ -157,6 +158,67 @@ def test_expected_goals_uses_natural_matchup_total_not_fixed_anchor() -> None:
     assert low_components["old_base_total_goals_anchored_total_xg"] == cfg.base_total_goals
     assert high_components["home_raw_xg_before_adjustments"] > 0
     assert high_components["home_final_xg"] == high_hxg
+
+
+def test_default_xg_total_anchor_mode_is_current_unanchored_behavior() -> None:
+    teams = sample_teams()
+    env = environment_from_venue_row(sample_venues(roof_closed=0).iloc[0])
+
+    default_hxg, default_axg, default_components = expected_goals(teams.iloc[0], teams.iloc[1], env, ModelConfig())
+    explicit_hxg, explicit_axg, explicit_components = expected_goals(
+        teams.iloc[0],
+        teams.iloc[1],
+        env,
+        ModelConfig(xg_total_anchor_mode="unanchored_current"),
+    )
+
+    assert default_components["xg_total_anchor_mode"] == "unanchored_current"
+    assert default_hxg == pytest.approx(explicit_hxg)
+    assert default_axg == pytest.approx(explicit_axg)
+    assert default_hxg == pytest.approx(default_components["unanchored_home_xg"])
+    assert default_axg == pytest.approx(default_components["unanchored_away_xg"])
+    assert default_components["unanchored_total_xg"] == pytest.approx(explicit_components["unanchored_total_xg"])
+
+
+def test_anchored_mode_reproduces_base_total_goals_formula() -> None:
+    teams = sample_teams()
+    env = environment_from_venue_row(sample_venues(roof_closed=0).iloc[0])
+    cfg = ModelConfig(base_total_goals=2.65, xg_total_anchor_mode="anchored_base_total")
+
+    hxg, axg, components = expected_goals(teams.iloc[0], teams.iloc[1], env, cfg)
+    expected_total = cfg.base_total_goals * components["weather_xg_multiplier"]
+    expected_scale = expected_total / (components["home_raw_xg"] + components["away_raw_xg"])
+
+    assert components["xg_total_anchor_mode"] == "anchored_base_total"
+    assert hxg == pytest.approx(components["home_raw_xg"] * expected_scale)
+    assert axg == pytest.approx(components["away_raw_xg"] * expected_scale)
+    assert components["anchored_home_xg"] == pytest.approx(hxg)
+    assert components["anchored_away_xg"] == pytest.approx(axg)
+
+
+def test_anchored_mode_keeps_total_xg_near_weather_adjusted_base_total() -> None:
+    teams = sample_teams()
+    env = environment_from_venue_row(sample_venues(roof_closed=0).iloc[0])
+    cfg = ModelConfig(base_total_goals=2.40, xg_total_anchor_mode="anchored_base_total")
+
+    hxg, axg, components = expected_goals(teams.iloc[0], teams.iloc[1], env, cfg)
+    expected_total = cfg.base_total_goals * components["weather_xg_multiplier"]
+
+    assert hxg + axg == pytest.approx(expected_total)
+    assert components["anchored_total_xg"] == pytest.approx(expected_total)
+    assert components["adjusted_total_goals"] == pytest.approx(expected_total)
+
+
+def test_unanchored_mode_can_produce_total_different_from_base_total() -> None:
+    teams = sample_teams()
+    env = environment_from_venue_row(sample_venues(roof_closed=0).iloc[0])
+    cfg = ModelConfig(base_total_goals=2.40, xg_total_anchor_mode="unanchored_current")
+
+    hxg, axg, components = expected_goals(teams.iloc[0], teams.iloc[1], env, cfg)
+    expected_total = cfg.base_total_goals * components["weather_xg_multiplier"]
+
+    assert hxg + axg == pytest.approx(components["unanchored_total_xg"])
+    assert abs((hxg + axg) - expected_total) > 0.05
 
 
 def test_future_fixture_filter_excludes_past_and_keeps_tomorrow() -> None:
