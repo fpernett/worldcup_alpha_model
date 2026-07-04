@@ -75,11 +75,17 @@ _THIRD_PATTERN = re.compile(
 )
 
 
-def load_fixture_resolution_results(data_dir: Path = DATA_DIR) -> pd.DataFrame:
+def load_fixture_resolution_results(
+    data_dir: Path = DATA_DIR,
+    fixtures_df: pd.DataFrame | None = None,
+    refresh_completed: bool = False,
+) -> pd.DataFrame:
     """Load result rows suitable for resolving bracket placeholders."""
     results_ledger = read_csv_with_columns(data_dir / "results_ledger.csv", RESULT_COLUMNS)
     completed = read_csv_with_columns(data_dir / "completed_results.csv", COMPLETED_RESULT_COLUMNS)
     frames = [_normalise_result_rows(results_ledger), _normalise_completed_rows(completed)]
+    if refresh_completed:
+        frames.append(_refreshed_completed_result_rows(data_dir, fixtures_df))
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
         return pd.DataFrame(columns=RESULT_COLUMNS)
@@ -95,9 +101,23 @@ def load_fixture_resolution_results(data_dir: Path = DATA_DIR) -> pd.DataFrame:
     return out[RESULT_COLUMNS].copy()
 
 
+def load_fixture_resolution_context(data_dir: Path = DATA_DIR) -> pd.DataFrame:
+    """Load the full local fixture schedule for bracket dependency lookups."""
+    if data_dir == DATA_DIR:
+        try:
+            from src.data_sources import _load_local_fixture_pool  # noqa: WPS433
+
+            return _normalise_fixtures(_load_local_fixture_pool())
+        except Exception:
+            pass
+    return _normalise_fixtures(read_csv_with_columns(data_dir / "fixtures.csv", FIXTURE_COLUMNS))
+
+
 def resolve_fixture_placeholders(
     fixtures_df: pd.DataFrame | None,
     results_df: pd.DataFrame | None = None,
+    fixture_context_df: pd.DataFrame | None = None,
+    refresh_completed_results: bool = False,
 ) -> pd.DataFrame:
     """Return an in-memory fixture view with bracket placeholders resolved when possible.
 
@@ -108,7 +128,20 @@ def resolve_fixture_placeholders(
     if fixtures.empty:
         return _with_resolution_attrs(fixtures)
 
-    results = _normalise_result_rows(results_df) if results_df is not None else load_fixture_resolution_results()
+    context = (
+        _normalise_fixtures(fixture_context_df)
+        if fixture_context_df is not None
+        else load_fixture_resolution_context()
+    )
+    resolution_fixtures = _resolution_fixture_pool(fixtures, context)
+    results = (
+        _normalise_result_rows(results_df)
+        if results_df is not None
+        else load_fixture_resolution_results(
+            fixtures_df=resolution_fixtures,
+            refresh_completed=refresh_completed_results,
+        )
+    )
     out = fixtures.copy()
     for col in RESOLUTION_COLUMNS:
         out[col] = ""
@@ -120,8 +153,9 @@ def resolve_fixture_placeholders(
     # referenced match.
     for _ in range(max(1, len(out))):
         changed = False
-        fixture_lookup = _fixture_lookup(out)
-        standings = _group_standings(out, results)
+        resolution_fixtures = _resolution_fixture_pool(out, context)
+        fixture_lookup = _fixture_lookup(resolution_fixtures)
+        standings = _group_standings(resolution_fixtures, results)
         for idx, row in out.iterrows():
             for side in ["home", "away"]:
                 original = str(row.get(side, "") or "").strip()
@@ -151,6 +185,57 @@ def resolve_fixture_placeholders(
     out.attrs = fixtures.attrs.copy()
     out.attrs.update(_resolution_summary(out))
     return out
+
+
+def _refreshed_completed_result_rows(data_dir: Path, fixtures_df: pd.DataFrame | None) -> pd.DataFrame:
+    fixtures = _normalise_fixtures(fixtures_df)
+    if fixtures.empty:
+        return pd.DataFrame(columns=RESULT_COLUMNS)
+    kickoff = _fixture_kickoff_series(fixtures)
+    now = pd.Timestamp.now(tz="UTC")
+    past_kickoffs = kickoff.loc[kickoff.notna() & (kickoff <= now)]
+    if past_kickoffs.empty:
+        return pd.DataFrame(columns=RESULT_COLUMNS)
+
+    start = past_kickoffs.dt.date.min().isoformat()
+    end = min(past_kickoffs.dt.date.max(), now.date()).isoformat()
+    try:
+        from src.completed_results import load_completed_results  # noqa: WPS433
+
+        completed, _diagnostics = load_completed_results(
+            start,
+            end,
+            force_refresh=False,
+            persist=False,
+            path=data_dir / "completed_results.csv",
+        )
+    except Exception:
+        return pd.DataFrame(columns=RESULT_COLUMNS)
+    return _normalise_completed_rows(completed)
+
+
+def _fixture_kickoff_series(fixtures: pd.DataFrame) -> pd.Series:
+    date_part = fixtures.get("date_utc", pd.Series(index=fixtures.index, dtype="object")).astype(str)
+    time_part = fixtures.get("time_utc", pd.Series("00:00", index=fixtures.index)).fillna("00:00").astype(str).str.slice(0, 5)
+    return pd.to_datetime(date_part + " " + time_part, utc=True, errors="coerce")
+
+
+def _resolution_fixture_pool(fixtures: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
+    frames = [frame for frame in [context, fixtures] if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    combined = _normalise_fixtures(combined)
+    if combined.empty:
+        return combined
+    combined["_order"] = range(len(combined))
+    combined = (
+        combined.sort_values("_order")
+        .drop_duplicates(subset=["match_id"], keep="last")
+        .drop(columns=["_order"])
+        .reset_index(drop=True)
+    )
+    return combined
 
 
 def _resolve_slot(

@@ -113,11 +113,19 @@ def test_world_cup_tag_discovery() -> None:
     identifiers = discover_world_cup_identifiers(
         tags=[{"id": "123", "label": "FIFA World Cup"}],
         series=[{"id": "456", "title": "Politics"}],
-        sports=[{"id": "789", "name": "Soccer"}],
+        sports=[
+            {
+                "id": "174",
+                "sport": "fifwc",
+                "series": "11433",
+                "resolution": "https://www.fifa.com/fifaplus/en/tournaments/mens/worldcup",
+            }
+        ],
     )
 
     assert identifiers["tag_ids"] == ["123"]
-    assert identifiers["sports_ids"] == ["789"]
+    assert identifiers["series_ids"] == ["11433"]
+    assert identifiers["sports_ids"] == []
 
 
 def test_fetch_all_gamma_events_paginates(monkeypatch) -> None:

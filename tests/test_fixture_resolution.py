@@ -110,6 +110,33 @@ def test_unplayed_prior_match_stays_pending_prior_result() -> None:
     assert row["fixture_resolution_status"] == "Pending prior result"
 
 
+def test_selected_window_placeholder_uses_full_fixture_context() -> None:
+    selected_window = pd.DataFrame(
+        [
+            _fixture("wc2026_90", "Winner Match 73", "Winner Match 75"),
+        ]
+    )
+    fixture_context = pd.DataFrame(
+        [
+            _fixture("wc2026_73", "South Africa", "Canada", group="Round of 32"),
+            _fixture("wc2026_75", "Netherlands", "Morocco", group="Round of 32"),
+        ]
+    )
+    results = pd.DataFrame(
+        [
+            _result("wc2026_73", "South Africa", "Canada", 0, 2),
+            _result("wc2026_75", "Netherlands", "Morocco", 0, 1),
+        ]
+    )
+
+    resolved = resolve_fixture_placeholders(selected_window, results, fixture_context_df=fixture_context)
+    row = resolved.loc[resolved["match_id"] == "wc2026_90"].iloc[0]
+
+    assert row["home"] == "Canada"
+    assert row["away"] == "Morocco"
+    assert row["fixture_resolution_status"] == "Resolved automatically"
+
+
 def test_resolves_group_winner_and_runner_up_from_completed_group_table() -> None:
     fixtures = pd.DataFrame(
         [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta, timezone
 from typing import Any
 
@@ -20,8 +21,8 @@ from src.historical_data import build_historical_matches_from_results, load_hist
 from src.odds import ODDS_COLUMNS, load_market_odds, update_market_odds_for_fixtures
 from src.ratings import TEAM_RATING_COLUMNS, get_team_ratings
 from src.team_behavior import rebuild_team_behavior_csv
-from src.team_names import is_unresolved_team_slot, team_name_key
-from src.utils import csv_status, parse_date, read_csv_with_columns
+from src.team_names import is_unresolved_team_slot, normalize_team_name, team_name_key
+from src.utils import coerce_bool, csv_status, parse_date, read_csv_with_columns
 from src.weather import VENUE_COLUMNS, fetch_weather_for_fixtures
 
 
@@ -60,6 +61,25 @@ INTERNATIONAL_RESULTS_FIXTURE_COLUMNS = [
     "neutral",
 ]
 
+POLYMARKET_EVENT_FIXTURE_COLUMNS = [
+    "event_id",
+    "event_slug",
+    "event_title",
+    "event_category",
+    "event_start_date",
+    "event_end_date",
+    "event_active",
+    "event_closed",
+    "start_date",
+    "end_date",
+    "raw_event_json",
+    "source",
+    "last_updated",
+]
+
+_POLYMARKET_MATCH_TITLE_PATTERN = re.compile(r"^\s*(?P<home>.+?)\s+v(?:s)?\.?\s+(?P<away>.+?)\s*$", re.IGNORECASE)
+_POLYMARKET_BASE_MATCH_SLUG_PATTERN = re.compile(r"^fifwc-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}$", re.IGNORECASE)
+
 
 def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool = False) -> pd.DataFrame:
     start = parse_date(start_date)
@@ -70,12 +90,15 @@ def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool 
     if cfg.football_configured and not force_refresh:
         cached = read_dataframe_cache("fixtures_latest.csv", max_age_hours=6)
         if cached is not None and not cached.empty:
-            return _with_fixture_source(
-                _filter_fixture_window(_normalise_fixtures(cached), start, end),
-                SOURCE_CACHE,
-                "data/cache/fixtures_latest.csv",
-                cache_last_updated("fixtures_latest.csv"),
-            )
+            cached_window = _filter_fixture_window(_normalise_fixtures(cached), start, end)
+            if not cached_window.empty:
+                return _with_fixture_source(
+                    cached_window,
+                    SOURCE_CACHE,
+                    "data/cache/fixtures_latest.csv",
+                    cache_last_updated("fixtures_latest.csv"),
+                )
+            warning = "Fresh fixtures cache did not contain the requested date window."
 
     if cfg.football_configured:
         api_fixtures, error = _fetch_football_data_fixtures(start, end)
@@ -91,15 +114,18 @@ def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool 
 
         cached = read_dataframe_cache("fixtures_latest.csv", max_age_hours=None)
         if cached is not None and not cached.empty:
-            return _with_fixture_source(
-                _filter_fixture_window(_normalise_fixtures(cached), start, end),
-                SOURCE_CACHE,
-                "data/cache/fixtures_latest.csv",
-                cache_last_updated("fixtures_latest.csv"),
-                warning=f"API failed; using cached fixtures. {warning}",
-            )
+            cached_window = _filter_fixture_window(_normalise_fixtures(cached), start, end)
+            if not cached_window.empty:
+                return _with_fixture_source(
+                    cached_window,
+                    SOURCE_CACHE,
+                    "data/cache/fixtures_latest.csv",
+                    cache_last_updated("fixtures_latest.csv"),
+                    warning=f"API failed; using cached fixtures. {warning}",
+                )
+            warning = _combine_warnings(warning, "Cached fixtures did not contain the requested date window.") or ""
 
-    local = _load_local_fixture_pool()
+    local = _load_local_fixture_pool(start, end)
     return _with_fixture_source(
         _filter_fixture_window(local, start, end),
         SOURCE_LOCAL,
@@ -182,8 +208,8 @@ def fixture_has_unresolved_team_slot(row: pd.Series | dict[str, Any]) -> bool:
     return is_unresolved_team_slot(row.get("home", "")) or is_unresolved_team_slot(row.get("away", ""))
 
 
-def _load_local_fixture_pool() -> pd.DataFrame:
-    """Load local fixtures plus date-only future rows from international_results.csv.
+def _load_local_fixture_pool(start_date: date | None = None, end_date: date | None = None) -> pd.DataFrame:
+    """Load curated fixtures plus conservative local fallback fixture sources.
 
     `data/fixtures.csv` remains the authoritative local schedule. The imported
     international results snapshot can contain future tournament rows with blank
@@ -191,29 +217,69 @@ def _load_local_fixture_pool() -> pd.DataFrame:
     incomplete. Because that source has no kickoff time or stadium, fallback rows
     use `23:59` UTC and city-as-venue so they remain selectable but visibly carry
     a source warning.
+
+    Cached Polymarket FIFA event metadata is also used as a read-only discovery
+    fallback when a curated knockout slot is still a placeholder but the event
+    title already names the teams. Exact local kickoff-slot matches inherit the
+    curated match id and venue context, so downstream market mapping continues to
+    use the local World Cup schedule identity.
     """
     curated = _normalise_fixtures(read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS))
-    supplemental = _future_fixtures_from_international_results()
-    if supplemental.empty:
+    curated["_fixture_source"] = "data/fixtures.csv"
+    supplemental = []
+
+    international = _future_fixtures_from_international_results()
+    if not international.empty:
+        international["_fixture_source"] = "data/international_results.csv"
+        supplemental.append(international)
+
+    polymarket_events = _future_fixtures_from_polymarket_events(curated, _polymarket_event_cache_rows())
+    if not polymarket_events.empty:
+        polymarket_events["_fixture_source"] = "data/polymarket_events_cache.csv"
+        supplemental.append(polymarket_events)
+
+    candidate_frames = [curated, *supplemental]
+    if _needs_live_polymarket_fixture_refresh(candidate_frames, start_date, end_date):
+        live_polymarket_events = _future_fixtures_from_polymarket_events(curated, _live_polymarket_event_rows())
+        if not live_polymarket_events.empty:
+            live_polymarket_events["_fixture_source"] = "Gamma sports events"
+            supplemental.append(live_polymarket_events)
+
+    if not supplemental:
+        curated = _normalise_fixtures(curated)
+        curated.attrs["source_detail"] = "data/fixtures.csv"
         return curated
 
-    combined = pd.concat([curated, supplemental], ignore_index=True)
-    combined["_dedupe_key"] = combined.apply(_fixture_dedupe_key, axis=1)
-    combined["_priority"] = combined["match_id"].astype(str).str.startswith("intl_").astype(int)
-    combined = (
-        combined.sort_values(["_dedupe_key", "_priority"])
-        .drop_duplicates(subset=["_dedupe_key"], keep="first")
-        .drop(columns=["_dedupe_key", "_priority"])
-    )
+    combined = _combine_fixture_source_frames([curated, *supplemental])
+
+    kept_sources = set(combined.get("_fixture_source", pd.Series(dtype=str)).astype(str))
+    combined = combined.drop(columns=["_fixture_source", "_order", "_priority", "_dedupe_key"], errors="ignore")
     combined = _normalise_fixtures(combined)
-    if len(combined) > len(curated):
-        combined.attrs["source_detail"] = "data/fixtures.csv + data/international_results.csv"
-        combined.attrs["warning"] = (
+
+    source_detail = ["data/fixtures.csv"]
+    warnings = []
+    if "data/international_results.csv" in kept_sources:
+        source_detail.append("data/international_results.csv")
+        warnings.append(
             "Some fixtures came from data/international_results.csv because data/fixtures.csv is incomplete. "
             "Those fallback rows have date-only kickoff placeholders at 23:59 UTC and city-as-venue."
         )
-    else:
-        combined.attrs["source_detail"] = "data/fixtures.csv"
+    if "data/polymarket_events_cache.csv" in kept_sources:
+        source_detail.extend(["data/polymarket_events_cache.csv", "data/polymarket_markets_cache.csv"])
+        warnings.append(
+            "Some fixtures came from cached Polymarket FIFA World Cup event metadata because local bracket rows "
+            "were still placeholders. These rows are read-only fixture discovery inputs; verify against the "
+            "official schedule when available."
+        )
+    if "Gamma sports events" in kept_sources:
+        source_detail.append("Polymarket Gamma sports events")
+        warnings.append(
+            "Some fixtures came from live Polymarket FIFA World Cup event metadata because local bracket rows "
+            "were still placeholders. These rows are read-only fixture discovery inputs; verify against the "
+            "official schedule when available."
+        )
+    combined.attrs["source_detail"] = " + ".join(dict.fromkeys(source_detail))
+    combined.attrs["warning"] = _combine_warnings(*warnings)
     return combined
 
 
@@ -242,6 +308,237 @@ def _future_fixtures_from_international_results() -> pd.DataFrame:
     out["city"] = out["city"].fillna("")
     out["country"] = out["country"].fillna("")
     return _normalise_fixtures(out[FIXTURE_COLUMNS])
+
+
+def _future_fixtures_from_polymarket_events(curated: pd.DataFrame, event_rows: pd.DataFrame | None) -> pd.DataFrame:
+    events = event_rows.copy() if event_rows is not None else pd.DataFrame(columns=POLYMARKET_EVENT_FIXTURE_COLUMNS)
+    if events.empty:
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+    for col in POLYMARKET_EVENT_FIXTURE_COLUMNS:
+        if col not in events.columns:
+            events[col] = pd.NA
+    events["_slug"] = events["event_slug"].fillna("").astype(str).str.strip()
+    events = events.loc[events["_slug"] != ""].drop_duplicates(subset=["_slug"], keep="last").drop(columns=["_slug"])
+
+    rows: list[dict[str, Any]] = []
+    for _, event in events.iterrows():
+        if not _is_polymarket_world_cup_event(event):
+            continue
+        if coerce_bool(event.get("event_closed")):
+            continue
+
+        kickoff = _polymarket_event_kickoff(event)
+        if pd.isna(kickoff):
+            continue
+        teams = _polymarket_event_teams(event.get("event_title", ""))
+        if teams is None:
+            continue
+        home, away = teams
+
+        context = _polymarket_event_local_context(kickoff, home, away, curated)
+        slug = str(event.get("event_slug", "") or "").strip()
+        fallback_id = f"poly_{_slug_part(slug or event.get('event_title', ''))}"
+        rows.append(
+            {
+                "match_id": context.get("match_id") or fallback_id,
+                "date_utc": kickoff.date(),
+                "time_utc": kickoff.strftime("%H:%M"),
+                "competition": context.get("competition") or "FIFA World Cup",
+                "group": context.get("group") or "",
+                "home": home,
+                "away": away,
+                "venue": context.get("venue") or "",
+                "city": context.get("city") or "",
+                "country": context.get("country") or "",
+            }
+        )
+
+    return _normalise_fixtures(pd.DataFrame(rows, columns=FIXTURE_COLUMNS))
+
+
+def _needs_live_polymarket_fixture_refresh(
+    frames: list[pd.DataFrame],
+    start_date: date | None,
+    end_date: date | None,
+) -> bool:
+    if start_date is None or end_date is None:
+        return False
+    valid_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not valid_frames:
+        return False
+    combined = _normalise_fixtures(_combine_fixture_source_frames(valid_frames))
+    window = _filter_fixture_window(combined, start_date, end_date)
+    if window.empty:
+        return False
+    return bool(window.apply(fixture_has_unresolved_team_slot, axis=1).any())
+
+
+def _combine_fixture_source_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    valid_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not valid_frames:
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+    combined = pd.concat(valid_frames, ignore_index=True, sort=False)
+    combined["_order"] = range(len(combined))
+    combined["_priority"] = combined.apply(_fixture_source_priority, axis=1)
+    combined = (
+        combined.sort_values(["_priority", "_order"])
+        .drop_duplicates(subset=["match_id"], keep="first")
+        .reset_index(drop=True)
+    )
+    combined["_dedupe_key"] = combined.apply(_fixture_dedupe_key, axis=1)
+    return combined.drop_duplicates(subset=["_dedupe_key"], keep="first").reset_index(drop=True)
+
+
+def _polymarket_event_cache_rows() -> pd.DataFrame:
+    frames = [
+        read_csv_with_columns(DATA_DIR / "polymarket_events_cache.csv", POLYMARKET_EVENT_FIXTURE_COLUMNS),
+        read_csv_with_columns(DATA_DIR / "polymarket_markets_cache.csv", POLYMARKET_EVENT_FIXTURE_COLUMNS),
+    ]
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=POLYMARKET_EVENT_FIXTURE_COLUMNS)
+
+    events = pd.concat(frames, ignore_index=True, sort=False)
+    for col in POLYMARKET_EVENT_FIXTURE_COLUMNS:
+        if col not in events.columns:
+            events[col] = pd.NA
+    events["_slug"] = events["event_slug"].fillna("").astype(str).str.strip()
+    events = events.loc[events["_slug"] != ""].copy()
+    if events.empty:
+        return pd.DataFrame(columns=POLYMARKET_EVENT_FIXTURE_COLUMNS)
+    events["_updated"] = pd.to_datetime(events["last_updated"], errors="coerce", utc=True)
+    events = (
+        events.sort_values(["_slug", "_updated"], na_position="first")
+        .drop_duplicates(subset=["_slug"], keep="last")
+        .drop(columns=["_slug", "_updated"])
+        .reset_index(drop=True)
+    )
+    return events[POLYMARKET_EVENT_FIXTURE_COLUMNS].copy()
+
+
+def _live_polymarket_event_rows() -> pd.DataFrame:
+    try:
+        from src.polymarket_sports_discovery import (  # noqa: WPS433
+            fetch_all_gamma_events,
+            fetch_gamma_sports,
+            flatten_gamma_events_to_markets,
+        )
+
+        series_ids = [
+            str(sport.get("series", "") or "").strip()
+            for sport in fetch_gamma_sports()
+            if str(sport.get("sport", "") or "").strip().lower() == "fifwc"
+            and str(sport.get("series", "") or "").strip()
+        ]
+        events_payload: list[dict[str, Any]] = []
+        for series_id in dict.fromkeys(series_ids):
+            events_payload.extend(
+                fetch_all_gamma_events(
+                    active=True,
+                    closed=False,
+                    max_pages=2,
+                    limit=500,
+                    series_id=series_id,
+                )
+            )
+        events = flatten_gamma_events_to_markets(events_payload)
+    except Exception:
+        return pd.DataFrame(columns=POLYMARKET_EVENT_FIXTURE_COLUMNS)
+    if events is None or events.empty:
+        return pd.DataFrame(columns=POLYMARKET_EVENT_FIXTURE_COLUMNS)
+    for col in POLYMARKET_EVENT_FIXTURE_COLUMNS:
+        if col not in events.columns:
+            events[col] = pd.NA
+    return events[POLYMARKET_EVENT_FIXTURE_COLUMNS].copy()
+
+
+def _is_polymarket_world_cup_event(row: pd.Series) -> bool:
+    slug = str(row.get("event_slug", "") or "").strip().lower()
+    title = str(row.get("event_title", "") or "").strip().lower()
+    if slug.startswith("fifwc-"):
+        return bool(_POLYMARKET_BASE_MATCH_SLUG_PATTERN.match(slug))
+    text = " ".join(
+        [
+            slug,
+            str(row.get("event_category", "") or "").strip().lower(),
+            title,
+        ]
+    )
+    return slug.startswith("fifwc-") or "soccer-fifwc" in text or "fifa world cup" in text
+
+
+def _polymarket_event_kickoff(row: pd.Series) -> pd.Timestamp:
+    for col in ["event_end_date", "end_date"]:
+        kickoff = pd.to_datetime(row.get(col), errors="coerce", utc=True)
+        if not pd.isna(kickoff):
+            return kickoff
+    return pd.NaT
+
+
+def _polymarket_event_teams(title: Any) -> tuple[str, str] | None:
+    match = _POLYMARKET_MATCH_TITLE_PATTERN.match(str(title or "").strip())
+    if not match:
+        return None
+    home = normalize_team_name(match.group("home").strip())
+    away = normalize_team_name(match.group("away").strip())
+    if not home or not away:
+        return None
+    if is_unresolved_team_slot(home) or is_unresolved_team_slot(away):
+        return None
+    return home, away
+
+
+def _polymarket_event_local_context(
+    kickoff: pd.Timestamp,
+    home: str,
+    away: str,
+    curated: pd.DataFrame,
+) -> dict[str, str]:
+    if curated.empty:
+        return {}
+
+    local = curated.copy()
+    date_key = kickoff.date().isoformat()
+    time_key = kickoff.strftime("%H:%M")
+    local_date = pd.to_datetime(local["date_utc"], errors="coerce").dt.date.astype(str)
+    same_time = local.loc[(local_date == date_key) & (local["time_utc"].astype(str).str.slice(0, 5) == time_key)].copy()
+
+    unresolved = same_time.loc[same_time.apply(fixture_has_unresolved_team_slot, axis=1)]
+    if len(unresolved) == 1:
+        return _fixture_context(unresolved.iloc[0])
+
+    home_key = team_name_key(home)
+    away_key = team_name_key(away)
+    local_home = local["home"].map(team_name_key)
+    local_away = local["away"].map(team_name_key)
+    same_match = local.loc[(local_date == date_key) & (local_home == home_key) & (local_away == away_key)]
+    if not same_match.empty:
+        return _fixture_context(same_match.iloc[0])
+    return {}
+
+
+def _fixture_context(row: pd.Series) -> dict[str, str]:
+    return {
+        "match_id": str(row.get("match_id", "") or ""),
+        "competition": str(row.get("competition", "") or ""),
+        "group": str(row.get("group", "") or ""),
+        "venue": str(row.get("venue", "") or ""),
+        "city": str(row.get("city", "") or ""),
+        "country": str(row.get("country", "") or ""),
+    }
+
+
+def _fixture_source_priority(row: pd.Series) -> int:
+    source = str(row.get("_fixture_source", "") or "")
+    if source == "data/fixtures.csv":
+        return 20 if fixture_has_unresolved_team_slot(row) else 0
+    if source == "data/polymarket_events_cache.csv":
+        return 10
+    if source == "Gamma sports events":
+        return 10
+    if source == "data/international_results.csv":
+        return 30
+    return 40
 
 
 def _supplemental_fixture_id(row: pd.Series) -> str:

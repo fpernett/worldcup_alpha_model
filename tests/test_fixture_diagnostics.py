@@ -222,3 +222,198 @@ def test_get_upcoming_fixtures_uses_international_results_as_supplemental_source
     assert len(fixtures.loc[fixtures["away"].astype(str) == "Ivory Coast"]) == 1
     assert fixtures.attrs.get("source_detail") == "data/fixtures.csv + data/international_results.csv"
     assert "date-only kickoff placeholders" in fixtures.attrs.get("warning", "")
+
+
+def test_get_upcoming_fixtures_uses_cached_polymarket_events_for_unresolved_slots(tmp_path, monkeypatch):
+    data_dir = tmp_path
+    pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_90",
+                "date_utc": "2026-07-04",
+                "time_utc": "17:00",
+                "competition": "FIFA World Cup",
+                "group": "Round of 16",
+                "home": "Winner Match 73",
+                "away": "Winner Match 75",
+                "venue": "NRG Stadium",
+                "city": "Houston",
+                "country": "USA",
+            }
+        ]
+    ).to_csv(data_dir / "fixtures.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "event_id": "event_1",
+                "event_slug": "fifwc-can-mar-2026-07-04",
+                "event_title": "Canada vs. Morocco",
+                "event_category": "FIFA World Cup",
+                "event_start_date": "2026-07-03T18:00:00Z",
+                "event_end_date": "2026-07-04T17:00:00Z",
+                "event_active": 1,
+                "event_closed": 0,
+                "raw_event_json": "",
+                "source": "API",
+                "last_updated": "2026-07-04T07:00:00+00:00",
+            }
+        ]
+    ).to_csv(data_dir / "polymarket_events_cache.csv", index=False)
+
+    class Config:
+        football_configured = False
+
+    monkeypatch.setattr(data_sources, "DATA_DIR", data_dir)
+    monkeypatch.setattr(data_sources, "get_config", lambda: Config())
+
+    fixtures = data_sources.get_upcoming_fixtures(pd.Timestamp("2026-07-04").date(), pd.Timestamp("2026-07-04").date())
+    row = fixtures.iloc[0]
+
+    assert len(fixtures) == 1
+    assert row["match_id"] == "wc2026_90"
+    assert row["home"] == "Canada"
+    assert row["away"] == "Morocco"
+    assert row["venue"] == "NRG Stadium"
+    assert "data/polymarket_events_cache.csv" in fixtures.attrs.get("source_detail", "")
+    assert "read-only fixture discovery" in fixtures.attrs.get("warning", "")
+
+
+def test_get_upcoming_fixtures_uses_live_polymarket_events_when_local_window_is_unresolved(tmp_path, monkeypatch):
+    data_dir = tmp_path
+    pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_90",
+                "date_utc": "2026-07-04",
+                "time_utc": "17:00",
+                "competition": "FIFA World Cup",
+                "group": "Round of 16",
+                "home": "Winner Match 73",
+                "away": "Winner Match 75",
+                "venue": "NRG Stadium",
+                "city": "Houston",
+                "country": "USA",
+            },
+            {
+                "match_id": "wc2026_89",
+                "date_utc": "2026-07-04",
+                "time_utc": "21:00",
+                "competition": "FIFA World Cup",
+                "group": "Round of 16",
+                "home": "Winner Match 74",
+                "away": "Winner Match 77",
+                "venue": "Lincoln Financial Field",
+                "city": "Philadelphia",
+                "country": "USA",
+            },
+        ]
+    ).to_csv(data_dir / "fixtures.csv", index=False)
+    live_events = pd.DataFrame(
+        [
+            {
+                "event_id": "event_corners",
+                "event_slug": "fifwc-can-mar-2026-07-04-total-corners",
+                "event_title": "Canada vs. Morocco - Total Corners",
+                "event_category": "FIFA World Cup",
+                "event_start_date": "2026-07-03T18:00:00Z",
+                "event_end_date": "2026-07-04T17:00:00Z",
+                "event_active": 1,
+                "event_closed": 0,
+                "raw_event_json": "",
+                "source": "API",
+                "last_updated": "2026-07-04T07:00:00+00:00",
+            },
+            {
+                "event_id": "event_1",
+                "event_slug": "fifwc-can-mar-2026-07-04",
+                "event_title": "Canada vs. Morocco",
+                "event_category": "FIFA World Cup",
+                "event_start_date": "2026-07-03T18:00:00Z",
+                "event_end_date": "2026-07-04T17:00:00Z",
+                "event_active": 1,
+                "event_closed": 0,
+                "raw_event_json": "",
+                "source": "API",
+                "last_updated": "2026-07-04T07:00:00+00:00",
+            },
+            {
+                "event_id": "event_2",
+                "event_slug": "fifwc-par-fra-2026-07-04",
+                "event_title": "Paraguay vs. France",
+                "event_category": "FIFA World Cup",
+                "event_start_date": "2026-07-03T18:00:00Z",
+                "event_end_date": "2026-07-04T21:00:00Z",
+                "event_active": 1,
+                "event_closed": 0,
+                "raw_event_json": "",
+                "source": "API",
+                "last_updated": "2026-07-04T07:00:00+00:00",
+            },
+        ]
+    )
+
+    class Config:
+        football_configured = False
+
+    monkeypatch.setattr(data_sources, "DATA_DIR", data_dir)
+    monkeypatch.setattr(data_sources, "get_config", lambda: Config())
+    monkeypatch.setattr(data_sources, "_live_polymarket_event_rows", lambda: live_events)
+
+    fixtures = data_sources.get_upcoming_fixtures(pd.Timestamp("2026-07-04").date(), pd.Timestamp("2026-07-04").date())
+    labels = set(fixtures["home"].astype(str) + " vs " + fixtures["away"].astype(str))
+
+    assert labels == {"Canada vs Morocco", "Paraguay vs France"}
+    assert set(fixtures["match_id"]) == {"wc2026_90", "wc2026_89"}
+    assert "Polymarket Gamma sports events" in fixtures.attrs.get("source_detail", "")
+    assert "live Polymarket FIFA World Cup event metadata" in fixtures.attrs.get("warning", "")
+
+
+def test_get_upcoming_fixtures_falls_through_when_cache_misses_requested_window(tmp_path, monkeypatch):
+    data_dir = tmp_path
+    pd.DataFrame(
+        [
+            {
+                "match_id": "local_next",
+                "date_utc": "2026-07-04",
+                "time_utc": "17:00",
+                "competition": "FIFA World Cup",
+                "group": "Round of 16",
+                "home": "Canada",
+                "away": "Morocco",
+                "venue": "NRG Stadium",
+                "city": "Houston",
+                "country": "USA",
+            }
+        ]
+    ).to_csv(data_dir / "fixtures.csv", index=False)
+    stale_cache = pd.DataFrame(
+        [
+            {
+                "match_id": "old",
+                "date_utc": "2026-06-20",
+                "time_utc": "17:00",
+                "competition": "FIFA World Cup",
+                "group": "Group",
+                "home": "Old A",
+                "away": "Old B",
+                "venue": "Old Venue",
+                "city": "Old City",
+                "country": "USA",
+            }
+        ]
+    )
+
+    class Config:
+        football_configured = True
+
+    monkeypatch.setattr(data_sources, "DATA_DIR", data_dir)
+    monkeypatch.setattr(data_sources, "get_config", lambda: Config())
+    monkeypatch.setattr(data_sources, "read_dataframe_cache", lambda *_args, **_kwargs: stale_cache)
+    monkeypatch.setattr(data_sources, "cache_last_updated", lambda *_args, **_kwargs: "2026-07-04T00:00:00+00:00")
+    monkeypatch.setattr(data_sources, "_fetch_football_data_fixtures", lambda *_args, **_kwargs: (pd.DataFrame(), "API failed"))
+
+    fixtures = data_sources.get_upcoming_fixtures(pd.Timestamp("2026-07-04").date(), pd.Timestamp("2026-07-04").date())
+
+    assert fixtures["match_id"].tolist() == ["local_next"]
+    assert fixtures.attrs.get("source_detail") == "data/fixtures.csv"
+    assert "Cached fixtures did not contain the requested date window" in fixtures.attrs.get("warning", "")

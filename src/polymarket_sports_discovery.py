@@ -57,7 +57,7 @@ GAMMA_EVENT_CACHE_COLUMNS = [
     "last_updated",
 ]
 
-DISCOVERY_KEYWORDS = ["world cup", "fifa", "soccer", "football", "club world cup"]
+DISCOVERY_KEYWORDS = ["world cup", "fifa", "fifwc", "club world cup"]
 
 
 def fetch_gamma_events(
@@ -172,11 +172,24 @@ def discover_world_cup_identifiers(tags: list[dict], series: list[dict], sports:
     ]:
         for record in records or []:
             text = _record_search_text(record)
+            if label == "sport":
+                sport_code = _text(record.get("sport", "")).lower()
+                if sport_code != "fifwc":
+                    continue
             if any(keyword in text for keyword in DISCOVERY_KEYWORDS):
                 identifier = _record_id(record)
                 if identifier:
-                    bucket.append(identifier)
-                    diagnostics.append(f"{label}:{identifier}:{_record_name(record)}")
+                    if label == "sport":
+                        series_identifier = _text(record.get("series", ""))
+                        if series_identifier:
+                            series_ids.append(series_identifier)
+                            diagnostics.append(f"{label}:series:{series_identifier}:{_record_name(record)}")
+                        else:
+                            bucket.append(identifier)
+                            diagnostics.append(f"{label}:{identifier}:{_record_name(record)}")
+                    else:
+                        bucket.append(identifier)
+                        diagnostics.append(f"{label}:{identifier}:{_record_name(record)}")
     return {
         "tag_ids": list(dict.fromkeys(tag_ids)),
         "series_ids": list(dict.fromkeys(series_ids)),
@@ -526,7 +539,13 @@ def _parse_jsonish(value: Any) -> Any:
 
 
 def _record_search_text(record: dict) -> str:
-    return " ".join(_record_name(record).lower().split())
+    parts = [
+        _record_name(record),
+        _text(record.get("sport", "")),
+        _text(record.get("resolution", "")),
+        _text(record.get("series", "")),
+    ]
+    return " ".join(" ".join(parts).lower().split())
 
 
 def _record_name(record: dict) -> str:

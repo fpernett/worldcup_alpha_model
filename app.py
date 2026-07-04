@@ -1275,7 +1275,7 @@ def load_inputs(
     include_past: bool,
 ):
     source_fixtures = get_upcoming_fixtures(start_date, end_date)
-    raw_fixtures = resolve_fixture_placeholders(source_fixtures)
+    raw_fixtures = resolve_fixture_placeholders(source_fixtures, refresh_completed_results=True)
     fixture_audit, fixture_audit_summary = audit_fixture_availability(
         raw_fixtures,
         start_date=start_date,
