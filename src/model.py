@@ -13,7 +13,7 @@ from src.model_policy import get_current_model_policy, model_policy_label
 from src.odds import GENERATED_ODDS_SOURCE_ALIASES, decimal_odds_or_nan
 from src.ratings import neutral_team_rating, rating_row_for_team
 from src.utils import clamp, coerce_bool, coerce_float
-from src.venue_features import altitude_log_penalty, venue_log_adjustments
+from src.venue_features import altitude_log_penalty, team_altitude_familiarity_m, venue_log_adjustments
 
 
 MAX_GOALS = 7
@@ -69,6 +69,10 @@ def environmental_adjustments(
     Team effects change each side's log-xG slightly. Wind and precipitation
     mainly reduce total-goals quality. Roof-closed venues reduce weather impact
     by 85%; altitude is still present because the stadium elevation remains.
+
+    The altitude-specific values are exposed separately for dashboard diagnostics.
+    They are not applied twice: altitude is already included inside each team's
+    total environment log adjustment.
     """
     roof_closed = coerce_bool(env.get("roof_expected_closed", 0))
     weather_multiplier = 0.15 if roof_closed else 1.0
@@ -82,21 +86,33 @@ def environmental_adjustments(
     )
     altitude_m = coerce_float(env.get("altitude_m"), 0.0)
 
-    def team_penalty(team: pd.Series) -> float:
+    home_altitude_familiarity_m = float(team_altitude_familiarity_m(home, home.get("team", "")))
+    away_altitude_familiarity_m = float(team_altitude_familiarity_m(away, away.get("team", "")))
+
+    def altitude_penalty(team: pd.Series) -> float:
+        """Altitude-specific log-xG penalty.
+
+        Teams with higher training_altitude_m, or a default high-altitude
+        familiarity profile, receive a smaller penalty at high-altitude venues.
+        """
+        return float(altitude_log_penalty(team, altitude_m, team.get("team", "")))
+
+    def climate_penalty(team: pd.Series) -> float:
+        """Temperature/humidity mismatch penalty, excluding altitude."""
         training_temp = coerce_float(team.get("training_temp_c"), 20.0)
         training_humidity = coerce_float(team.get("training_humidity_pct"), 60.0)
         temp_gap = abs(effective_temp - training_temp)
         humidity_gap = abs(effective_humidity - training_humidity) / 10.0
         heat_stress = max(effective_temp - 28.0, 0.0) * 0.35
         humid_heat = max(effective_humidity - 70.0, 0.0) / 10.0 * max(effective_temp - 25.0, 0.0) * 0.08
-        penalty = -cfg.environment_weight * weather_multiplier * (
+
+        return -cfg.environment_weight * weather_multiplier * (
             0.45 * temp_gap + 0.18 * humidity_gap + heat_stress + humid_heat
         )
 
-        # Altitude mainly matters above roughly 1000-1200 m. Teams with known
-        # high-altitude familiarity receive a smaller penalty, while venue-host
-        # advantage is handled separately in expected_goals.
-        penalty += altitude_log_penalty(team, altitude_m, team.get("team", ""))
+    def team_penalty(team: pd.Series) -> float:
+        """Total team-specific environmental log-xG adjustment."""
+        penalty = climate_penalty(team) + altitude_penalty(team)
         return clamp(penalty, -0.14, 0.04)
 
     total_drag = 0.0
@@ -107,10 +123,31 @@ def environmental_adjustments(
         total_drag += -0.000025 * (altitude_m - 1200.0)
     total_drag = clamp(total_drag, -0.16, 0.04)
 
+    home_climate_log_adj = float(climate_penalty(home))
+    away_climate_log_adj = float(climate_penalty(away))
+    home_altitude_log_adj = float(altitude_penalty(home))
+    away_altitude_log_adj = float(altitude_penalty(away))
+    home_environment_log_adj = float(team_penalty(home))
+    away_environment_log_adj = float(team_penalty(away))
+
     return {
-        "home_environment_log_adj": float(team_penalty(home)),
-        "away_environment_log_adj": float(team_penalty(away)),
+        "home_environment_log_adj": home_environment_log_adj,
+        "away_environment_log_adj": away_environment_log_adj,
         "total_environment_log_adj": float(total_drag),
+
+        # Factor-specific climate diagnostics.
+        "home_climate_log_adj": home_climate_log_adj,
+        "away_climate_log_adj": away_climate_log_adj,
+        "climate_relative_log_advantage": float(home_climate_log_adj - away_climate_log_adj),
+
+        # Factor-specific altitude diagnostics.
+        # These are already included in home/away_environment_log_adj.
+        "home_altitude_log_adj": home_altitude_log_adj,
+        "away_altitude_log_adj": away_altitude_log_adj,
+        "altitude_relative_log_advantage": float(home_altitude_log_adj - away_altitude_log_adj),
+        "home_altitude_familiarity_m": home_altitude_familiarity_m,
+        "away_altitude_familiarity_m": away_altitude_familiarity_m,
+
         "weather_impact_multiplier": float(weather_multiplier),
         "roof_expected_closed": float(roof_closed),
         "venue_temp_c": coerce_float(env.get("temp_c"), 22.0),

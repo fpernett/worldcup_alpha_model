@@ -234,30 +234,44 @@ def build_climate_factor_table(model_result: dict[str, Any], venue_environment: 
     )
     wind = coerce_float(env.get("effective_wind_kmh", env.get("wind_kmh", components.get("effective_wind_kmh"))), 0.0)
 
+    home_altitude_adj = coerce_float(components.get("home_altitude_log_adj"), 0.0)
+    away_altitude_adj = coerce_float(components.get("away_altitude_log_adj"), 0.0)
+    altitude_favours = _favours(home, away, home_altitude_adj, away_altitude_adj, threshold=0.002)
+
+    home_climate_adj = coerce_float(components.get("home_climate_log_adj"), home_adj - home_altitude_adj)
+    away_climate_adj = coerce_float(components.get("away_climate_log_adj"), away_adj - away_altitude_adj)
+    climate_favours = _favours(home, away, home_climate_adj, away_climate_adj)
+    
     rows = [
         {
             "factor": "Altitude",
             "value": altitude,
             "unit": "m",
             "category": _altitude_category(altitude),
-            "favours": favours,
-            "multiplier": _altitude_multiplier(altitude),
+            "favours": altitude_favours,
+            "multiplier": _factor_multiplier(max(home_altitude_adj, away_altitude_adj)),
+            "home_log_adj": home_altitude_adj,
+            "away_log_adj": away_altitude_adj,
         },
         {
             "factor": "Temperature",
             "value": temp,
             "unit": "C",
             "category": _temperature_category(temp),
-            "favours": favours,
+            "favours": climate_favours,
             "multiplier": _factor_multiplier(max(temp - 30.0, 0.0) * -0.0035 * weather_multiplier),
+            "home_log_adj": home_climate_adj,
+            "away_log_adj": away_climate_adj,
         },
         {
             "factor": "Humidity",
             "value": humidity,
             "unit": "%",
             "category": _humidity_category(humidity),
-            "favours": favours,
+            "favours": climate_favours,
             "multiplier": _factor_multiplier(max(humidity - 75.0, 0.0) * -0.0015 * weather_multiplier),
+            "home_log_adj": home_climate_adj,
+            "away_log_adj": away_climate_adj,
         },
         {
             "factor": "Precipitation",
@@ -266,6 +280,8 @@ def build_climate_factor_table(model_result: dict[str, Any], venue_environment: 
             "category": _precipitation_category(precipitation),
             "favours": "Lower scoring" if precipitation > 0 else "Neutral",
             "multiplier": _factor_multiplier(-0.008 * precipitation * weather_multiplier),
+            "home_log_adj": 0.0,
+            "away_log_adj": 0.0,
         },
         {
             "factor": "Wind",
@@ -274,6 +290,8 @@ def build_climate_factor_table(model_result: dict[str, Any], venue_environment: 
             "category": _wind_category(wind),
             "favours": "Lower scoring" if wind > 12 else "Neutral",
             "multiplier": _factor_multiplier(-0.0045 * max(wind - 12.0, 0.0) * weather_multiplier),
+            "home_log_adj": 0.0,
+            "away_log_adj": 0.0,
         },
     ]
     out = pd.DataFrame(rows)
@@ -366,9 +384,9 @@ def _top_label(percentile: float) -> str:
     return f"Top {top}%"
 
 
-def _favours(home: str, away: str, home_adj: float, away_adj: float) -> str:
+def _favours(home: str, away: str, home_adj: float, away_adj: float, threshold: float = 0.01) -> str:
     diff = home_adj - away_adj
-    if abs(diff) < 0.01:
+    if abs(diff) < threshold:
         return "Neutral"
     return home if diff > 0 else away
 

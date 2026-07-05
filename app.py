@@ -500,12 +500,32 @@ def climate_factor_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if out.empty:
         return out
+
     out["value"] = out.apply(
         lambda row: "" if pd.isna(row["value"]) else f"{float(row['value']):.1f} {row['unit']}",
         axis=1,
     )
-    out["multiplier"] = out["multiplier"].map(lambda x: "" if pd.isna(x) else f"x{float(x):.3f}")
-    return out[["factor", "value", "category", "favours", "multiplier"]]
+
+    out["multiplier"] = out["multiplier"].map(
+        lambda x: "" if pd.isna(x) else f"x{float(x):.3f}"
+    )
+
+    for col in ["home_log_adj", "away_log_adj"]:
+        if col not in out.columns:
+            out[col] = pd.NA
+        out[col] = out[col].map(lambda x: "" if pd.isna(x) else f"{float(x):+.3f}")
+
+    return out[
+        [
+            "factor",
+            "value",
+            "category",
+            "favours",
+            "multiplier",
+            "home_log_adj",
+            "away_log_adj",
+        ]
+    ]
 
 
 def behavior_metric_display(value: float, as_pct: bool = False) -> str:
