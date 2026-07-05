@@ -1592,7 +1592,7 @@ with st.sidebar:
     end_date,
     st.session_state["refresh_counter"],
     local_input_version(),
-    pd.Timestamp.now(tz="UTC").floor("min").isoformat(),
+    pd.Timestamp.now(tz="UTC").floor("15min").isoformat(),
     horizon_hours,
     include_past=not hide_past_kickoffs,
 )
