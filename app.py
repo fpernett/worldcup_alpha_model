@@ -1597,12 +1597,26 @@ with st.sidebar:
     include_past=not hide_past_kickoffs,
 )
 app_launch_fixture_table = read_csv_with_columns(DATA_DIR / "fixtures.csv", FIXTURE_COLUMNS)
-app_launch_results_ledger, app_launch_result_sync_diagnostics = auto_sync_completed_results_on_launch(
-    app_launch_fixture_table,
-    competition="FIFA World Cup",
-    result_ready_delay_minutes=15,
-    force_refresh=True,
-    path=RESULTS_LEDGER_PATH,
+
+app_launch_results_ledger = load_results_ledger()
+app_launch_result_sync_diagnostics = st.session_state.get(
+    "app_launch_result_sync_diagnostics",
+    {
+        "auto_sync_ran": False,
+        "status": "idle",
+        "message": "Completed-result auto-sync is idle. Use the manual refresh button to import finished results.",
+        "provider_checked": "",
+        "date_window_checked": "",
+        "provider_rows_loaded": 0,
+        "imported_rows": 0,
+        "already_present_rows": 0,
+        "unmatched_rows_count": 0,
+        "conflict_rows": 0,
+        "skipped_not_ready_rows": 0,
+        "skipped_rows": 0,
+        "results_ledger_final_row_count": len(app_launch_results_ledger),
+        "result_ready_delay_minutes": 15,
+    },
 )
 polymarket_markets = load_polymarket_inputs(
     polymarket_query,
