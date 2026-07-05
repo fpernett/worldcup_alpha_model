@@ -540,6 +540,114 @@ def behavior_delta_display(value: float) -> str:
     return f"{float(value):+.3f}"
 
 
+def behavior_market_diagnostic_display(
+    primary_result: dict,
+    behavior_result: dict | None,
+) -> pd.DataFrame:
+    if not behavior_result or not isinstance(behavior_result, dict):
+        return pd.DataFrame()
+
+    primary_probs = primary_result.get("probs", {}) if isinstance(primary_result, dict) else {}
+    behavior_probs = behavior_result.get("probs", {})
+    if not behavior_probs or not isinstance(behavior_probs, dict):
+        return pd.DataFrame()
+
+    home = str(primary_result.get("home", "Home")) if isinstance(primary_result, dict) else "Home"
+    away = str(primary_result.get("away", "Away")) if isinstance(primary_result, dict) else "Away"
+    markets = [
+        ("1X2", f"{home} win", "home_win"),
+        ("1X2", "Draw", "draw"),
+        ("1X2", f"{away} win", "away_win"),
+        ("Double Chance", f"{home} or draw", "home_or_draw"),
+        ("Double Chance", f"Draw or {away}", "draw_or_away"),
+        ("Total Goals", "Over 2.5", "over_2_5"),
+        ("Total Goals", "Under 2.5", "under_2_5"),
+        ("Total Goals", "Over 3.5", "over_3_5"),
+        ("Total Goals", "Under 3.5", "under_3_5"),
+        ("BTTS", "Yes", "btts_yes"),
+        ("BTTS", "No", "btts_no"),
+        ("Handicap", f"{home} -1.5", "home_minus_1_5"),
+        ("Handicap", f"{away} +1.5", "away_plus_1_5"),
+        ("Handicap", f"{away} -1.5", "away_minus_1_5"),
+        ("Handicap", f"{home} +1.5", "home_plus_1_5"),
+    ]
+    rows = [
+        {
+            "market": market,
+            "selection": selection,
+            "primary_probability": primary_probs.get(prob_key, pd.NA),
+            "behavior_probability": behavior_probs.get(prob_key, pd.NA),
+        }
+        for market, selection, prob_key in markets
+    ]
+    out = pd.DataFrame(rows)
+    out["primary_probability"] = pd.to_numeric(out["primary_probability"], errors="coerce")
+    out["behavior_probability"] = pd.to_numeric(out["behavior_probability"], errors="coerce")
+    out["delta_pp"] = (out["behavior_probability"] - out["primary_probability"]) * 100.0
+
+    def direction(delta_pp: Any) -> str:
+        if pd.isna(delta_pp):
+            return "Similar"
+        if float(delta_pp) >= 2.0:
+            return "Higher in behavior"
+        if float(delta_pp) <= -2.0:
+            return "Lower in behavior"
+        return "Similar"
+
+    out["direction"] = out["delta_pp"].map(direction)
+    return out[
+        [
+            "market",
+            "selection",
+            "primary_probability",
+            "behavior_probability",
+            "delta_pp",
+            "direction",
+        ]
+    ]
+
+
+def format_behavior_market_diagnostic_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "market",
+                "selection",
+                "primary_probability",
+                "behavior_probability",
+                "delta_pp",
+                "direction",
+            ]
+        )
+
+    out = df.copy()
+    for col in ["primary_probability", "behavior_probability", "delta_pp"]:
+        if col not in out.columns:
+            out[col] = pd.NA
+    out["primary_probability"] = pd.to_numeric(out["primary_probability"], errors="coerce").map(
+        lambda x: "" if pd.isna(x) else f"{100 * float(x):.1f}%"
+    )
+    out["behavior_probability"] = pd.to_numeric(out["behavior_probability"], errors="coerce").map(
+        lambda x: "" if pd.isna(x) else f"{100 * float(x):.1f}%"
+    )
+    out["delta_pp"] = pd.to_numeric(out["delta_pp"], errors="coerce").map(
+        lambda x: "" if pd.isna(x) else f"{float(x):+.1f} pp"
+    )
+    for col in ["market", "selection", "direction"]:
+        if col not in out.columns:
+            out[col] = ""
+    return out[
+        [
+            "market",
+            "selection",
+            "primary_probability",
+            "behavior_probability",
+            "delta_pp",
+            "direction",
+        ]
+    ]
+
+
 def probability_gap_pp(left: list[Any], right: list[Any]) -> float | pd.NA:
     values = []
     for left_value, right_value in zip(left, right):
@@ -2141,6 +2249,18 @@ for label in selected_labels:
             display_diag["delta"] = display_diag["delta"].map(lambda x: "" if pd.isna(x) else f"{100*float(x):+.1f} pp")
             display_dataframe(display_diag, hide_index=True, width="stretch")
             st.caption("Behavior probabilities are diagnostic-only and do not drive the primary alpha tables.")
+            behavior_market_diagnostics = behavior_market_diagnostic_display(result, behavior_diagnostic_result)
+            if not behavior_market_diagnostics.empty:
+                st.subheader("Behavior-Adjusted Market Diagnostics")
+                st.caption(
+                    "Diagnostic-only comparison. These probabilities come from the behavior-adjusted model run "
+                    "and do not drive the primary alpha tables unless model policy is changed."
+                )
+                display_dataframe(
+                    format_behavior_market_diagnostic_display(behavior_market_diagnostics),
+                    hide_index=True,
+                    width="stretch",
+                )
 
         st.subheader("Forecast Confidence")
         fc1, fc2, fc3 = st.columns(3)
@@ -2764,6 +2884,19 @@ for label in selected_labels:
                 hide_index=True,
                 width="stretch",
             )
+
+        behavior_market_diagnostics = behavior_market_diagnostic_display(result, behavior_diagnostic_result)
+        if not behavior_market_diagnostics.empty:
+            with st.expander("Behavior-adjusted market diagnostics", expanded=False):
+                st.caption(
+                    "Diagnostic-only comparison. These probabilities come from the behavior-adjusted model run "
+                    "and do not drive the primary alpha tables unless model policy is changed."
+                )
+                display_dataframe(
+                    format_behavior_market_diagnostic_display(behavior_market_diagnostics),
+                    hide_index=True,
+                    width="stretch",
+                )
 
         if not show_only_mapped:
             st.subheader("Loaded Polymarket Markets")
