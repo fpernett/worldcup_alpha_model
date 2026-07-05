@@ -102,7 +102,8 @@ def environmental_adjustments(
         training_temp = coerce_float(team.get("training_temp_c"), 20.0)
         training_humidity = coerce_float(team.get("training_humidity_pct"), 60.0)
         temp_gap = abs(effective_temp - training_temp)
-        humidity_gap = abs(effective_humidity - training_humidity) / 10.0
+        humidity_temp_multiplier = clamp((effective_temp - 18.0) / 10.0, 0.0, 1.0)
+        humidity_gap = abs(effective_humidity - training_humidity) / 10.0 * humidity_temp_multiplier
         heat_stress = max(effective_temp - 28.0, 0.0) * 0.35
         humid_heat = max(effective_humidity - 70.0, 0.0) / 10.0 * max(effective_temp - 25.0, 0.0) * 0.08
 

@@ -89,7 +89,7 @@ def altitude_log_penalty(team_row: pd.Series | dict[str, Any] | None, altitude_m
     familiar = team_altitude_familiarity_m(team_row, team_name)
     tolerated = max(1200.0, familiar)
     gap = max(altitude - tolerated, 0.0)
-    return clamp(-0.000035 * gap, -0.08, 0.0)
+    return clamp(-0.000050 * gap, -0.10, 0.0)
 
 
 def venue_log_adjustments(home_team: Any, away_team: Any, env_or_row: dict[str, Any] | pd.Series | None) -> dict[str, Any]:
