@@ -466,6 +466,102 @@ def test_results_import_prefers_regular_time_scores_for_polymarket_markets(tmp_p
     assert row["actual_result"] == "draw"
 
 
+def test_load_manual_missing_results_accepts_score_aliases_and_filters(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "manual_missing_results.csv"
+    pd.DataFrame(
+        [
+            {
+                "match_id": "m1",
+                "date_utc": "2026-06-22",
+                "competition": "FIFA World Cup",
+                "home": "Alpha",
+                "away": "Beta",
+                "home_score_90": 2,
+                "away_score_90": 1,
+            },
+            {
+                "match_id": "m2",
+                "date_utc": "2026-06-23",
+                "competition": "FIFA World Cup",
+                "home": "Gamma",
+                "away": "Delta",
+                "home_goals": "",
+                "away_goals": 0,
+            },
+        ]
+    ).to_csv(path, index=False)
+    monkeypatch.setattr(prediction_ledger, "utc_now_iso", lambda: "2026-06-24T00:00:00+00:00")
+
+    rows = prediction_ledger.load_manual_missing_results(
+        start_date="2026-06-22",
+        end_date="2026-06-22",
+        teams=["Alpha"],
+        path=path,
+    )
+
+    assert len(rows) == 1
+    row = rows.iloc[0]
+    assert row["provider"] == "manual_missing_results"
+    assert row["provider_match_id"] == "m1"
+    assert int(row["home_goals"]) == 2
+    assert int(row["away_goals_90"]) == 1
+    assert row["score_source"] == "data/manual_missing_results.csv"
+    assert row["score_semantics"] == "90-minute regular time"
+    assert row["result_source"] == "manual_verified_missing_results"
+    assert row["last_updated"] == "2026-06-24T00:00:00+00:00"
+
+
+def test_bulk_sync_uses_manual_missing_results_candidates(monkeypatch, tmp_path) -> None:
+    manual_path = tmp_path / "manual_missing_results.csv"
+    manual_candidates = pd.DataFrame(
+        [
+            {
+                "match_id": "m1",
+                "provider_match_id": "m1",
+                "provider": "manual_missing_results",
+                "date_utc": "2026-06-22",
+                "competition": "FIFA World Cup",
+                "group": "",
+                "home": "Alpha",
+                "away": "Beta",
+                "home_goals": 2,
+                "away_goals": 1,
+                "home_goals_90": 2,
+                "away_goals_90": 1,
+                "score_source": "data/manual_missing_results.csv",
+                "score_semantics": "90-minute regular time",
+                "provider_kickoff_utc": "",
+                "result_source": "manual_verified_missing_results",
+                "last_updated": "2026-06-24T00:00:00+00:00",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        prediction_ledger,
+        "load_completed_results",
+        lambda *_args, **_kwargs: (
+            pd.DataFrame(),
+            {"status": "completed_source_empty", "completed_rows_loaded": 0},
+        ),
+    )
+    monkeypatch.setattr(prediction_ledger, "load_completed_matches_for_backtest", lambda **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(prediction_ledger, "load_manual_missing_results", lambda **_kwargs: manual_candidates)
+    monkeypatch.setattr(prediction_ledger, "MANUAL_MISSING_RESULTS_PATH", manual_path)
+
+    results, diagnostics = prediction_ledger.sync_all_completed_results(
+        _bulk_fixtures().head(1),
+        path=tmp_path / "results_ledger.csv",
+        now_utc="2026-06-24T12:00:00+00:00",
+        result_ready_delay_hours=0,
+    )
+
+    assert diagnostics["manual_candidate_rows"] == 1
+    assert diagnostics["manual_path_checked"] == str(manual_path)
+    assert diagnostics["imported_or_updated_rows"] == 1
+    assert len(results) == 1
+    assert int(results.iloc[0]["home_goals"]) == 2
+
+
 def test_auto_result_import_reports_completed_source_empty(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         prediction_ledger,
@@ -849,6 +945,86 @@ def test_required_prediction_ledger_columns_exist() -> None:
     assert required.issubset(set(prediction_ledger.PREDICTION_LEDGER_COLUMNS))
 
 
+def test_select_latest_valid_snapshots_keeps_latest_duplicate_match() -> None:
+    rows = [
+        _ledger_row("m1", "2026-06-22T10:00:00+00:00", home_prob=0.40),
+        _ledger_row("m1", "2026-06-22T11:00:00+00:00", home_prob=0.60),
+        _ledger_row("m2", "2026-06-22T09:00:00+00:00", home_prob=0.55),
+    ]
+
+    selected = prediction_ledger.select_latest_valid_snapshots(pd.DataFrame(rows))
+
+    assert len(selected) == 2
+    latest = selected.loc[selected["match_id"].eq("m1")].iloc[0]
+    assert latest["prediction_id"] == "m1_2026-06-22T11:00:00+00:00"
+    assert latest["home_win_prob"] == 0.60
+    assert int(latest["n_snapshots_for_match"]) == 2
+    assert int(latest["snapshot_rank_for_match"]) == 2
+    assert bool(latest["is_latest_valid_snapshot"]) is True
+
+
+def test_select_latest_valid_snapshots_excludes_post_kickoff_when_required() -> None:
+    df = pd.DataFrame(
+        [
+            _ledger_row("m1", "2026-06-22T10:00:00+00:00", before_kickoff=True),
+            _ledger_row("m2", "2026-06-22T11:00:00+00:00", before_kickoff=False),
+        ]
+    )
+
+    selected = prediction_ledger.select_latest_valid_snapshots(df, require_pre_kickoff=True)
+
+    assert list(selected["match_id"]) == ["m1"]
+
+
+def test_select_latest_valid_snapshots_excludes_unresolved_teams_by_default() -> None:
+    df = pd.DataFrame(
+        [
+            _ledger_row("m1", "2026-06-22T10:00:00+00:00", home="Winner Group K", away="Japan"),
+            _ledger_row("m2", "2026-06-22T10:00:00+00:00", home="Brazil", away="3rd Group E/I/L"),
+            _ledger_row("m3", "2026-06-22T10:00:00+00:00", home="Argentina", away="Austria"),
+        ]
+    )
+
+    selected = prediction_ledger.select_latest_valid_snapshots(df)
+    included = prediction_ledger.select_latest_valid_snapshots(df, exclude_unresolved_teams=False)
+
+    assert list(selected["match_id"]) == ["m3"]
+    assert set(included["match_id"]) == {"m1", "m2", "m3"}
+
+
+def test_select_latest_valid_snapshots_does_not_mutate_append_only_ledger_frame() -> None:
+    df = pd.DataFrame(
+        [
+            _ledger_row("m1", "2026-06-22T10:00:00+00:00"),
+            _ledger_row("m1", "2026-06-22T11:00:00+00:00"),
+        ]
+    )
+    original_columns = list(df.columns)
+    original_len = len(df)
+
+    selected = prediction_ledger.select_latest_valid_snapshots(df)
+
+    assert len(df) == original_len
+    assert list(df.columns) == original_columns
+    assert len(selected) == 1
+
+
+def test_select_latest_valid_snapshots_is_stable_when_snapshot_times_differ() -> None:
+    df = pd.DataFrame(
+        [
+            _ledger_row("m1", "2026-06-22T12:00:00+00:00", home_prob=0.30),
+            _ledger_row("m1", "2026-06-22T10:00:00+00:00", home_prob=0.70),
+            _ledger_row("m1", "2026-06-22T11:00:00+00:00", home_prob=0.50),
+        ]
+    )
+
+    selected = prediction_ledger.select_latest_valid_snapshots(df)
+
+    assert len(selected) == 1
+    assert selected.iloc[0]["snapshot_utc"] == "2026-06-22T12:00:00+00:00"
+    assert selected.iloc[0]["home_win_prob"] == 0.30
+
+
 def test_snapshot_audit_dry_run_does_not_write(monkeypatch, tmp_path, capsys) -> None:
     import scripts.audit_prediction_snapshot as script
 
@@ -954,6 +1130,34 @@ def test_result_coverage_audit_script_writes_reports(monkeypatch, tmp_path, caps
     assert "matches missing local result: 1" in capsys.readouterr().out
     assert (reports_dir / "result_coverage_audit.csv").exists()
     assert (reports_dir / "result_coverage_audit.md").exists()
+
+
+def _ledger_row(
+    match_id: str,
+    snapshot_utc: str,
+    *,
+    home: str = "Alpha",
+    away: str = "Beta",
+    home_prob: float = 0.50,
+    before_kickoff: bool = True,
+) -> dict:
+    row = {col: "" for col in prediction_ledger.PREDICTION_LEDGER_COLUMNS}
+    row.update(
+        {
+            "prediction_id": f"{match_id}_{snapshot_utc}",
+            "snapshot_utc": snapshot_utc,
+            "match_id": match_id,
+            "kickoff_utc": "2026-06-22T18:00:00+00:00",
+            "competition": "FIFA World Cup",
+            "home": home,
+            "away": away,
+            "home_win_prob": home_prob,
+            "draw_prob": 0.25,
+            "away_win_prob": max(0.0, 0.75 - float(home_prob)),
+            "prediction_before_kickoff": before_kickoff,
+        }
+    )
+    return row
 
 
 def _fixtures(date_utc: str, time_utc: str) -> pd.DataFrame:

@@ -112,6 +112,7 @@ from src.prediction_ledger import (
     import_completed_result_for_fixture_if_ready,
     load_prediction_ledger,
     load_results_ledger,
+    select_latest_valid_snapshots,
     snapshot_predictions_for_fixtures_with_diagnostics,
     snapshot_selected_match_if_needed,
     sync_all_completed_results,
@@ -3673,6 +3674,11 @@ for label in selected_labels:
             enriched_ledger_path = DATA_DIR / "prediction_ledger_enriched.csv"
             pdf_audit_df = pd.read_csv(pdf_audit_path) if pdf_audit_path.exists() else pd.DataFrame()
             enriched_ledger_df = pd.read_csv(enriched_ledger_path) if enriched_ledger_path.exists() else ledger.assign(source_type="app_snapshot")
+            enriched_ledger_latest = select_latest_valid_snapshots(
+                enriched_ledger_df,
+                require_pre_kickoff=True,
+                exclude_unresolved_teams=True,
+            )
             source_eval = (
                 build_formal_evaluation_dataset(
                     enriched_ledger_df,
@@ -3687,7 +3693,7 @@ for label in selected_labels:
             source_calibration_status = calibration_status_from_sample_size(len(source_eval))
             st.markdown(
                 render_prediction_source_coverage(
-                    predictions_df=enriched_ledger_df,
+                    predictions_df=enriched_ledger_latest,
                     pdf_audit_df=pdf_audit_df,
                     evaluation_df=source_eval,
                     calibration_status=source_calibration_status,

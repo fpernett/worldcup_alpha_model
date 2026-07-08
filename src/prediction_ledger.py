@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, is_dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -29,6 +30,7 @@ from src.weather import load_venues
 
 PREDICTION_LEDGER_PATH = DATA_DIR / "prediction_ledger.csv"
 RESULTS_LEDGER_PATH = DATA_DIR / "results_ledger.csv"
+MANUAL_MISSING_RESULTS_PATH = DATA_DIR / "manual_missing_results.csv"
 
 PREDICTION_LEDGER_COLUMNS = [
     "prediction_id",
@@ -102,6 +104,25 @@ RESULTS_LEDGER_COLUMNS = [
 DEFAULT_AUTO_SNAPSHOT_MIN_INTERVAL_MINUTES = 60
 DEFAULT_RESULT_READY_DELAY_HOURS = 15.0 / 60.0
 RESULT_IMPORT_DATE_TOLERANCE_DAYS = 1
+SNAPSHOT_SELECTION_METADATA_COLUMNS = [
+    "n_snapshots_for_match",
+    "snapshot_rank_for_match",
+    "is_latest_valid_snapshot",
+]
+UNRESOLVED_PREDICTION_TEAM_RE = re.compile(
+    "|".join(
+        [
+            r"\bwinner\s",
+            r"\bloser\s",
+            r"\bwinner\s+group\b",
+            r"\b3rd\s+group\b",
+            r"\bthird\s+group\b",
+            r"\btbd\b",
+            r"\bto\s+be\s+determined\b",
+        ]
+    ),
+    re.IGNORECASE,
+)
 
 HOME_REGULAR_TIME_GOAL_COLUMNS = [
     "home_goals_90",
@@ -125,9 +146,185 @@ def load_prediction_ledger(path: str | Path = PREDICTION_LEDGER_PATH) -> pd.Data
     return read_csv_with_columns(Path(path), PREDICTION_LEDGER_COLUMNS)[PREDICTION_LEDGER_COLUMNS].copy()
 
 
+def select_latest_valid_snapshots(
+    df: pd.DataFrame,
+    *,
+    require_pre_kickoff: bool = True,
+    exclude_unresolved_teams: bool = True,
+    add_metadata: bool = True,
+) -> pd.DataFrame:
+    """Return one latest valid prediction snapshot per match without mutating the ledger.
+
+    The append-only ledger keeps historical snapshots. Operational reporting and
+    calibration should use this selector when they need one concrete prediction
+    per match.
+    """
+    out = df.copy() if df is not None else pd.DataFrame()
+    if out.empty:
+        return _with_empty_snapshot_metadata(out, add_metadata)
+    if "match_id" not in out.columns:
+        return _with_empty_snapshot_metadata(out.iloc[0:0].copy(), add_metadata)
+
+    original_columns = list(out.columns)
+    out["_original_order"] = range(len(out))
+    out["_snapshot_ts"] = pd.to_datetime(out.get("snapshot_utc", pd.Series(pd.NA, index=out.index)), errors="coerce", utc=True)
+
+    if require_pre_kickoff:
+        if "prediction_before_kickoff" in out.columns:
+            kickoff_ts = pd.to_datetime(out.get("kickoff_utc", pd.Series(pd.NA, index=out.index)), errors="coerce", utc=True)
+            explicit_flag = out["prediction_before_kickoff"].map(_prediction_ledger_has_value)
+            flag_true = out["prediction_before_kickoff"].map(_prediction_ledger_truthy)
+            inferred_before = out["_snapshot_ts"].notna() & kickoff_ts.notna() & (out["_snapshot_ts"] < kickoff_ts)
+            out = out.loc[flag_true | (~explicit_flag & inferred_before)].copy()
+        else:
+            kickoff_ts = pd.to_datetime(out.get("kickoff_utc", pd.Series(pd.NA, index=out.index)), errors="coerce", utc=True)
+            out = out.loc[out["_snapshot_ts"].notna() & kickoff_ts.notna() & (out["_snapshot_ts"] < kickoff_ts)].copy()
+
+    if exclude_unresolved_teams and not out.empty:
+        home_unresolved = out["home"].map(is_unresolved_prediction_team) if "home" in out.columns else pd.Series(False, index=out.index)
+        away_unresolved = out["away"].map(is_unresolved_prediction_team) if "away" in out.columns else pd.Series(False, index=out.index)
+        out = out.loc[~(home_unresolved | away_unresolved)].copy()
+
+    if out.empty:
+        return _with_empty_snapshot_metadata(out.loc[:, original_columns].copy(), add_metadata)
+
+    ordered = out.sort_values(["match_id", "_snapshot_ts", "_original_order"], na_position="last").copy()
+    ordered["n_snapshots_for_match"] = ordered.groupby("match_id")["match_id"].transform("size").astype(int)
+    ordered["snapshot_rank_for_match"] = ordered.groupby("match_id").cumcount().add(1).astype(int)
+    ordered["is_latest_valid_snapshot"] = ordered["snapshot_rank_for_match"].eq(ordered["n_snapshots_for_match"])
+    latest = ordered.loc[ordered["is_latest_valid_snapshot"]].copy()
+    keep_columns = original_columns + (SNAPSHOT_SELECTION_METADATA_COLUMNS if add_metadata else [])
+    return latest.loc[:, keep_columns].reset_index(drop=True)
+
+
+def is_unresolved_prediction_team(value: Any) -> bool:
+    if pd.isna(value):
+        return False
+    text = re.sub(r"\s+", " ", str(value).strip().lower())
+    return bool(UNRESOLVED_PREDICTION_TEAM_RE.search(f"{text} "))
+
+
+def _prediction_ledger_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or pd.isna(value):
+        return False
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def _prediction_ledger_has_value(value: Any) -> bool:
+    if value is None or pd.isna(value):
+        return False
+    return str(value).strip().lower() not in {"", "nan", "none", "null", "<na>"}
+
+
+def _with_empty_snapshot_metadata(df: pd.DataFrame, add_metadata: bool) -> pd.DataFrame:
+    out = df.copy()
+    if add_metadata:
+        for col in SNAPSHOT_SELECTION_METADATA_COLUMNS:
+            if col not in out.columns:
+                out[col] = pd.Series(dtype="object")
+    return out
+
+
 def load_results_ledger(path: str | Path = RESULTS_LEDGER_PATH) -> pd.DataFrame:
     raw = read_csv_with_columns(Path(path), RESULTS_LEDGER_COLUMNS)
     return validate_results_ledger_semantics(raw)[RESULTS_LEDGER_COLUMNS].copy()
+
+
+def load_manual_missing_results(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    teams: list[str] | None = None,
+    path: str | Path = MANUAL_MISSING_RESULTS_PATH,
+) -> pd.DataFrame:
+    """Load manually verified missing 90-minute results as match candidates."""
+    path = Path(path)
+    candidate_columns = [
+        "match_id",
+        "provider_match_id",
+        "provider",
+        "date_utc",
+        "competition",
+        "group",
+        "home",
+        "away",
+        "home_goals",
+        "away_goals",
+        "home_goals_90",
+        "away_goals_90",
+        "score_source",
+        "score_semantics",
+        "provider_kickoff_utc",
+        "result_source",
+        "last_updated",
+    ]
+    if not path.exists():
+        return pd.DataFrame(columns=candidate_columns)
+    try:
+        raw = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=candidate_columns)
+    if raw.empty:
+        return pd.DataFrame(columns=candidate_columns)
+
+    df = raw.copy()
+    for col in ["match_id", "date_utc", "competition", "group", "home", "away", "score_semantics", "provider_kickoff_utc"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+    df["home_goals"] = df.apply(lambda row: _first_present(row, HOME_REGULAR_TIME_GOAL_COLUMNS), axis=1)
+    df["away_goals"] = df.apply(lambda row: _first_present(row, AWAY_REGULAR_TIME_GOAL_COLUMNS), axis=1)
+    df = df.loc[df["home_goals"].notna() & df["away_goals"].notna()].copy()
+    df = df.loc[(df["home_goals"].astype(str).str.strip() != "") & (df["away_goals"].astype(str).str.strip() != "")].copy()
+    if df.empty:
+        return pd.DataFrame(columns=candidate_columns)
+
+    dates = pd.to_datetime(df["date_utc"], errors="coerce", utc=True)
+    if start_date:
+        start = pd.to_datetime(start_date, errors="coerce", utc=True)
+        if pd.notna(start):
+            df = df.loc[dates >= start].copy()
+            dates = dates.loc[df.index]
+    if end_date:
+        end = pd.to_datetime(end_date, errors="coerce", utc=True)
+        if pd.notna(end):
+            df = df.loc[dates < end + pd.Timedelta(days=1)].copy()
+            dates = dates.loc[df.index]
+    if teams:
+        wanted = {_team_key(team) for team in teams if str(team or "").strip()}
+        wanted.discard("")
+        if wanted:
+            df = df.loc[
+                df["home"].map(_team_key).isin(wanted)
+                | df["away"].map(_team_key).isin(wanted)
+            ].copy()
+    if df.empty:
+        return pd.DataFrame(columns=candidate_columns)
+
+    now = utc_now_iso()
+    out = pd.DataFrame(
+        {
+            "match_id": df["match_id"].fillna("").astype(str),
+            "provider_match_id": df["match_id"].fillna("").astype(str),
+            "provider": "manual_missing_results",
+            "date_utc": df["date_utc"],
+            "competition": df["competition"],
+            "group": df["group"],
+            "home": df["home"],
+            "away": df["away"],
+            "home_goals": df["home_goals"],
+            "away_goals": df["away_goals"],
+            "home_goals_90": df["home_goals"],
+            "away_goals_90": df["away_goals"],
+            "score_source": "data/manual_missing_results.csv",
+            "score_semantics": df["score_semantics"].fillna("90-minute regular time"),
+            "provider_kickoff_utc": df["provider_kickoff_utc"],
+            "result_source": "manual_verified_missing_results",
+            "last_updated": now,
+        }
+    )
+    out["score_semantics"] = out["score_semantics"].replace("", "90-minute regular time")
+    return out[candidate_columns].copy()
 
 
 def append_prediction_snapshots(
@@ -546,6 +743,8 @@ def sync_all_completed_results(
             past_fixtures=0,
             existing_rows=len(existing),
             final_rows=len(existing),
+            manual_candidate_rows=0,
+            manual_path_checked=str(MANUAL_MISSING_RESULTS_PATH),
         )
         return existing, diagnostics
 
@@ -560,7 +759,12 @@ def sync_all_completed_results(
     )
     provider_candidates = _completed_results_to_match_candidates(completed_results)
     fallback_candidates = load_completed_matches_for_backtest(start_date=start, end_date=end, teams=None)
-    provider_and_fallback = _combine_completed_candidate_frames([provider_candidates, fallback_candidates])
+    manual_candidates = load_manual_missing_results(start_date=start, end_date=end)
+    provider_and_fallback = _combine_completed_candidate_frames([
+        provider_candidates,
+        fallback_candidates,
+        manual_candidates,
+    ])
     existing_candidates = _results_ledger_to_completed_candidates(existing)
     full_candidate_pool = _combine_completed_candidate_frames([provider_and_fallback, existing_candidates])
 
@@ -643,6 +847,8 @@ def sync_all_completed_results(
         provider_rows=len(completed_results),
         provider_candidate_rows=len(provider_candidates),
         fallback_candidate_rows=len(fallback_candidates) if fallback_candidates is not None else 0,
+        manual_candidate_rows=len(manual_candidates),
+        manual_path_checked=str(MANUAL_MISSING_RESULTS_PATH),
         existing_candidate_rows=len(existing_candidates),
         date_window=f"{start} to {end}",
     )
@@ -1244,6 +1450,8 @@ def _bulk_sync_diagnostics(
     provider_rows: int = 0,
     provider_candidate_rows: int = 0,
     fallback_candidate_rows: int = 0,
+    manual_candidate_rows: int = 0,
+    manual_path_checked: str = str(MANUAL_MISSING_RESULTS_PATH),
     existing_candidate_rows: int = 0,
     date_window: str = "",
 ) -> dict[str, Any]:
@@ -1257,6 +1465,8 @@ def _bulk_sync_diagnostics(
         "completed_rows_loaded": int(provider_diagnostics.get("completed_rows_loaded", provider_rows) or provider_rows),
         "provider_candidate_rows": int(provider_candidate_rows),
         "fallback_candidate_rows": int(fallback_candidate_rows),
+        "manual_candidate_rows": int(manual_candidate_rows),
+        "manual_path_checked": str(manual_path_checked or MANUAL_MISSING_RESULTS_PATH),
         "existing_candidate_rows": int(existing_candidate_rows),
         "matched_fixtures": sum(1 for value in statuses if value in {"imported", "imported_from_existing_result", "already_present", "updated", "conflict_needs_review"}),
         "imported_or_updated_rows": imported,

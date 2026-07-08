@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.prediction_ledger import PREDICTION_LEDGER_COLUMNS, RESULTS_LEDGER_COLUMNS
+from src.prediction_ledger import PREDICTION_LEDGER_COLUMNS, RESULTS_LEDGER_COLUMNS, select_latest_valid_snapshots
 from src.utils import coerce_bool, coerce_float, today_iso
 from src.venue_features import altitude_category, classify_venue_context
 
@@ -102,6 +102,12 @@ def build_calibration_evaluation_dataset(
     latest_snapshot_only: bool = True,
 ) -> pd.DataFrame:
     predictions = _ensure_columns(prediction_ledger_df, PREDICTION_LEDGER_COLUMNS)
+    if latest_snapshot_only:
+        predictions = select_latest_valid_snapshots(
+            predictions,
+            require_pre_kickoff=only_pre_kickoff,
+            exclude_unresolved_teams=True,
+        )
     results = _ensure_columns(results_ledger_df, RESULTS_LEDGER_COLUMNS + ["actual_advancing_team", "result_semantics"])
     if predictions.empty or results.empty:
         return pd.DataFrame(columns=EVALUATION_COLUMNS)
@@ -120,14 +126,6 @@ def build_calibration_evaluation_dataset(
         merged = merged.loc[merged["prediction_before_kickoff"]].copy()
     if merged.empty:
         return pd.DataFrame(columns=EVALUATION_COLUMNS)
-
-    if latest_snapshot_only:
-        merged = (
-            merged.sort_values(["match_id", "model_version", "parameter_set_id", "_snapshot_ts"])
-            .groupby(["match_id", "model_version", "parameter_set_id"], dropna=False)
-            .tail(1)
-            .reset_index(drop=True)
-        )
 
     venue_lookup = _venue_lookup(venues_df)
     rows: list[dict[str, Any]] = []

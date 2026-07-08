@@ -31,6 +31,7 @@ from src.match_identity import (
     resolve_prediction_to_result,
     validate_results_ledger_semantics,
 )
+from src.prediction_ledger import select_latest_valid_snapshots
 from src.utils import coerce_float, today_iso
 
 
@@ -240,7 +241,12 @@ def build_formal_evaluation_dataset(
     min_calibration_sample: int = HIGH_CONFIDENCE_MIN_SAMPLE,
     latest_snapshot_only: bool = True,
 ) -> pd.DataFrame:
-    predictions = _prediction_rows(prediction_ledger_df, prediction_log_df, market_odds_df)
+    predictions = _prediction_rows(
+        prediction_ledger_df,
+        prediction_log_df,
+        market_odds_df,
+        latest_snapshot_only=latest_snapshot_only,
+    )
     results = _result_rows(results_ledger_df, completed_results_df)
     crosswalk = _evaluation_crosswalk(result_fixture_crosswalk_df, results_ledger_df, fixtures_df)
     if predictions.empty or results.empty:
@@ -301,9 +307,15 @@ def build_prediction_source_dataset(
     prediction_ledger_df: pd.DataFrame | None,
     prediction_log_df: pd.DataFrame | None = None,
     market_odds_df: pd.DataFrame | None = None,
+    latest_snapshot_only: bool = True,
 ) -> pd.DataFrame:
     """Return normalized pre-kickoff prediction rows before result joining."""
-    return _prediction_rows(prediction_ledger_df, prediction_log_df, market_odds_df)
+    return _prediction_rows(
+        prediction_ledger_df,
+        prediction_log_df,
+        market_odds_df,
+        latest_snapshot_only=latest_snapshot_only,
+    )
 
 
 def build_result_prediction_join_audit(
@@ -322,6 +334,7 @@ def build_result_prediction_join_audit(
         prediction_log_df,
         market_odds_df,
         filter_pre_kickoff=False,
+        latest_snapshot_only=False,
     )
     results = _result_rows(results_ledger_df, completed_results_df)
     crosswalk = _evaluation_crosswalk(result_fixture_crosswalk_df, results_ledger_df, fixtures_df)
@@ -963,8 +976,12 @@ def _prediction_rows(
     market_odds_df: pd.DataFrame | None,
     *,
     filter_pre_kickoff: bool = True,
+    latest_snapshot_only: bool = True,
 ) -> pd.DataFrame:
-    frames = [_prediction_rows_from_ledger(prediction_ledger_df, market_odds_df), _prediction_rows_from_prediction_log(prediction_log_df)]
+    frames = [
+        _prediction_rows_from_ledger(prediction_ledger_df, market_odds_df, latest_snapshot_only=latest_snapshot_only),
+        _prediction_rows_from_prediction_log(prediction_log_df),
+    ]
     out = pd.concat([frame for frame in frames if frame is not None and not frame.empty], ignore_index=True) if any(not frame.empty for frame in frames) else pd.DataFrame()
     if out.empty:
         return out
@@ -975,10 +992,19 @@ def _prediction_rows(
     return out.reset_index(drop=True)
 
 
-def _prediction_rows_from_ledger(prediction_ledger_df: pd.DataFrame | None, market_odds_df: pd.DataFrame | None) -> pd.DataFrame:
+def _prediction_rows_from_ledger(
+    prediction_ledger_df: pd.DataFrame | None,
+    market_odds_df: pd.DataFrame | None,
+    *,
+    latest_snapshot_only: bool = True,
+) -> pd.DataFrame:
     df = prediction_ledger_df.copy() if prediction_ledger_df is not None else pd.DataFrame()
     if df.empty:
         return pd.DataFrame()
+    if latest_snapshot_only:
+        df = select_latest_valid_snapshots(df, require_pre_kickoff=True, exclude_unresolved_teams=True)
+        if df.empty:
+            return pd.DataFrame()
     rows = []
     for _, row in df.iterrows():
         market_probs = _market_probs_from_prediction(row, market_odds_df)

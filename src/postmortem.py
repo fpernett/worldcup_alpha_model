@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.prediction_ledger import PREDICTION_LEDGER_COLUMNS, RESULTS_LEDGER_COLUMNS
+from src.prediction_ledger import PREDICTION_LEDGER_COLUMNS, RESULTS_LEDGER_COLUMNS, select_latest_valid_snapshots
 from src.utils import coerce_float
 
 
@@ -47,11 +47,24 @@ POSTMORTEM_ACTION_COLUMNS = [
 ]
 
 
-def join_predictions_to_results(prediction_ledger_df: pd.DataFrame | None, results_ledger_df: pd.DataFrame | None) -> pd.DataFrame:
+def join_predictions_to_results(
+    prediction_ledger_df: pd.DataFrame | None,
+    results_ledger_df: pd.DataFrame | None,
+    *,
+    latest_snapshot_only: bool = True,
+) -> pd.DataFrame:
     predictions = _ensure_columns(prediction_ledger_df, PREDICTION_LEDGER_COLUMNS)
     results = _ensure_columns(results_ledger_df, RESULTS_LEDGER_COLUMNS)
     if predictions.empty or results.empty:
         return pd.DataFrame(columns=[*PREDICTION_LEDGER_COLUMNS, *[f"result_{col}" for col in RESULTS_LEDGER_COLUMNS]])
+    if latest_snapshot_only:
+        predictions = select_latest_valid_snapshots(
+            predictions,
+            require_pre_kickoff=True,
+            exclude_unresolved_teams=True,
+        )
+        if predictions.empty:
+            return pd.DataFrame(columns=[*PREDICTION_LEDGER_COLUMNS, *[f"result_{col}" for col in RESULTS_LEDGER_COLUMNS]])
     joined = predictions.merge(results, on="match_id", how="inner", suffixes=("", "_result"))
     kickoff = pd.to_datetime(joined["kickoff_utc"], errors="coerce", utc=True)
     snapshot = pd.to_datetime(joined["snapshot_utc"], errors="coerce", utc=True)
