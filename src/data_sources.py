@@ -92,8 +92,10 @@ def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool 
         if cached is not None and not cached.empty:
             cached_window = _filter_fixture_window(_normalise_fixtures(cached), start, end)
             if not cached_window.empty:
-                return _with_fixture_source(
+                return _with_fixture_fallback(
                     cached_window,
+                    start,
+                    end,
                     SOURCE_CACHE,
                     "data/cache/fixtures_latest.csv",
                     cache_last_updated("fixtures_latest.csv"),
@@ -103,21 +105,28 @@ def get_upcoming_fixtures(start_date: date, end_date: date, force_refresh: bool 
     if cfg.football_configured:
         api_fixtures, error = _fetch_football_data_fixtures(start, end)
         if api_fixtures is not None and not api_fixtures.empty:
-            write_dataframe_cache(api_fixtures, "fixtures_latest.csv", "football-data.org API")
-            return _with_fixture_source(
-                _filter_fixture_window(api_fixtures, start, end),
-                SOURCE_API,
-                "football-data.org /matches",
-                utc_now_iso(),
-            )
+            api_window = _filter_fixture_window(api_fixtures, start, end)
+            if not api_window.empty:
+                write_dataframe_cache(api_fixtures, "fixtures_latest.csv", "football-data.org API")
+                return _with_fixture_fallback(
+                    api_window,
+                    start,
+                    end,
+                    SOURCE_API,
+                    "football-data.org /matches",
+                    utc_now_iso(),
+                )
+            error = "Football API returned no fixtures in the requested date window."
         warning = error or "Football API returned no usable fixtures."
 
         cached = read_dataframe_cache("fixtures_latest.csv", max_age_hours=None)
         if cached is not None and not cached.empty:
             cached_window = _filter_fixture_window(_normalise_fixtures(cached), start, end)
             if not cached_window.empty:
-                return _with_fixture_source(
+                return _with_fixture_fallback(
                     cached_window,
+                    start,
+                    end,
                     SOURCE_CACHE,
                     "data/cache/fixtures_latest.csv",
                     cache_last_updated("fixtures_latest.csv"),
@@ -202,6 +211,68 @@ def filter_future_fixtures(
         )
     filtered.attrs = attrs
     return filtered
+
+
+def _with_fixture_fallback(
+    primary: pd.DataFrame,
+    start_date: date,
+    end_date: date,
+    source_label: str,
+    source_detail: str,
+    last_updated: str,
+    warning: str | None = None,
+) -> pd.DataFrame:
+    """Supplement a partial API/cache schedule with missing local fixtures.
+
+    A fixture provider can return a valid, non-empty response that still omits
+    late knockout matches. Treating that response as complete hides curated
+    local rows, including bracket slots already resolved from cached sports
+    events. Primary rows keep precedence; local rows are added only when their
+    date, kickoff time, and team pair are not already present.
+    """
+    primary_window = _filter_fixture_window(_normalise_fixtures(primary), start_date, end_date)
+    local = _load_local_fixture_pool(start_date, end_date)
+    local_window = _filter_fixture_window(_normalise_fixtures(local), start_date, end_date)
+    if local_window.empty:
+        return _with_fixture_source(primary_window, source_label, source_detail, last_updated, warning=warning)
+
+    primary_keys = {_fixture_identity_key(row) for _, row in primary_window.iterrows()}
+    primary_ids = set(primary_window["match_id"].astype(str)) if "match_id" in primary_window else set()
+    missing_local = local_window.loc[
+        ~local_window.apply(
+            lambda row: _fixture_identity_key(row) in primary_keys
+            or str(row.get("match_id", "")) in primary_ids,
+            axis=1,
+        )
+    ].copy()
+    if missing_local.empty:
+        return _with_fixture_source(primary_window, source_label, source_detail, last_updated, warning=warning)
+
+    combined = pd.concat([primary_window, missing_local], ignore_index=True, sort=False)
+    combined = _normalise_fixtures(combined).drop_duplicates(subset=["match_id"], keep="first")
+    combined = combined.sort_values(["date_utc", "time_utc", "match_id"]).reset_index(drop=True)
+    local_detail = str(local.attrs.get("source_detail", "data/fixtures.csv") or "data/fixtures.csv")
+    warning = _combine_warnings(
+        warning or "",
+        "Primary fixture source was incomplete; local schedule fallback supplied "
+        f"{len(missing_local)} missing fixture(s).",
+        local.attrs.get("warning", ""),
+    )
+    return _with_fixture_source(
+        combined,
+        f"{source_label} + {SOURCE_LOCAL}",
+        f"{source_detail} + {local_detail}",
+        last_updated,
+        warning=warning,
+    )
+
+
+def _fixture_identity_key(row: pd.Series) -> tuple[str, str, str, str]:
+    kickoff_date = pd.to_datetime(row.get("date_utc"), errors="coerce")
+    date_key = "" if pd.isna(kickoff_date) else kickoff_date.date().isoformat()
+    time_key = str(row.get("time_utc", "") or "")[:5]
+    teams = sorted([team_name_key(row.get("home", "")), team_name_key(row.get("away", ""))])
+    return date_key, time_key, teams[0], teams[1]
 
 
 def fixture_has_unresolved_team_slot(row: pd.Series | dict[str, Any]) -> bool:

@@ -417,3 +417,84 @@ def test_get_upcoming_fixtures_falls_through_when_cache_misses_requested_window(
     assert fixtures["match_id"].tolist() == ["local_next"]
     assert fixtures.attrs.get("source_detail") == "data/fixtures.csv"
     assert "Cached fixtures did not contain the requested date window" in fixtures.attrs.get("warning", "")
+
+
+def test_get_upcoming_fixtures_supplements_partial_api_schedule_from_local_csv(tmp_path, monkeypatch):
+    data_dir = tmp_path
+    pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_101",
+                "date_utc": "2026-07-14",
+                "time_utc": "19:00",
+                "competition": "FIFA World Cup",
+                "group": "Semifinal",
+                "home": "France",
+                "away": "Spain",
+                "venue": "Dallas Stadium",
+                "city": "Arlington",
+                "country": "USA",
+            },
+            {
+                "match_id": "wc2026_102",
+                "date_utc": "2026-07-15",
+                "time_utc": "19:00",
+                "competition": "FIFA World Cup",
+                "group": "Semifinal",
+                "home": "England",
+                "away": "Argentina",
+                "venue": "Mercedes-Benz Stadium",
+                "city": "Atlanta",
+                "country": "USA",
+            },
+        ]
+    ).to_csv(data_dir / "fixtures.csv", index=False)
+
+    class Config:
+        football_configured = True
+
+    api_fixture = pd.DataFrame(
+        [
+            {
+                "match_id": "provider_only",
+                "date_utc": "2026-07-13",
+                "time_utc": "19:00",
+                "competition": "FIFA World Cup",
+                "group": "Quarterfinal",
+                "home": "Other A",
+                "away": "Other B",
+            }
+        ]
+    )
+
+    monkeypatch.setattr(data_sources, "DATA_DIR", data_dir)
+    monkeypatch.setattr(data_sources, "get_config", lambda: Config())
+    monkeypatch.setattr(data_sources, "read_dataframe_cache", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(data_sources, "write_dataframe_cache", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        data_sources,
+        "_fetch_football_data_fixtures",
+        lambda *_args, **_kwargs: (api_fixture, None),
+    )
+
+    fixtures = data_sources.get_upcoming_fixtures(
+        pd.Timestamp("2026-07-13").date(),
+        pd.Timestamp("2026-07-15").date(),
+    )
+    labels = set(fixtures["home"].astype(str) + " vs " + fixtures["away"].astype(str))
+
+    assert {"France vs Spain", "England vs Argentina"}.issubset(labels)
+    assert "Other A vs Other B" in labels
+    assert fixtures.attrs["source_label"] == "API + local CSV"
+    assert "Primary fixture source was incomplete" in fixtures.attrs["warning"]
+
+
+def test_local_knockout_slots_use_cached_semifinal_team_names():
+    fixtures = data_sources._load_local_fixture_pool(
+        pd.Timestamp("2026-07-14").date(),
+        pd.Timestamp("2026-07-15").date(),
+    )
+    semifinal = fixtures.loc[fixtures["match_id"].isin(["wc2026_101", "wc2026_102"])]
+    labels = set(semifinal["home"].astype(str) + " vs " + semifinal["away"].astype(str))
+
+    assert labels == {"France vs Spain", "England vs Argentina"}
