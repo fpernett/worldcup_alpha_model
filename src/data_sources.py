@@ -237,18 +237,25 @@ def _with_fixture_fallback(
         return _with_fixture_source(primary_window, source_label, source_detail, last_updated, warning=warning)
 
     primary_keys = {_fixture_identity_key(row) for _, row in primary_window.iterrows()}
-    primary_ids = set(primary_window["match_id"].astype(str)) if "match_id" in primary_window else set()
     missing_local = local_window.loc[
-        ~local_window.apply(
-            lambda row: _fixture_identity_key(row) in primary_keys
-            or str(row.get("match_id", "")) in primary_ids,
+        local_window.apply(
+            lambda row: _local_fixture_should_supplement(row, primary_window, primary_keys),
             axis=1,
         )
     ].copy()
     if missing_local.empty:
         return _with_fixture_source(primary_window, source_label, source_detail, last_updated, warning=warning)
 
-    combined = pd.concat([primary_window, missing_local], ignore_index=True, sort=False)
+    replacement_ids = set(
+        missing_local.loc[~missing_local.apply(fixture_has_unresolved_team_slot, axis=1), "match_id"].astype(str)
+    )
+    primary_for_merge = primary_window.loc[
+        ~(
+            primary_window["match_id"].astype(str).isin(replacement_ids)
+            & primary_window.apply(fixture_has_unresolved_team_slot, axis=1)
+        )
+    ].copy()
+    combined = pd.concat([primary_for_merge, missing_local], ignore_index=True, sort=False)
     combined = _normalise_fixtures(combined).drop_duplicates(subset=["match_id"], keep="first")
     combined = combined.sort_values(["date_utc", "time_utc", "match_id"]).reset_index(drop=True)
     local_detail = str(local.attrs.get("source_detail", "data/fixtures.csv") or "data/fixtures.csv")
@@ -273,6 +280,22 @@ def _fixture_identity_key(row: pd.Series) -> tuple[str, str, str, str]:
     time_key = str(row.get("time_utc", "") or "")[:5]
     teams = sorted([team_name_key(row.get("home", "")), team_name_key(row.get("away", ""))])
     return date_key, time_key, teams[0], teams[1]
+
+
+def _local_fixture_should_supplement(
+    local_row: pd.Series,
+    primary: pd.DataFrame,
+    primary_keys: set[tuple[str, str, str, str]],
+) -> bool:
+    if _fixture_identity_key(local_row) in primary_keys:
+        return False
+    match_id = str(local_row.get("match_id", "") or "")
+    same_id = primary.loc[primary["match_id"].astype(str) == match_id]
+    if same_id.empty:
+        return True
+    primary_is_unresolved = bool(same_id.apply(fixture_has_unresolved_team_slot, axis=1).all())
+    local_is_resolved = not fixture_has_unresolved_team_slot(local_row)
+    return primary_is_unresolved and local_is_resolved
 
 
 def fixture_has_unresolved_team_slot(row: pd.Series | dict[str, Any]) -> bool:

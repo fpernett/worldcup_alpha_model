@@ -1606,7 +1606,7 @@ with st.sidebar:
     window = st.radio(
         "Quick range",
         ["Upcoming 48 hours", "Today (UTC)", "Tomorrow (UTC)", "Next 7 days", "Custom UTC date range"],
-        index=0,
+        index=3,
     )
     horizon_hours = None
     if window == "Upcoming 48 hours":

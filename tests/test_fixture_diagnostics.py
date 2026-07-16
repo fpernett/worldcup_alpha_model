@@ -498,3 +498,73 @@ def test_local_knockout_slots_use_cached_semifinal_team_names():
     labels = set(semifinal["home"].astype(str) + " vs " + semifinal["away"].astype(str))
 
     assert labels == {"France vs Spain", "England vs Argentina"}
+
+
+def test_final_and_third_place_fixtures_have_concrete_teams():
+    fixtures = pd.read_csv("data/fixtures.csv")
+    last_two = fixtures.loc[
+        fixtures["match_id"].astype(str).isin(["wc2026_103", "wc2026_104"])
+    ].set_index("match_id")
+
+    assert last_two.loc["wc2026_103", "group"] == "Third-place match"
+    assert last_two.loc["wc2026_103", "home"] == "England"
+    assert last_two.loc["wc2026_103", "away"] == "France"
+    assert last_two.loc["wc2026_104", "group"] == "Final"
+    assert last_two.loc["wc2026_104", "home"] == "Argentina"
+    assert last_two.loc["wc2026_104", "away"] == "Spain"
+    assert not last_two["home"].map(is_unresolved_team_slot).any()
+    assert not last_two["away"].map(is_unresolved_team_slot).any()
+
+
+def test_local_resolved_fixture_replaces_cached_placeholder_with_same_match_id(tmp_path, monkeypatch):
+    data_dir = tmp_path
+    pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_104",
+                "date_utc": "2026-07-19",
+                "time_utc": "19:00",
+                "competition": "FIFA World Cup",
+                "group": "Final",
+                "home": "Argentina",
+                "away": "Spain",
+                "venue": "MetLife Stadium",
+                "city": "East Rutherford",
+                "country": "USA",
+            }
+        ]
+    ).to_csv(data_dir / "fixtures.csv", index=False)
+    cached_placeholder = pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_104",
+                "date_utc": "2026-07-19",
+                "time_utc": "19:00",
+                "competition": "FIFA World Cup",
+                "group": "Final",
+                "home": "Winner Match 101",
+                "away": "Winner Match 102",
+                "venue": "MetLife Stadium",
+                "city": "East Rutherford",
+                "country": "USA",
+            }
+        ]
+    )
+
+    class Config:
+        football_configured = True
+
+    monkeypatch.setattr(data_sources, "DATA_DIR", data_dir)
+    monkeypatch.setattr(data_sources, "get_config", lambda: Config())
+    monkeypatch.setattr(data_sources, "read_dataframe_cache", lambda *_args, **_kwargs: cached_placeholder)
+    monkeypatch.setattr(data_sources, "cache_last_updated", lambda *_args, **_kwargs: "2026-07-16T00:00:00Z")
+
+    fixtures = data_sources.get_upcoming_fixtures(
+        pd.Timestamp("2026-07-19").date(),
+        pd.Timestamp("2026-07-19").date(),
+    )
+
+    assert len(fixtures) == 1
+    assert fixtures.iloc[0]["home"] == "Argentina"
+    assert fixtures.iloc[0]["away"] == "Spain"
+    assert fixtures.attrs["source_label"] == "cache + local CSV"
