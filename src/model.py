@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
@@ -17,6 +18,17 @@ from src.venue_features import altitude_log_penalty, team_altitude_familiarity_m
 
 
 MAX_GOALS = 7
+EXTRA_TIME_MINUTES = 30.0
+REGULATION_MINUTES = 90.0
+DECISIVE_WORLD_CUP_STAGES = {
+    "final",
+    "third place match",
+    "third place playoff",
+    "third place play off",
+    "3rd place match",
+    "3rd place playoff",
+    "3rd place play off",
+}
 
 
 def fair_odds(prob: float) -> float:
@@ -41,7 +53,22 @@ class ModelConfig:
     external_prior_weight: float = 0.00
     rating_gap_to_xg_scale: float = 1.00
     goal_correlation_adjustment: float = 0.00
+    extra_time_goal_rate_multiplier: float = EXTRA_TIME_MINUTES / REGULATION_MINUTES
+    penalty_shootout_elo_scale: float = 1200.0
+    penalty_shootout_probability_floor: float = 0.40
+    penalty_shootout_probability_ceiling: float = 0.60
     max_goals: int = MAX_GOALS
+
+
+def is_decisive_world_cup_fixture(match_row: pd.Series | dict[str, Any]) -> bool:
+    """Return whether a fixture needs a winner after extra time/penalties.
+
+    This is intentionally limited to the World Cup final and third-place match.
+    Other knockout rounds keep their existing regulation-time market semantics.
+    """
+    competition = re.sub(r"[^a-z0-9]+", " ", str(match_row.get("competition", "") or "").lower()).strip()
+    stage = re.sub(r"[^a-z0-9]+", " ", str(match_row.get("group", "") or "").lower()).strip()
+    return "world cup" in competition and stage in DECISIVE_WORLD_CUP_STAGES
 
 
 def _team_row(teams: pd.DataFrame, team_name: str) -> pd.Series:
@@ -310,11 +337,85 @@ def outcome_probs(mat: pd.DataFrame) -> Dict[str, float]:
     return probs
 
 
-def market_probability_map(home_team: str, away_team: str, probs: Dict[str, float]) -> Dict[Tuple[str, str], float]:
+def decisive_winner_probabilities(
+    regulation_probs: Dict[str, float],
+    home_xg: float,
+    away_xg: float,
+    home_elo: float,
+    away_elo: float,
+    cfg: ModelConfig | None = None,
+) -> Dict[str, Any]:
+    """Estimate the eventual winner after regulation, extra time, and penalties.
+
+    Extra time uses the existing transparent Poisson framework with each team's
+    90-minute xG scaled to 30 minutes. Shootouts are treated as much closer to
+    50/50 than open play: the usual Elo logistic curve is diluted with a 1200
+    point scale and capped at 40%-60% by default.
+    """
+    cfg = cfg or ModelConfig()
+    extra_time_multiplier = max(coerce_float(cfg.extra_time_goal_rate_multiplier, 1.0 / 3.0), 0.0)
+    extra_time_home_xg = max(float(home_xg) * extra_time_multiplier, 0.0)
+    extra_time_away_xg = max(float(away_xg) * extra_time_multiplier, 0.0)
+    extra_time_matrix = score_matrix(extra_time_home_xg, extra_time_away_xg, cfg.max_goals)
+    extra_time_probs = outcome_probs(extra_time_matrix)
+
+    elo_scale = max(coerce_float(cfg.penalty_shootout_elo_scale, 1200.0), 1.0)
+    raw_home_shootout = 1.0 / (1.0 + 10.0 ** (-(float(home_elo) - float(away_elo)) / elo_scale))
+    floor = clamp(coerce_float(cfg.penalty_shootout_probability_floor, 0.40), 0.0, 0.50)
+    ceiling = clamp(coerce_float(cfg.penalty_shootout_probability_ceiling, 0.60), 0.50, 1.0)
+    home_shootout = clamp(raw_home_shootout, floor, ceiling)
+    away_shootout = 1.0 - home_shootout
+
+    regulation_draw = coerce_float(regulation_probs.get("draw"), 0.0)
+    home_in_regulation = coerce_float(regulation_probs.get("home_win"), 0.0)
+    away_in_regulation = coerce_float(regulation_probs.get("away_win"), 0.0)
+    home_in_extra_time = regulation_draw * coerce_float(extra_time_probs.get("home_win"), 0.0)
+    away_in_extra_time = regulation_draw * coerce_float(extra_time_probs.get("away_win"), 0.0)
+    reaches_shootout = regulation_draw * coerce_float(extra_time_probs.get("draw"), 0.0)
+    home_on_penalties = reaches_shootout * home_shootout
+    away_on_penalties = reaches_shootout * away_shootout
+
+    home_winner = home_in_regulation + home_in_extra_time + home_on_penalties
+    away_winner = away_in_regulation + away_in_extra_time + away_on_penalties
+    total = home_winner + away_winner
+    if total > 0:
+        home_winner /= total
+        away_winner /= total
+
     return {
-        ("1X2", home_team): probs["home_win"],
-        ("1X2", "Draw"): probs["draw"],
-        ("1X2", away_team): probs["away_win"],
+        "home_advance": float(home_winner),
+        "away_advance": float(away_winner),
+        "extra_time_home_xg": float(extra_time_home_xg),
+        "extra_time_away_xg": float(extra_time_away_xg),
+        "extra_time_probs": extra_time_probs,
+        "home_shootout_win": float(home_shootout),
+        "away_shootout_win": float(away_shootout),
+        "reaches_extra_time": float(regulation_draw),
+        "reaches_penalties": float(reaches_shootout),
+        "home_winner_paths": {
+            "regulation": float(home_in_regulation),
+            "extra_time": float(home_in_extra_time),
+            "penalties": float(home_on_penalties),
+        },
+        "away_winner_paths": {
+            "regulation": float(away_in_regulation),
+            "extra_time": float(away_in_extra_time),
+            "penalties": float(away_on_penalties),
+        },
+        "method_note": (
+            "Regulation uses the existing 90-minute model; extra time scales xG to 30 minutes; "
+            "a still-level match is resolved by a conservative Elo-informed shootout probability capped at 40%-60%."
+        ),
+    }
+
+
+def market_probability_map(
+    home_team: str,
+    away_team: str,
+    probs: Dict[str, float],
+    decisive_winner: bool = False,
+) -> Dict[Tuple[str, str], float]:
+    markets = {
         ("Total", "Under 2.5"): probs["under_2_5"],
         ("Total", "Over 2.5"): probs["over_2_5"],
         ("Total", "Under 3.5"): probs["under_3_5"],
@@ -325,9 +426,25 @@ def market_probability_map(home_team: str, away_team: str, probs: Dict[str, floa
         ("Handicap", f"{away_team} +1.5"): probs["away_plus_1_5"],
         ("Handicap", f"{away_team} -1.5"): probs["away_minus_1_5"],
         ("Handicap", f"{home_team} +1.5"): probs["home_plus_1_5"],
-        ("Double Chance", f"{home_team}/Draw"): probs["home_or_draw"],
-        ("Double Chance", f"Draw/{away_team}"): probs["draw_or_away"],
     }
+    if decisive_winner:
+        markets.update(
+            {
+                ("Winner (incl. ET/pens)", home_team): probs["home_advance"],
+                ("Winner (incl. ET/pens)", away_team): probs["away_advance"],
+            }
+        )
+    else:
+        markets.update(
+            {
+                ("1X2", home_team): probs["home_win"],
+                ("1X2", "Draw"): probs["draw"],
+                ("1X2", away_team): probs["away_win"],
+                ("Double Chance", f"{home_team}/Draw"): probs["home_or_draw"],
+                ("Double Chance", f"Draw/{away_team}"): probs["draw_or_away"],
+            }
+        )
+    return markets
 
 
 def alpha_table(
@@ -337,10 +454,11 @@ def alpha_table(
     probs: Dict[str, float],
     market_odds: pd.DataFrame,
     model_mode: str | None = None,
+    decisive_winner: bool = False,
 ) -> pd.DataFrame:
     policy = get_current_model_policy()
     active_mode = model_mode or str(policy["primary_model_mode"])
-    pmap = market_probability_map(home_team, away_team, probs)
+    pmap = market_probability_map(home_team, away_team, probs, decisive_winner=decisive_winner)
     odds_df = market_odds.copy() if market_odds is not None else pd.DataFrame()
     for col in ["match_id", "market", "selection", "odds", "source", "last_updated"]:
         if col not in odds_df.columns:
@@ -490,7 +608,37 @@ def run_match_model(
     hxg, axg, components = expected_goals(home, away, env, cfg)
     mat = score_matrix(hxg, axg, cfg.max_goals)
     probs = outcome_probs(mat)
-    alpha = alpha_table(str(match_row["match_id"]), home_name, away_name, probs, odds_df, model_mode=active_mode)
+    decisive_winner = is_decisive_world_cup_fixture(match_row)
+    decisive = None
+    if decisive_winner:
+        decisive = decisive_winner_probabilities(
+            probs,
+            hxg,
+            axg,
+            coerce_float(home.get("elo"), 1700.0),
+            coerce_float(away.get("elo"), 1700.0),
+            cfg,
+        )
+        probs["home_advance"] = decisive["home_advance"]
+        probs["away_advance"] = decisive["away_advance"]
+        components.update(
+            {
+                "decisive_winner_model": True,
+                "extra_time_goal_rate_multiplier": cfg.extra_time_goal_rate_multiplier,
+                "penalty_shootout_elo_scale": cfg.penalty_shootout_elo_scale,
+            }
+        )
+    else:
+        components["decisive_winner_model"] = False
+    alpha = alpha_table(
+        str(match_row["match_id"]),
+        home_name,
+        away_name,
+        probs,
+        odds_df,
+        model_mode=active_mode,
+        decisive_winner=decisive_winner,
+    )
     confidence = model_confidence(home, away, env, match_odds)
 
     return {
@@ -503,6 +651,8 @@ def run_match_model(
         "components": components,
         "score_matrix": mat,
         "probs": probs,
+        "decisive_winner": decisive,
+        "requires_decisive_winner": decisive_winner,
         "alpha": alpha,
         "top_scores": top_scorelines(mat, home_name, away_name),
         "home_inputs": home,

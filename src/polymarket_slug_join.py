@@ -1264,6 +1264,12 @@ def _best_market_match(model_row: pd.Series, pm: pd.DataFrame, home: str, away: 
 def _expected_outcome(model_row: pd.Series, home: str, away: str) -> tuple[str, str]:
     market = str(model_row.get("market", "") or "")
     selection = str(model_row.get("selection", "") or "")
+    if market == "Winner (incl. ET/pens)":
+        if selection.lower() == "home":
+            selection = home
+        elif selection.lower() == "away":
+            selection = away
+        return "moneyline", selection
     if market == "1X2":
         if selection.lower() == "home":
             selection = home
@@ -1331,7 +1337,7 @@ def _group_for_market_value_row(row: pd.Series, home: str = "", away: str = "") 
         return "Low Scoring"
     if market == "BTTS" and selection == "no":
         return "Low Scoring"
-    if market in {"1X2", "Double Chance", "Handicap"}:
+    if market in {"1X2", "Winner (incl. ET/pens)", "Double Chance", "Handicap"}:
         if "draw" in selection and "/" not in selection:
             return "Other Markets"
         if (

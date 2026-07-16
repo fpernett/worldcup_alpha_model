@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from src.config import DATA_DIR
+from src.model import is_decisive_world_cup_fixture
 from src.polymarket import POLYMARKET_COLUMNS
 from src.polymarket_match_search import score_polymarket_market_for_match
 from src.storage import load_csv
@@ -141,13 +142,14 @@ def explain_unmapped_polymarket_markets(match_row: pd.Series, polymarket_df: pd.
 
     home = str(match_row.get("home", ""))
     away = str(match_row.get("away", ""))
+    decisive_winner = is_decisive_world_cup_fixture(match_row)
     rows = []
     for _, market in polymarket_df.iterrows():
         text = _market_text(market)
         precision = score_polymarket_market_for_match(market, home, away, competition="World Cup")
         has_home = bool(precision.get("matched_home", False))
         has_away = bool(precision.get("matched_away", False))
-        market_type, _, _, _, _ = _infer_market_type(text, home, away)
+        market_type, _, _, _, _ = _infer_market_type(text, home, away, decisive_winner=decisive_winner)
         rows.append(
             {
                 "market_id": market.get("market_id", ""),
@@ -217,6 +219,7 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
     home = str(match_row.get("home", ""))
     away = str(match_row.get("away", ""))
     match_id = str(match_row.get("match_id", ""))
+    decisive_winner = is_decisive_world_cup_fixture(match_row)
     kickoff = pd.to_datetime(match_row.get("date_utc"), errors="coerce")
     rows = []
 
@@ -234,7 +237,12 @@ def _automatic_mappings(match_row: pd.Series, markets: pd.DataFrame) -> pd.DataF
         if _is_tournament_outright(text):
             continue
 
-        market_type, model_side, polymarket_side, type_reason, type_score = _infer_market_type(text, home, away)
+        market_type, model_side, polymarket_side, type_reason, type_score = _infer_market_type(
+            text,
+            home,
+            away,
+            decisive_winner=decisive_winner,
+        )
         has_home = bool(precision.get("matched_home", False))
         has_away = bool(precision.get("matched_away", False))
 
@@ -307,7 +315,12 @@ def _has_team(text: str, team: str) -> bool:
     return any(_contains_term(text, term) for term in _team_terms(team))
 
 
-def _infer_market_type(text: str, home: str, away: str) -> tuple[str, str, str, str, float]:
+def _infer_market_type(
+    text: str,
+    home: str,
+    away: str,
+    decisive_winner: bool = False,
+) -> tuple[str, str, str, str, float]:
     if "under 2.5" in text or "under-2.5" in text:
         return "under_2_5", "under_2_5", "YES", "under 2.5 market", 0.25
     if "over 2.5" in text or "over-2.5" in text:
@@ -322,19 +335,31 @@ def _infer_market_type(text: str, home: str, away: str) -> tuple[str, str, str, 
         return "correct_score", "correct_score", "YES", "correct score market", 0.15
     if "group" in text and ("winner" in text or "win group" in text):
         return "group_winner", "group_winner", "YES", "group winner market", 0.10
-    if "qualif" in text or "advance" in text:
-        return "qualification", "qualification", "YES", "qualification market", 0.10
-
     home_pos = _first_team_position(text, home)
     away_pos = _first_team_position(text, away)
+    if "qualif" in text or "advance" in text:
+        if decisive_winner and home_pos is not None and (away_pos is None or home_pos < away_pos):
+            return "decisive_winner_home", "home_advance", "YES", f"{home} advancement wording", 0.25
+        if decisive_winner and away_pos is not None:
+            return "decisive_winner_away", "away_advance", "YES", f"{away} advancement wording", 0.25
+        return "qualification", "qualification", "YES", "qualification market", 0.10
+
     winner_words = any(word in text for word in ["beat", "defeat", "win", "winner"])
     if winner_words and home_pos is not None and away_pos is not None:
         if home_pos < away_pos:
+            if decisive_winner:
+                return "decisive_winner_home", "home_advance", "YES", f"{home} eventual-winner side", 0.25
             return "match_winner_home", "home_win", "YES", f"{home} appears as winner side", 0.25
+        if decisive_winner:
+            return "decisive_winner_away", "away_advance", "YES", f"{away} eventual-winner side", 0.25
         return "match_winner_away", "away_win", "YES", f"{away} appears as winner side", 0.25
     if winner_words and home_pos is not None:
+        if decisive_winner:
+            return "decisive_winner_home", "home_advance", "YES", f"{home} eventual-winner wording", 0.20
         return "match_winner_home", "home_win", "YES", f"{home} winner wording", 0.20
     if winner_words and away_pos is not None:
+        if decisive_winner:
+            return "decisive_winner_away", "away_advance", "YES", f"{away} eventual-winner wording", 0.20
         return "match_winner_away", "away_win", "YES", f"{away} winner wording", 0.20
     return "other", "other", "YES", "generic related market", 0.00
 
@@ -375,6 +400,8 @@ def _is_match_level_market(market_type: str) -> bool:
     return market_type in {
         "match_winner_home",
         "match_winner_away",
+        "decisive_winner_home",
+        "decisive_winner_away",
         "draw",
         "home_not_win",
         "away_not_win",

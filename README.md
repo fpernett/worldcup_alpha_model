@@ -709,6 +709,16 @@ These caps prevent historical behavior from making implausibly large changes whe
 
 The score matrix uses an independent Poisson model. Probabilities are normalized over the displayed score grid.
 
+For the World Cup **third-place match** and **final**, the app also calculates a separate two-way eventual-winner probability:
+
+```text
+P(home wins match) = P(home wins in 90)
+                   + P(draw in 90) x P(home wins in extra time)
+                   + P(draw in 90) x P(extra time drawn) x P(home wins shootout)
+```
+
+Extra-time xG is the existing 90-minute xG scaled to 30 minutes. If the match is still level, the shootout probability uses a deliberately weak Elo adjustment, capped at 40%-60%. These eventual-winner probabilities sum to 100% and have no draw selection. Regulation-time scorelines, totals, BTTS, the 1X2 evaluation ledger, and backtesting remain unchanged and separate. The Markets and Polymarket alpha views label eventual-winner rows as **Winner (incl. ET/pens)** so they cannot be confused with regulation-time 1X2 rows.
+
 Environmental effects are deliberately conservative. Roof-closed venues reduce outdoor weather impact by 85%. Altitude mostly matters above about 1,200 meters. Wind and precipitation mainly reduce total-goals quality rather than heavily favoring one team.
 
 Environment response uses historical thresholds of hot `>= 28 C`, humid `>= 70%`, altitude `>= 1000 m`, windy `>= 20 km/h`, and rain `> 0 mm`. Samples below 5 matches are labeled low confidence. Deltas and response indices are capped so environment history cannot dominate the model.
@@ -879,10 +889,12 @@ Required result columns:
 match_id,home,away,home_goals,away_goals,result_home_win,result_draw,result_away_win,over_2_5,under_2_5,btts_yes,btts_no,completed,result_source,last_updated
 ```
 
-For Polymarket football match markets, result rows should represent regular
-time plus stoppage only. If a source exposes both 90-minute and final
+For Polymarket football regulation-time markets, result rows should represent
+regular time plus stoppage only. If a source exposes both 90-minute and final
 extra-time scores, the prediction/result ledger importer uses the 90-minute
-columns for 1X2/win, totals, BTTS, and backtesting outcomes.
+columns for 1X2, totals, BTTS, and backtesting outcomes. The World Cup final
+and third-place eventual-winner screen is a separate market family that
+explicitly includes extra time and penalties.
 
 The **Backtesting** tab can load both logs and report simple Brier score, log loss, mean alpha gap, hit rate by signal strength, and calibration buckets when completed results exist. These diagnostics are opt-in so normal match selection does not parse heavy logs or run expensive backtests automatically.
 

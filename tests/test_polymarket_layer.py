@@ -143,6 +143,88 @@ def test_dashboard_market_selection_maps_totals_and_btts() -> None:
     assert dashboard_market_selection(pd.Series({"market_type": "btts_no", "model_side": "btts_no"})) == ("BTTS", "No")
 
 
+def test_final_winner_market_maps_to_extra_time_and_penalty_probability() -> None:
+    final_match = pd.Series(
+        {
+            "match_id": "wc2026_104",
+            "date_utc": "2026-07-19",
+            "time_utc": "19:00",
+            "competition": "FIFA World Cup",
+            "group": "Final",
+            "home": "Argentina",
+            "away": "Spain",
+            "venue": "MetLife Stadium",
+        }
+    )
+    markets = pd.DataFrame(
+        [
+            {
+                "market_id": "PM-FINAL-ARG",
+                "question": "Will Argentina beat Spain in the World Cup Final?",
+                "slug": "argentina-spain-final-argentina",
+                "event_title": "World Cup Final: Argentina vs Spain",
+                "category": "Sports",
+                "start_date": "2026-07-19",
+                "end_date": "2026-07-20",
+                "active": True,
+                "closed": False,
+                "outcomes": '["Yes", "No"]',
+                "yes_price": 0.48,
+                "no_price": 0.52,
+                "liquidity": 1000,
+                "volume": 5000,
+                "source": "test",
+                "last_updated": "2026-07-16T00:00:00Z",
+            }
+        ],
+        columns=POLYMARKET_COLUMNS,
+    )
+
+    mapped = map_match_to_polymarket_markets(final_match, markets)
+
+    assert len(mapped) == 1
+    assert mapped.iloc[0]["market_type"] == "decisive_winner_home"
+    assert mapped.iloc[0]["model_side"] == "home_advance"
+
+    result = sample_model_result()
+    result.update({"match_id": "wc2026_104", "home": "Argentina", "away": "Spain"})
+    result["probs"]["home_advance"] = 0.57
+    result["probs"]["away_advance"] = 0.43
+    alpha = calculate_polymarket_alpha(result, mapped)
+
+    assert float(alpha.iloc[0]["model_probability"]) == 0.57
+    assert alpha.iloc[0]["market"] == "Winner (incl. ET/pens)"
+    assert alpha.iloc[0]["selection"] == "Argentina"
+
+
+def test_same_winner_wording_remains_regulation_time_outside_decisive_fixtures() -> None:
+    markets = pd.DataFrame(
+        [
+            {
+                "market_id": "PM1",
+                "question": "Will England beat Croatia?",
+                "slug": "england-croatia-england",
+                "event_title": "England vs Croatia World Cup match",
+                "category": "Sports",
+                "yes_price": 0.42,
+                "no_price": 0.58,
+                "liquidity": 500,
+                "volume": 1000,
+                "closed": False,
+            }
+        ],
+        columns=POLYMARKET_COLUMNS,
+    )
+    group_match = sample_match().copy()
+    group_match["competition"] = "FIFA World Cup"
+    group_match["group"] = "Group A"
+
+    mapped = map_match_to_polymarket_markets(group_match, markets)
+
+    assert mapped.iloc[0]["model_side"] == "home_win"
+    assert mapped.iloc[0]["market_type"] == "match_winner_home"
+
+
 def test_sensitivity_output_shape() -> None:
     out = run_sensitivity_analysis(sample_match(), sample_teams(), sample_venues(), pd.DataFrame(), {"Default": ModelConfig()})
     assert len(out) == 1

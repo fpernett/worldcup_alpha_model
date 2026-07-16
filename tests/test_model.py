@@ -4,7 +4,17 @@ import pandas as pd
 
 from src.climate import environment_from_venue_row
 from src.data_sources import filter_future_fixtures
-from src.model import ModelConfig, environmental_adjustments, expected_goals, fair_odds, outcome_probs, run_match_model, score_matrix
+from src.model import (
+    ModelConfig,
+    decisive_winner_probabilities,
+    environmental_adjustments,
+    expected_goals,
+    fair_odds,
+    is_decisive_world_cup_fixture,
+    outcome_probs,
+    run_match_model,
+    score_matrix,
+)
 
 
 def sample_teams() -> pd.DataFrame:
@@ -93,6 +103,48 @@ def test_fair_odds_calculation() -> None:
 def test_score_matrix_sums_to_one() -> None:
     mat = score_matrix(1.6, 0.9)
     assert abs(mat["prob"].sum() - 1.0) < 1e-9
+
+
+def test_decisive_winner_probabilities_resolve_draw_without_changing_regulation() -> None:
+    regulation = {"home_win": 0.36, "draw": 0.28, "away_win": 0.36}
+
+    decisive = decisive_winner_probabilities(regulation, 1.2, 1.2, 1800, 1800, ModelConfig())
+
+    assert abs(decisive["home_advance"] + decisive["away_advance"] - 1.0) < 1e-9
+    assert abs(decisive["home_advance"] - 0.5) < 1e-9
+    assert abs(decisive["away_advance"] - 0.5) < 1e-9
+    assert decisive["reaches_extra_time"] == regulation["draw"]
+    assert decisive["reaches_penalties"] < decisive["reaches_extra_time"]
+    assert abs(decisive["extra_time_home_xg"] - 0.4) < 1e-12
+    assert decisive["home_shootout_win"] == 0.5
+
+
+def test_only_world_cup_final_and_third_place_use_decisive_winner_model() -> None:
+    final = sample_match().copy()
+    final["group"] = "Final"
+    third_place = sample_match().copy()
+    third_place["group"] = "Third-place match"
+    semifinal = sample_match().copy()
+    semifinal["group"] = "Semifinal"
+
+    assert is_decisive_world_cup_fixture(final)
+    assert is_decisive_world_cup_fixture(third_place)
+    assert not is_decisive_world_cup_fixture(semifinal)
+
+
+def test_final_model_exposes_two_way_winner_market_and_preserves_90_minute_probs() -> None:
+    final = sample_match().copy()
+    final["match_id"] = "wc2026_104"
+    final["group"] = "Final"
+
+    result = run_match_model(final, sample_teams(), sample_venues(), pd.DataFrame(), ModelConfig())
+
+    assert result["requires_decisive_winner"] is True
+    assert abs(result["probs"]["home_win"] + result["probs"]["draw"] + result["probs"]["away_win"] - 1.0) < 1e-9
+    assert abs(result["probs"]["home_advance"] + result["probs"]["away_advance"] - 1.0) < 1e-9
+    assert set(result["alpha"].loc[result["alpha"]["market"] == "Winner (incl. ET/pens)", "selection"]) == {"Alpha", "Beta"}
+    assert not (result["alpha"]["market"] == "1X2").any()
+    assert (result["alpha"]["market"] == "Total").any()
 
 
 def test_missing_odds_do_not_crash() -> None:

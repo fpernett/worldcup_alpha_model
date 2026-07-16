@@ -415,6 +415,59 @@ def test_markets_tab_joined_moneyline_populates_market_odds_alpha_ev_source_and_
     assert diagnostics["rows_with_alpha_ev"] == 3
 
 
+def test_decisive_winner_rows_join_to_two_way_moneyline() -> None:
+    model = pd.DataFrame(
+        [
+            {"market": "Winner (incl. ET/pens)", "selection": "Argentina", "model_prob": 0.57, "fair_odds": 1 / 0.57},
+            {"market": "Winner (incl. ET/pens)", "selection": "Spain", "model_prob": 0.43, "fair_odds": 1 / 0.43},
+        ]
+    )
+    event = pd.DataFrame(
+        [
+            {
+                "event_slug": "fifwc-arg-esp-2026-07-19",
+                "event_title": "Argentina vs Spain",
+                "market_id": "FINAL-ARG",
+                "market_slug": "fifwc-arg-esp-2026-07-19-arg",
+                "question": "Will Argentina win the final?",
+                "market_title": "",
+                "market_type": "moneyline",
+                "outcomes": '["Yes","No"]',
+                "outcome_name": "Argentina",
+                "price_cents": 48.0,
+                "odds_decimal": 100 / 48,
+                "liquidity": 1000,
+                "volume": 2000,
+                "source": "test",
+                "last_updated": "2026-07-16T00:00:00Z",
+            },
+            {
+                "event_slug": "fifwc-arg-esp-2026-07-19",
+                "event_title": "Argentina vs Spain",
+                "market_id": "FINAL-ESP",
+                "market_slug": "fifwc-arg-esp-2026-07-19-esp",
+                "question": "Will Spain win the final?",
+                "market_title": "",
+                "market_type": "moneyline",
+                "outcomes": '["Yes","No"]',
+                "outcome_name": "Spain",
+                "price_cents": 52.0,
+                "odds_decimal": 100 / 52,
+                "liquidity": 1000,
+                "volume": 2000,
+                "source": "test",
+                "last_updated": "2026-07-16T00:00:00Z",
+            },
+        ]
+    )
+
+    joined = join_polymarket_prices_to_model_markets(model, event, "Argentina", "Spain")
+
+    assert joined["market_price_cents"].tolist() == [48.0, 52.0]
+    assert joined["mapping_confidence"].eq("high").all()
+    assert round(float(joined.iloc[0]["alpha_gap_cents"]), 1) == 9.0
+
+
 def test_markets_tab_uses_mapped_polymarket_alpha_when_event_join_is_empty() -> None:
     model = pd.DataFrame([{"market": "1X2", "selection": "Uruguay", "model_prob": 0.42, "fair_odds": 2.38}])
     mapped_alpha = pd.DataFrame(

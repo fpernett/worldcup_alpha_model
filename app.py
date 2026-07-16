@@ -555,12 +555,20 @@ def behavior_market_diagnostic_display(
 
     home = str(primary_result.get("home", "Home")) if isinstance(primary_result, dict) else "Home"
     away = str(primary_result.get("away", "Away")) if isinstance(primary_result, dict) else "Away"
-    markets = [
-        ("1X2", f"{home} win", "home_win"),
-        ("1X2", "Draw", "draw"),
-        ("1X2", f"{away} win", "away_win"),
-        ("Double Chance", f"{home} or draw", "home_or_draw"),
-        ("Double Chance", f"Draw or {away}", "draw_or_away"),
+    if bool(primary_result.get("requires_decisive_winner", False)):
+        result_markets = [
+            ("Winner (incl. ET/pens)", home, "home_advance"),
+            ("Winner (incl. ET/pens)", away, "away_advance"),
+        ]
+    else:
+        result_markets = [
+            ("1X2", f"{home} win", "home_win"),
+            ("1X2", "Draw", "draw"),
+            ("1X2", f"{away} win", "away_win"),
+            ("Double Chance", f"{home} or draw", "home_or_draw"),
+            ("Double Chance", f"Draw or {away}", "draw_or_away"),
+        ]
+    markets = result_markets + [
         ("Total Goals", "Over 2.5", "over_2_5"),
         ("Total Goals", "Under 2.5", "under_2_5"),
         ("Total Goals", "Over 3.5", "over_3_5"),
@@ -2214,15 +2222,61 @@ for label in selected_labels:
 
     with tabs[0]:
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric(f"{result['home']} win", pct(probs["home_win"]), f"fair {fair_odds(probs['home_win']):.2f}")
-        c2.metric("Draw", pct(probs["draw"]), f"fair {fair_odds(probs['draw']):.2f}")
-        c3.metric(f"{result['away']} win", pct(probs["away_win"]), f"fair {fair_odds(probs['away_win']):.2f}")
-        c4.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
+        if result.get("requires_decisive_winner"):
+            c1.metric(
+                f"{result['home']} wins match",
+                pct(probs["home_advance"]),
+                f"fair {fair_odds(probs['home_advance']):.2f}",
+            )
+            c2.metric(
+                f"{result['away']} wins match",
+                pct(probs["away_advance"]),
+                f"fair {fair_odds(probs['away_advance']):.2f}",
+            )
+            c3.metric("Reaches extra time", pct(probs["draw"]))
+            c4.metric("Expected goals (90 min)", f"{result['hxg']:.2f} - {result['axg']:.2f}")
+            decisive = result.get("decisive_winner") or {}
+            st.caption(
+                "Winner probabilities include regulation, 30 minutes of extra time, and penalties if still level. "
+                f"Estimated shootout probability conditional on penalties: {result['home']} "
+                f"{pct(decisive.get('home_shootout_win', 0.5))}, {result['away']} "
+                f"{pct(decisive.get('away_shootout_win', 0.5))}. Regulation-time totals, BTTS, scorelines, and backtesting remain separate."
+            )
+            with st.expander("Regulation-time 1X2 probabilities", expanded=False):
+                display_dataframe(
+                    pd.DataFrame(
+                        [
+                            {"outcome": f"{result['home']} win", "probability": pct(probs["home_win"])},
+                            {"outcome": "Draw after 90 minutes", "probability": pct(probs["draw"])},
+                            {"outcome": f"{result['away']} win", "probability": pct(probs["away_win"])},
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+        else:
+            c1.metric(f"{result['home']} win", pct(probs["home_win"]), f"fair {fair_odds(probs['home_win']):.2f}")
+            c2.metric("Draw", pct(probs["draw"]), f"fair {fair_odds(probs['draw']):.2f}")
+            c3.metric(f"{result['away']} win", pct(probs["away_win"]), f"fair {fair_odds(probs['away_win']):.2f}")
+            c4.metric("Expected goals", f"{result['hxg']:.2f} - {result['axg']:.2f}")
 
         if behavior_diagnostic_result:
             behavior_probs = behavior_diagnostic_result.get("probs", {})
-            diagnostic_summary = pd.DataFrame(
-                [
+            if result.get("requires_decisive_winner"):
+                diagnostic_rows = [
+                    {
+                        "outcome": f"{result['home']} wins match (incl. ET/pens)",
+                        "primary_probability": probs["home_advance"],
+                        "behavior_diagnostic_probability": behavior_probs.get("home_advance", pd.NA),
+                    },
+                    {
+                        "outcome": f"{result['away']} wins match (incl. ET/pens)",
+                        "primary_probability": probs["away_advance"],
+                        "behavior_diagnostic_probability": behavior_probs.get("away_advance", pd.NA),
+                    },
+                ]
+            else:
+                diagnostic_rows = [
                     {
                         "outcome": f"{result['home']} win",
                         "primary_probability": probs["home_win"],
@@ -2239,7 +2293,7 @@ for label in selected_labels:
                         "behavior_diagnostic_probability": behavior_probs.get("away_win", pd.NA),
                     },
                 ]
-            )
+            diagnostic_summary = pd.DataFrame(diagnostic_rows)
             diagnostic_summary["delta"] = (
                 pd.to_numeric(diagnostic_summary["behavior_diagnostic_probability"], errors="coerce")
                 - pd.to_numeric(diagnostic_summary["primary_probability"], errors="coerce")
@@ -2399,6 +2453,8 @@ for label in selected_labels:
             )
         with g2:
             st.plotly_chart(create_match_outcome_donut(probs, result["home"], result["away"]), width="stretch")
+            if result.get("requires_decisive_winner"):
+                st.caption("This donut is the regulation-time 1X2 distribution; eventual winner probabilities are shown in Summary and Markets.")
 
         st.subheader("League Context")
         display_dataframe(league_context_display(league_context), hide_index=True, width="stretch")
@@ -2497,7 +2553,10 @@ for label in selected_labels:
         display_dataframe(scores[["label", "probability"]], hide_index=True, width="stretch")
 
     with tabs[3]:
-        st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
+        if result.get("requires_decisive_winner"):
+            st.subheader("Winner Including Extra Time/Penalties, Regulation-Time Goal Markets, and Market Alpha")
+        else:
+            st.subheader("1X2, Totals, BTTS, Handicap, and Market Alpha")
         diag_cols = st.columns(6)
         diag_cols[0].metric("Resolved slug", markets_tab_diagnostics.get("resolved_slug", "") or "unresolved")
         diag_cols[1].metric("Event markets loaded", markets_tab_diagnostics.get("event_markets_loaded", 0))
@@ -2928,7 +2987,8 @@ for label in selected_labels:
         )
         st.caption(
             "Selected upcoming matches are auto-saved to data/prediction_ledger.csv with a 60-minute duplicate guard. "
-            "Completed results are checked automatically after kickoff + 15 minutes; Polymarket match outcomes use regular time plus stoppage, not extra time or penalties."
+            "Completed results are checked automatically after kickoff + 15 minutes. The evaluation ledger keeps regulation-time 1X2 outcomes separate; "
+            "for the World Cup final and third-place match, explicit winner markets use the separate extra-time/penalty model."
         )
         st.write("Bulk completed-results sync summary")
         display_dataframe(

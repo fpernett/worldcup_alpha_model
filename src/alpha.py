@@ -138,6 +138,10 @@ def dashboard_market_selection(mapping: pd.Series) -> tuple[str, str]:
     home = str(mapping.get("home", "") or "").strip()
     away = str(mapping.get("away", "") or "").strip()
 
+    if model_side in {"home_advance", "home_winner_including_extra_time"} or market_type == "decisive_winner_home":
+        return "Winner (incl. ET/pens)", home or "Home"
+    if model_side in {"away_advance", "away_winner_including_extra_time"} or market_type == "decisive_winner_away":
+        return "Winner (incl. ET/pens)", away or "Away"
     if model_side in {"home_win", "match_winner_home"} or market_type == "match_winner_home":
         return "1X2", home or "Home"
     if model_side in {"away_win", "match_winner_away"} or market_type == "match_winner_away":
@@ -159,6 +163,12 @@ def model_probability_for_side(probs: dict[str, Any], model_side: str, market_ty
     side = str(model_side or "").lower()
     market_type = str(market_type or "").lower()
     mapping = {
+        "home_advance": "home_advance",
+        "home_winner_including_extra_time": "home_advance",
+        "decisive_winner_home": "home_advance",
+        "away_advance": "away_advance",
+        "away_winner_including_extra_time": "away_advance",
+        "decisive_winner_away": "away_advance",
         "home_win": "home_win",
         "match_winner_home": "home_win",
         "away_win": "away_win",
