@@ -647,7 +647,17 @@ def _supplemental_fixture_id(row: pd.Series) -> str:
 
 def _fixture_dedupe_key(row: pd.Series) -> str:
     date_key = str(pd.to_datetime(row.get("date_utc"), errors="coerce").date())
-    return "|".join([date_key, team_name_key(row.get("home", "")), team_name_key(row.get("away", ""))])
+    # Fixture providers can disagree about which team is listed first. The
+    # kickoff and unordered team pair identify the scheduled match; preserving
+    # the source-priority ordering below lets the curated fixture retain its
+    # canonical home/away orientation and venue metadata.
+    team_keys = sorted(
+        [
+            team_name_key(row.get("home", "")),
+            team_name_key(row.get("away", "")),
+        ]
+    )
+    return "|".join([date_key, *team_keys])
 
 
 def _slug_part(value: Any) -> str:

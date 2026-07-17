@@ -278,6 +278,61 @@ def test_get_upcoming_fixtures_uses_cached_polymarket_events_for_unresolved_slot
     assert "read-only fixture discovery" in fixtures.attrs.get("warning", "")
 
 
+def test_get_upcoming_fixtures_deduplicates_reversed_polymarket_fixture(tmp_path, monkeypatch):
+    data_dir = tmp_path
+    pd.DataFrame(
+        [
+            {
+                "match_id": "wc2026_103",
+                "date_utc": "2026-07-18",
+                "time_utc": "21:00",
+                "competition": "FIFA World Cup",
+                "group": "Third-place match",
+                "home": "England",
+                "away": "France",
+                "venue": "Hard Rock Stadium",
+                "city": "Miami Gardens",
+                "country": "USA",
+            }
+        ]
+    ).to_csv(data_dir / "fixtures.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "event_id": "event_103",
+                "event_slug": "fifwc-fra-eng-2026-07-18",
+                "event_title": "France vs. England",
+                "event_category": "FIFA World Cup",
+                "event_start_date": "2026-07-17T21:00:00Z",
+                "event_end_date": "2026-07-18T21:00:00Z",
+                "event_active": 1,
+                "event_closed": 0,
+                "raw_event_json": "",
+                "source": "API",
+                "last_updated": "2026-07-17T07:00:00+00:00",
+            }
+        ]
+    ).to_csv(data_dir / "polymarket_events_cache.csv", index=False)
+
+    class Config:
+        football_configured = False
+
+    monkeypatch.setattr(data_sources, "DATA_DIR", data_dir)
+    monkeypatch.setattr(data_sources, "get_config", lambda: Config())
+
+    fixtures = data_sources.get_upcoming_fixtures(
+        pd.Timestamp("2026-07-18").date(),
+        pd.Timestamp("2026-07-18").date(),
+    )
+
+    assert len(fixtures) == 1
+    row = fixtures.iloc[0]
+    assert row["match_id"] == "wc2026_103"
+    assert row["home"] == "England"
+    assert row["away"] == "France"
+    assert row["venue"] == "Hard Rock Stadium"
+
+
 def test_get_upcoming_fixtures_uses_live_polymarket_events_when_local_window_is_unresolved(tmp_path, monkeypatch):
     data_dir = tmp_path
     pd.DataFrame(
